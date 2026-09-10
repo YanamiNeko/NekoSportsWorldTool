@@ -1,6 +1,6 @@
 [package]
 name = "nekosportsworldtool"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "NekoSportsWorldTool：运动世界校园版协议自动化工具（GUI + CLI）"
 license = "CC-BY-NC-4.0"

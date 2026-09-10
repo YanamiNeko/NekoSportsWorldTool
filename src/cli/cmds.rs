@@ -166,7 +166,7 @@ fn cmd_ai(rest: &[&str]) -> i32 {
                 .and_then(|v| v.parse::<i64>().ok())
                 .unwrap_or(1)
                 .clamp(1, 30);
-            AiMode::Task { score_ms: minutes * 60_000, task_id: 0 }
+            AiMode::Minutes { minutes }
         }
     };
     let mut client = match make_client() {

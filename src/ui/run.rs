@@ -43,27 +43,68 @@ pub struct RunPage {
     pub hour: i64,
     pub minute: i64,
     pub face_check: bool,
+    /// 预计算方案：参数变更时重抽样，提交直接使用
+    pub plan: Option<RunPlan>,
+}
+
+/// 一次提交的确定方案（进入页面/参数变更时抽样生成）。
+#[derive(Debug, Clone)]
+pub struct RunPlan {
+    pub dist_min: f32,
+    pub dist_max: f32,
+    pub pace_min: f32,
+    pub pace_max: f32,
+    pub start_mode: usize,
+    pub days_ago: i64,
+    pub hour: i64,
+    pub minute: i64,
+    /// 公里
+    pub dist: f64,
+    /// 秒/km
+    pub pace: f32,
+    /// 秒
+    pub dur: i64,
+    pub start_ms: i64,
 }
 
 impl RunPage {
-    /// 计算开始时刻；返回 (start_ms, 展示文本)。
-    pub fn start_ms_and_label(&self) -> (i64, String) {
-        let now = crate::crypto::envelope::now_ms();
-        match self.start_mode {
-            0 => {
-                let ms = now - 30 * 60_000 - (rand::random::<f64>() * 270.0 * 60_000.0) as i64;
-                (ms, "随机（30-300 分钟前）".into())
-            }
-            _ => {
-                let ms = specified_time(self.days_ago, self.hour, self.minute);
-                let label = chrono::Local
-                    .timestamp_millis_opt(ms)
-                    .single()
-                    .map(|t| t.format("%m-%d %H:%M").to_string())
-                    .unwrap_or_default();
-                (ms, format!("指定 {label}"))
-            }
-        }
+    fn matches(&self, p: &RunPlan) -> bool {
+        p.dist_min == self.dist_min
+            && p.dist_max == self.dist_max
+            && p.pace_min == self.pace_min
+            && p.pace_max == self.pace_max
+            && p.start_mode == self.start_mode
+            && (self.start_mode == 0 || (p.days_ago == self.days_ago && p.hour == self.hour && p.minute == self.minute))
+    }
+
+    /// 参数变更或手动刷新时抽样一份确定方案。
+    pub fn regen_plan(&mut self) {
+        let (lo, hi) = (self.dist_min.min(self.dist_max), self.dist_min.max(self.dist_max));
+        let (plo, phi) = (self.pace_min.min(self.pace_max), self.pace_min.max(self.pace_max));
+        let r = rand::random::<f32>();
+        let pace = plo + (phi - plo) * r;
+        let dist = (lo + (hi - lo) * rand::random::<f32>()) as f64;
+        let dur = (dist * pace as f64).round() as i64;
+        let start_ms = match self.start_mode {
+            0 => crate::crypto::envelope::now_ms()
+                - 30 * 60_000
+                - (rand::random::<f64>() * 270.0 * 60_000.0) as i64,
+            _ => specified_time(self.days_ago, self.hour, self.minute),
+        };
+        self.plan = Some(RunPlan {
+            dist_min: self.dist_min,
+            dist_max: self.dist_max,
+            pace_min: self.pace_min,
+            pace_max: self.pace_max,
+            start_mode: self.start_mode,
+            days_ago: self.days_ago,
+            hour: self.hour,
+            minute: self.minute,
+            dist,
+            pace,
+            dur,
+            start_ms,
+        });
     }
 }
 
@@ -125,20 +166,40 @@ impl App {
         }
 
         ui.add_space(8.0);
-        let page = &self.run_page;
         let fmt_pace = |s: f32| format!("{}:{:02}", (s / 60.0) as i64, (s as i64) % 60);
-        let (lo, hi) = (page.dist_min.min(page.dist_max), page.dist_min.max(page.dist_max));
-        let (plo, phi) = (page.pace_min.min(page.pace_max), page.pace_min.max(page.pace_max));
-        let t_lo = (lo * plo / 60.0).round() as i64;
-        let t_hi = (hi * phi / 60.0).round() as i64;
-        let (_, start_label) = page.start_ms_and_label();
-        ui.colored_label(
-            theme::plain(),
-            format!(
-                "预计：距离 {:.2}~{:.2} km · 配速 {}~{}/km · 时长约 {}~{} 分钟 · 开始 {}",
-                lo, hi, fmt_pace(plo), fmt_pace(phi), t_lo, t_hi, start_label
-            ),
-        );
+        let fmt_dur = |s: i64| {
+            if s >= 3600 {
+                format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
+            } else {
+                format!("{}:{:02}", s / 60, s % 60)
+            }
+        };
+        // 参数变更时重抽样；显示本次提交的确定方案
+        if self.run_page.plan.as_ref().map(|p| self.run_page.matches(p)) != Some(true) {
+            self.run_page.regen_plan();
+        }
+        let plan_label = match &self.run_page.plan {
+            Some(p) => {
+                let start = chrono::Local
+                    .timestamp_millis_opt(p.start_ms)
+                    .single()
+                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default();
+                let (dist, pace, dur) = (p.dist, p.pace, p.dur);
+                format!(
+                    "本次方案：距离 {dist:.2} km · 配速 {}/km · 用时 {} · 开始 {start}",
+                    fmt_pace(pace),
+                    fmt_dur(dur)
+                )
+            }
+            None => String::new(),
+        };
+        ui.horizontal(|ui| {
+            ui.colored_label(theme::plain(), plan_label);
+            if ui.small_button("换一版").clicked() {
+                self.run_page.regen_plan();
+            }
+        });
 
         ui.add_space(8.0);
         let enabled = !self.run_busy && self.session.is_some();
@@ -155,15 +216,16 @@ impl App {
 
     fn start_run(&mut self) {
         let page = &mut self.run_page;
-        let (lo, hi) = (page.dist_min.min(page.dist_max), page.dist_min.max(page.dist_max));
-        let (plo, phi) = (page.pace_min.min(page.pace_max), page.pace_min.max(page.pace_max));
-        let dist = (lo + (hi - lo) * rand::random::<f32>()) as f64 * 1000.0; // 米
-        let pace = plo + (phi - plo) * rand::random::<f32>();
-        let dur = (dist as f32 / 1000.0 * pace) as i64; // 秒
-        let start_mode = page.start_mode;
-        let days_ago = page.days_ago;
-        let hour = page.hour;
-        let minute = page.minute;
+        // 参数变更时确保方案最新；提交直接使用预计算值
+        if page.plan.as_ref().map(|p| page.matches(p)) != Some(true) {
+            page.regen_plan();
+        }
+        let plan = match page.plan.clone() {
+            Some(p) => p,
+            None => return,
+        };
+        let (dist, dur) = (plan.dist * 1000.0, plan.dur); // 米
+        let start_ms = plan.start_ms;
         let face_check = if page.face_check { 1 } else { 0 };
         self.config.dist_min = page.dist_min;
         self.config.dist_max = page.dist_max;
@@ -184,11 +246,6 @@ impl App {
         self.status = "跑步提交中…".into();
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
-            let now = crate::crypto::envelope::now_ms();
-            let start_ms = match start_mode {
-                0 => now - 30 * 60_000 - (rand::random::<f64>() * 270.0 * 60_000.0) as i64,
-                _ => specified_time(days_ago, hour, minute),
-            };
             let seed = (crate::crypto::envelope::now_ms() % 2_147_483_647) as u64;
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
             let params = crate::api::flow::RunParams { dist, dur, start_ms, face_check, seed };

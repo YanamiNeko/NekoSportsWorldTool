@@ -48,57 +48,87 @@ fn fetch_list_remote(client: &mut ApiClient) -> Result<Vec<AiSport>, String> {
         .collect())
 }
 
-/// 提交模式。
+/// 提交意图（具体字段按项目自身类型换算，见 upload）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AiMode {
-    /// 按分钟：score = 用时（毫秒），1-30 分钟
-    Task { score_ms: i64, task_id: i64 },
-    /// 按次：score = 个数，5-1000（步长 5）
+    /// 按分钟：1-30
+    Minutes { minutes: i64 },
+    /// 按次数：个数
     Count { reps: i64 },
 }
 
-/// 提交 AI 运动记录（task/count 双模式）。
-/// at=None 时按自然时序（提交时刻减去用时）；补签传入当天目标时刻。
+/// 项目详情（GET ai/info）：type 决定成绩语义，number 为定次类目标个数。
+#[derive(Debug, Clone, Copy)]
+pub struct SportInfo {
+    /// 1=计次类（score=个数）；2=计时类（score=用时毫秒）
+    pub sport_type: i64,
+    #[allow(dead_code)]
+    pub number: i64,
+}
+
+/// 查询项目详情；失败按计次类处理。
+pub fn fetch_info(client: &mut ApiClient, sport_id: i64) -> Result<SportInfo, String> {
+    let path = format!("/api/v1/sport/ai/info?sportId={sport_id}");
+    let biz = client.call("GET", &path, "{}", &[])?;
+    let data = parse_data_field(&biz);
+    Ok(SportInfo {
+        sport_type: data.get("type").and_then(|v| v.as_i64()).unwrap_or(1),
+        number: data.get("number").and_then(|v| v.as_i64()).unwrap_or(0),
+    })
+}
+
+/// 提交 AI 运动记录。字段语义对照真人记录：
+/// 计次类（type=1）score=个数、speed=0、消耗=个数×0.07；
+/// 计时类（type=2）score=用时毫秒、speed=每分钟个数、消耗=秒×0.2；坐位体前屈消耗为 0。
 pub fn upload(client: &mut ApiClient, sport_id: i64, mode: AiMode, at: Option<i64>) -> Result<Value, String> {
     let now = crate::crypto::envelope::now_ms();
-    let body = match mode {
-        AiMode::Task { score_ms, task_id } => {
-            // task：score=用时毫秒；speed=每分钟个数(50 个/时长)；consume≈0.2kcal/秒
-            let speed = (50.0 * 60_000.0 / score_ms as f64).round() as i64;
-            let consume = (score_ms as f64 / 1000.0 * 0.2 * 10.0).round() / 10.0;
-            json!({
-                "sportId": sport_id,
-                "type": 2,
-                "score": score_ms.to_string(),
-                "timeConsume": score_ms,
-                "speed": speed.to_string(),
-                "consume": format!("{consume:.1}"),
-                "scoreDate": at.unwrap_or(now - score_ms),
-                "uuid": uuid::Uuid::new_v4().to_string(),
-                "taskId": task_id,
-            })
+    let info = fetch_info(client, sport_id).unwrap_or(SportInfo { sport_type: 1, number: 0 });
+    let jitter = 0.9 + rand::random::<f64>() * 0.2; // ±10%
+
+    // 计次类持续频率（个/分）与计时类单次耗时（毫秒）——取自真人记录区间
+    const REPS_PER_MIN: f64 = 90.0;
+    const MS_PER_REP: f64 = 240.0;
+
+    let (body_type, score, time_consume, speed, consume) = match (info.sport_type, mode) {
+        // 计时类：score=用时；个数仅用于推算 speed/时长
+        (2, AiMode::Minutes { minutes }) => {
+            let ms = minutes * 60_000;
+            let reps = (REPS_PER_MIN * minutes as f64 * jitter).round() as i64;
+            (2, ms.to_string(), ms, (reps as f64 / (ms as f64 / 1000.0) * 60.0).round() as i64, (ms / 1000) as f64 * 0.2)
         }
-        AiMode::Count { reps } => {
-            // count：score=个数；用时 ~0.7s/个 起步 30s
-            let time_consume = (reps * 700).max(30_000);
-            let speed = (reps as f64 / (time_consume as f64 / 1000.0) * 60.0).round() as i64;
-            let consume = (reps as f64 * 0.2 * 10.0).round() / 10.0;
-            json!({
-                "sportId": sport_id,
-                "type": 1,
-                "score": reps.to_string(),
-                "timeConsume": time_consume,
-                "speed": speed.to_string(),
-                "consume": format!("{consume:.1}"),
-                "scoreDate": at.unwrap_or(now - time_consume),
-                "uuid": uuid::Uuid::new_v4().to_string(),
-                "taskId": 0,
-            })
+        (2, AiMode::Count { reps }) => {
+            let ms = ((reps as f64 * MS_PER_REP * jitter) as i64).max(30_000);
+            (2, ms.to_string(), ms, (reps as f64 / (ms as f64 / 1000.0) * 60.0).round() as i64, (ms / 1000) as f64 * 0.2)
         }
-    }
-    .to_string();
-    let biz = client.call("POST", AI_UPLOAD_PATH, &body, &[])?;
-    Ok(biz)
+        // 计次类：score=个数；speed 固定 0
+        (_, AiMode::Minutes { minutes }) => {
+            let reps = (REPS_PER_MIN * minutes as f64 * jitter).round() as i64;
+            let ms = minutes * 60_000;
+            (1, reps.to_string(), ms, 0, reps as f64 * 0.07)
+        }
+        (_, AiMode::Count { reps }) => {
+            let ms = (((reps as f64 / REPS_PER_MIN) * 60_000.0) as i64).max(30_000);
+            (1, reps.to_string(), ms, 0, reps as f64 * 0.07)
+        }
+    };
+    let consume = if sport_id == 16 {
+        "0".to_string() // 坐位体前屈：无消耗
+    } else {
+        format!("{consume:.1}")
+    };
+    let score_date = at.unwrap_or(now - time_consume);
+    let body = json!({
+        "sportId": sport_id,
+        "type": body_type,
+        "score": score,
+        "timeConsume": time_consume,
+        "speed": speed.to_string(),
+        "consume": consume,
+        "scoreDate": score_date,
+        "uuid": uuid::Uuid::new_v4().to_string(),
+        "taskId": 0,
+    });
+    client.call("POST", AI_UPLOAD_PATH, &body.to_string(), &[])
 }
 
 /// AI 记录（v66 按天分组：list[]{scoreDate, frequency, recordInfos[]}）。

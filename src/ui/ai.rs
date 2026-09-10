@@ -166,11 +166,11 @@ impl App {
         }
     }
 
-    /// 当前模式（分钟 → 毫秒转换）。
+    /// 当前提交意图。
     fn ai_mode(&mut self) -> AiMode {
         if self.ai_page.mode == 0 {
-            let ms = self.config.ai_minutes.clamp(1, 30) * 60_000;
-            AiMode::Task { score_ms: ms, task_id: 0 }
+            let minutes = self.config.ai_minutes.clamp(1, 30);
+            AiMode::Minutes { minutes }
         } else {
             let reps = (self.config.ai_reps.clamp(5, 1000) / 5) * 5;
             AiMode::Count { reps }
@@ -284,22 +284,23 @@ impl App {
 }
 
 fn ai_display(mode: AiMode) -> (&'static str, String, f64, i64, f64) {
+    // 展示预估：与提交侧同源参数（计次 90 个/分，计时 240 毫秒/个）
     match mode {
-        AiMode::Task { score_ms, .. } => (
+        AiMode::Minutes { minutes } => (
             "按分钟",
-            format!("{} 分钟", score_ms / 60_000),
-            score_ms as f64 / 1000.0,
-            (50.0 * 60_000.0 / score_ms as f64).round() as i64,
-            score_ms as f64 / 1000.0 * 0.2,
+            format!("{minutes} 分钟"),
+            (minutes * 60) as f64,
+            (90.0 * minutes as f64).round() as i64,
+            (minutes * 60) as f64 * 0.2,
         ),
         AiMode::Count { reps } => {
-            let t = (reps * 700).max(30_000);
+            let secs = ((reps as f64 / 90.0) * 60.0).round().max(30.0);
             (
                 "按次",
-                format!("{} 个", reps),
-                t as f64 / 1000.0,
-                (reps as f64 / (t as f64 / 1000.0) * 60.0).round() as i64,
-                reps as f64 * 0.2,
+                format!("{reps} 个"),
+                secs,
+                (reps as f64 / secs * 60.0).round() as i64,
+                reps as f64 * 0.07,
             )
         }
     }

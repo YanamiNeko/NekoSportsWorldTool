@@ -9,7 +9,6 @@
 #
 # Release 说明：workflow 已开启 generate_release_notes（按 commits 自动生成
 # What's Changed），并附加固定的平台下载说明；如需自定义可在仓库根放
-# RELEASE.md 并把 release 步骤的 body 换成 body_path: RELEASE.md。
 
 name: Release
 
@@ -107,4 +106,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          body_path: RELEASE.md

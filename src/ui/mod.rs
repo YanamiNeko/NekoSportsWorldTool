@@ -260,6 +260,7 @@ impl App {
                 hour: 12,
                 minute: 0,
                 face_check: config.face_check,
+                plan: None,
             },
             ai_page: ai::AiPage { days: 1, per_day: 1, ..Default::default() },
             records_page: records::RecordsPage::default(),

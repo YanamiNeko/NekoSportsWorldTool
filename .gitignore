@@ -1,0 +1,17 @@
+/target
+Cargo.lock.bak
+nekosportsworldtool.log*
+*.log.old
+
+# 运行时数据（含会话/凭据，禁止入库）
+/session.json
+/config.json
+/identity.json
+/points_cache.json
+/semester_result.json
+/rank_result.json
+/.idea/
+docs/_preview.png
+/docs
+/fixtures
+/ai_sports.json

@@ -1,0 +1,110 @@
+# NekoSportsWorldTool 自动发布
+#
+# 触发方式：
+#   ① 推送 tag：  git tag v0.2.0 && git push origin v0.2.0
+#   ② 手动：     Actions 页面 Run workflow（可选 full/cli 模式，仅出构建产物，不发布）
+#
+# 注意：本文件需位于仓库根 .github/workflows/ 下
+#（若仓库根就是 gui-rs 目录内容则无需调整；否则把 .github 移到仓库根）。
+#
+# Release 说明：workflow 已开启 generate_release_notes（按 commits 自动生成
+# What's Changed），并附加固定的平台下载说明；如需自定义可在仓库根放
+# RELEASE.md 并把 release 步骤的 body 换成 body_path: RELEASE.md。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 构建模式
+        type: choice
+        default: full
+        options: [full, cli]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            mode: full
+            artifact: NekoSportsWorldTool-win-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            mode: full
+            artifact: NekoSportsWorldTool-macos-arm64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            mode: cli
+            artifact: NekoSportsWorldTool-linux-x64
+            cross: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            mode: cli
+            artifact: NekoSportsWorldTool-linux-aarch64
+            cross: true
+    runs-on: ${{ matrix.os }}
+    env:
+      MODE: ${{ github.event.inputs.mode || matrix.mode }}
+      TARGET: ${{ matrix.target }}
+      ARTIFACT: ${{ matrix.artifact }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux 交叉编译)
+        if: matrix.cross == true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build (CLI-only)
+        if: env.MODE == 'cli'
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target "$TARGET" --no-default-features
+          else
+            cargo build --release --target "$TARGET" --no-default-features
+          fi
+        shell: bash
+
+      - name: Build (full = GUI + CLI)
+        if: env.MODE == 'full'
+        run: cargo build --release --target "$TARGET"
+        shell: bash
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          BIN=target/$TARGET/release/nekosportsworldtool
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then BIN="$BIN.exe"; fi
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a "dist/$ARTIFACT.zip" "$BIN"
+          else
+            tar czf "dist/$ARTIFACT.tar.gz" -C "$(dirname "$BIN")" "$(basename "$BIN")"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: RELEASE.md

@@ -16,6 +16,7 @@ pub fn dispatch(args: Vec<String>) -> i32 {
         "ai-list" => cmd_ai_list(),
         "records" => cmd_records(),
         "ai-records" => cmd_ai_records(&rest),
+        "ai-info" => cmd_ai_info(&rest),
         "semester" => cmd_semester(),
         "cheat" => cmd_cheat(&rest),
         "rank" => cmd_rank(&rest),
@@ -235,6 +236,30 @@ fn cmd_records() -> i32 {
             1
         }
     }
+}
+
+/// 单条 AI 记录全量详情。
+fn cmd_ai_info(rest: &[&str]) -> i32 {
+    let flags = parse_flags(rest);
+    let Some(id) = get(&flags, "id").and_then(|v| v.parse::<i64>().ok()) else {
+        eprintln!("缺少 --id");
+        return 1;
+    };
+    let mut client = match make_client() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    match crate::api::ai::fetch_record_detail(&mut client, id) {
+        Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+        Err(e) => {
+            eprintln!("拉取失败: {e}");
+            return 1;
+        }
+    }
+    0
 }
 
 fn cmd_ai_records(rest: &[&str]) -> i32 {

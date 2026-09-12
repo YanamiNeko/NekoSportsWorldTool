@@ -15,6 +15,10 @@ pub struct RecordsPage {
     pub detail_rrid: Option<i64>,
     pub detail_raw: Option<serde_json::Value>,
     pub detail_loading: bool,
+    /// AI 详情页当前记录
+    pub ai_detail_id: Option<i64>,
+    pub ai_detail_raw: Option<serde_json::Value>,
+    pub ai_detail_loading: bool,
 }
 
 impl App {
@@ -53,8 +57,53 @@ impl App {
 
         match self.records_page.sub {
             0 => self.draw_run_view(ui),
-            _ => self.draw_ai_table(ui),
+            _ => self.draw_ai_view(ui),
         }
+    }
+
+    /// AI 视图：列表与详情两个页面互斥。
+    fn draw_ai_view(&mut self, ui: &mut egui::Ui) {
+        if self.records_page.ai_detail_id.is_some() {
+            self.draw_ai_detail_view(ui);
+        } else {
+            self.draw_ai_table(ui);
+        }
+    }
+
+    /// AI 详情独立页：返回 + 全量字段。
+    fn draw_ai_detail_view(&mut self, ui: &mut egui::Ui) {
+        let id = self.records_page.ai_detail_id.unwrap_or(0);
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button("← 返回列表").clicked() {
+                self.records_page.ai_detail_id = None;
+                self.records_page.ai_detail_raw = None;
+                self.records_page.ai_detail_loading = false;
+            }
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(format!("AI 运动详情 #{}", id))
+                    .strong()
+                    .color(theme::accent()),
+            );
+        });
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if self.records_page.ai_detail_loading && self.records_page.ai_detail_raw.is_none()
+                {
+                    ui.label("加载详情中…");
+                } else if let Some(raw) = &self.records_page.ai_detail_raw {
+                    if let Some(err) = raw.get("fetchError").and_then(|x| x.as_str()) {
+                        ui.colored_label(theme::err(), err);
+                    } else {
+                        draw_ai_detail_panel(ui, raw);
+                    }
+                } else {
+                    ui.label("（无详情数据）");
+                }
+            });
     }
 
     /// 跑步视图：列表与详情两个页面互斥。
@@ -210,6 +259,7 @@ impl App {
             self.records_page.ai_groups.len()
         ));
         let num = |s: &str| s.parse::<f64>().unwrap_or(0.0);
+        let toggle_target = std::cell::Cell::new(None::<i64>);
         TableBuilder::new(ui)
             .striped(true)
             .vscroll(true)
@@ -219,9 +269,10 @@ impl App {
             .column(Column::auto().at_least(90.0)) // 成绩
             .column(Column::auto().at_least(100.0)) // 完成时间
             .column(Column::auto().at_least(90.0)) // 提交时间
-            .column(Column::remainder()) // 视频
+            .column(Column::auto().at_least(60.0)) // 视频
+            .column(Column::remainder()) // 操作
             .header(22.0, |mut h| {
-                for t in ["日期", "项目", "成绩", "完成时间", "提交时间", "视频"] {
+                for t in ["日期", "项目", "成绩", "完成时间", "提交时间", "视频", "操作"] {
                     h.col(|ui| {
                         ui.label(egui::RichText::new(t).strong().color(theme::text()));
                     });
@@ -274,11 +325,112 @@ impl App {
                                     ui.label("-");
                                 }
                             });
+                            row.col(|ui| {
+                                if ui.small_button("详情").clicked() {
+                                    toggle_target.set(Some(r.id));
+                                }
+                            });
                         });
                     }
                 }
             });
+
+        if let Some(id) = toggle_target.get() {
+            self.records_page.ai_detail_id = Some(id);
+            self.records_page.ai_detail_raw = None;
+            self.records_page.ai_detail_loading = true;
+            self.fetch_ai_detail(id);
+        }
     }
+}
+
+/// AI 记录详情：record/info 全量字段。
+fn draw_ai_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
+    let i = |k: &str| raw.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+    let f = |k: &str| raw.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let s = |k: &str| -> String {
+        raw.get(k)
+            .and_then(|v| v.as_str())
+            .filter(|x| !x.is_empty())
+            .map(|x| x.to_string())
+            .unwrap_or_else(|| "-".into())
+    };
+    let dt = |k: &str| -> String {
+        let ms = i(k);
+        if ms <= 0 {
+            return "-".into();
+        }
+        chrono::Local
+            .timestamp_millis_opt(ms)
+            .single()
+            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "-".into())
+    };
+    let fmt_ms = |ms: i64| -> String {
+        if ms <= 0 {
+            return "-".into();
+        }
+        if ms >= 60_000 {
+            format!("{}:{:02}:{:02}", ms / 60_000, ms % 60_000 / 1000, ms % 1000 / 10)
+        } else {
+            format!("{}.{:02} 秒", ms / 1000, ms % 1000 / 10)
+        }
+    };
+
+    let rtype = i("type");
+    // 详情接口的 score 单位与列表不同（计时类为计分制），展示原始值，用时以 timeConsume 为准
+    let score_text = if rtype == 2 {
+        format!("{}（原始计分）", i("score"))
+    } else {
+        format!("{} 个", i("score"))
+    };
+
+    egui::Grid::new("ai_detail_grid")
+        .num_columns(2)
+        .spacing([18.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            let mut rows: Vec<(&str, String)> = vec![
+                ("项目名称", s("name")),
+                ("类型", if rtype == 2 { "计时".into() } else { "计次".into() }),
+                ("成绩", score_text),
+                ("用时", fmt_ms(i("timeConsume"))),
+                ("速度", {
+                    let sp = f("speed");
+                    if sp > 0.0 { format!("{sp:.0} /分") } else { "-".into() }
+                }),
+                ("消耗", {
+                    let c = f("consume");
+                    if c > 0.0 { format!("{c:.1} kcal") } else { "0 kcal".into() }
+                }),
+                ("完成时间", dt("scoreDate")),
+                ("提交时间", dt("uploadTime")),
+                ("状态", i("status").to_string()),
+                ("记录 ID", i("id").to_string()),
+                ("项目 ID", i("sportId").to_string()),
+                ("任务 ID", i("taskId").to_string()),
+                ("用户 ID", i("uid").to_string()),
+                ("记录 UUID", s("uuid")),
+                ("视频", s("exerciseMediaUrl")),
+            ];
+            if let Some(reason) = raw.get("reason").and_then(|v| v.as_str()) {
+                if !reason.is_empty() {
+                    rows.push(("原因", reason.to_string()));
+                }
+            }
+            for (k, v) in rows {
+                ui.label(egui::RichText::new(k).color(theme::text_dim()));
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&v).color(theme::text()));
+                    // 长文本（UUID/视频链接）支持一键复制
+                    let copyable = (k == "视频" && v != "-") || k == "记录 UUID";
+                    if copyable && ui.small_button("复制").clicked() {
+                        ui.ctx().copy_text(v.clone());
+                    }
+                });
+                ui.end_row();
+            }
+        });
 }
 
 fn draw_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {

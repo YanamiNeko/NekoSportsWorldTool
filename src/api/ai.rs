@@ -48,6 +48,17 @@ fn fetch_list_remote(client: &mut ApiClient) -> Result<Vec<AiSport>, String> {
         .collect())
 }
 
+/// 单条 AI 记录全量信息（record/info：含 speed/consume/sportId/reason 等列表没有的字段）。
+pub fn fetch_record_detail(client: &mut ApiClient, id: i64) -> Result<Value, String> {
+    let path = format!("/api/v66/sport/ai/record/info?id={id}");
+    let biz = client.call("GET", &path, "{}", &[])?;
+    let data = parse_data_field(&biz);
+    if data.is_null() {
+        return Err(format!("记录 {id} 无详情数据"));
+    }
+    Ok(data)
+}
+
 /// 提交意图（具体字段按项目自身类型换算，见 upload）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AiMode {

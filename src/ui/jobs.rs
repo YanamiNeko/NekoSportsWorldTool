@@ -1,6 +1,6 @@
 //! 后台任务与消息处理：IP 获取 / 登录 / 刷新 / 消息协议分发。
 
-use super::{App, AI_RECORDS, AI_LIST, CHEAT, IP, LOGIN_DONE, RANK, RECORDS, RUN_DETAIL, SEMESTER, USER};
+use super::{App, AI_DETAIL, AI_RECORDS, AI_LIST, CHEAT, IP, LOGIN_DONE, RANK, RECORDS, RUN_DETAIL, SEMESTER, USER};
 use crate::api::model;
 
 impl App {
@@ -182,6 +182,21 @@ impl App {
                     tx.send(format!("{RUN_DETAIL}{payload}")).ok();
                 }
             }
+        });
+    }
+
+    /// 拉取单条 AI 记录全量详情。
+    pub fn fetch_ai_detail(&mut self, id: i64) {
+        let Some(session) = self.session.clone() else { return };
+        let identity = self.identity.clone();
+        self.records_page.ai_detail_loading = true;
+        self.spawn_job(move |tx| {
+            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            let payload = match crate::api::ai::fetch_record_detail(&mut client, id) {
+                Ok(d) => d.to_string(),
+                Err(e) => serde_json::json!({ "fetchError": e }).to_string(),
+            };
+            tx.send(format!("{AI_DETAIL}{payload}")).ok();
         });
     }
 

@@ -29,6 +29,7 @@ pub const RUN_DONE: &str = "__RUN_DONE__";
 pub const AI_DONE: &str = "__AI_DONE__";
 pub const RECORDS: &str = "__RECORDS__";
 pub const AI_LIST: &str = "__AI_LIST__";
+pub const AI_DETAIL: &str = "__AI_DETAIL__";
 pub const SEMESTER: &str = "__SEMESTER__";
 pub const CHEAT: &str = "__CHEAT__";
 pub const RANK: &str = "__RANK__";

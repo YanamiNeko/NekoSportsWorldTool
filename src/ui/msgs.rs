@@ -1,6 +1,6 @@
 //! 消息协议分发与弹窗构建。
 
-use super::{App, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, IP, LOGIN_DONE, PopupInfo, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, USER};
+use super::{App, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, IP, LOGIN_DONE, PopupInfo, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, USER};
 use crate::api::model;
 use chrono::TimeZone;
 
@@ -17,6 +17,7 @@ impl App {
         let mut rank_json = None;
         let mut user_json = None;
         let mut ai_records_json = None;
+        let mut ai_detail_raw = None;
         let mut detail_raw = None;
         while let Ok(msg) = self.rx.try_recv() {
             if let Some(v) = msg.strip_prefix(IP) {
@@ -48,6 +49,10 @@ impl App {
             } else if let Some(v) = msg.strip_prefix(RUN_DETAIL) {
                 if let Ok(raw) = serde_json::from_str::<serde_json::Value>(v) {
                     detail_raw = Some(raw);
+                }
+            } else if let Some(v) = msg.strip_prefix(AI_DETAIL) {
+                if let Ok(raw) = serde_json::from_str::<serde_json::Value>(v) {
+                    ai_detail_raw = Some(raw);
                 }
             } else {
                 self.log.push(&msg);
@@ -179,7 +184,12 @@ impl App {
                 });
             }
         }
+        if let Some(raw) = ai_detail_raw {
+            self.records_page.ai_detail_raw = Some(raw);
+            self.records_page.ai_detail_loading = false;
+        }
         if let Some(v) = ai_records_json {
+            self.records_busy = false;
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&v) {
                 self.records_page.ai_groups = val
                     .get("groups")

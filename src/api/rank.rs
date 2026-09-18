@@ -121,14 +121,10 @@ fn rows_from(arr: Vec<Value>) -> Vec<RankRow> {
         .collect()
 }
 
-/// 首跑未知结构落地（exe 同目录）供字段核对。
+/// 首跑未知结构落地（平台数据目录）供字段核对。
 fn dump_unknown(biz: &Value, name: &str) {
-    let path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.join(name)));
-    if let Some(path) = path {
-        if !path.exists() {
-            let _ = std::fs::write(&path, biz.to_string());
-        }
+    let path = crate::platform::data_dir().join(name);
+    if !path.exists() {
+        let _ = std::fs::write(&path, biz.to_string());
     }
 }

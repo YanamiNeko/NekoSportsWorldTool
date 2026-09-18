@@ -26,6 +26,9 @@ pub struct HeaderIdentity {
     pub os_version: String,
     #[serde(default = "default_device_name")]
     pub device_name: String,
+    /// 本地展示的制造商品牌；不改变服务端 deviceName（机型）字段。
+    #[serde(default)]
+    pub manufacturer: String,
     #[serde(default = "default_anchor_lat")]
     pub anchor_lat: f64,
     #[serde(default = "default_anchor_lon")]
@@ -85,6 +88,7 @@ impl Default for HeaderIdentity {
             idfa: String::new(),
             os_version: default_os_version(),
             device_name: default_device_name(),
+            manufacturer: String::new(),
             anchor_lat: default_anchor_lat(),
             anchor_lon: default_anchor_lon(),
             app_install_time: 0,

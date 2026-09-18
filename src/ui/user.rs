@@ -2,7 +2,7 @@
 //! 数据来源：登录 profile / HomePageInfo / getPersonalSemesterInfo(runMode) /
 //! recordssummary / personalSemesterCompleted(最近 rrid)。
 
-use super::{theme, App};
+use super::{mobile, theme, App};
 use eframe::egui;
 use egui::RichText;
 use chrono::TimeZone;
@@ -16,7 +16,7 @@ pub struct UserPage {
 impl App {
     pub fn draw_user(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        mobile::row(ui, |ui| {
             if ui
                 .add_enabled(!self.user_busy, theme::primary_btn("刷新"))
                 .clicked()
@@ -81,17 +81,27 @@ fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 fn grid(ui: &mut egui::Ui, id: &str, rows: &[(String, String)]) {
-    egui::Grid::new(id)
-        .num_columns(2)
-        .spacing([18.0, 5.0])
-        .striped(true)
-        .show(ui, |ui| {
-            for (k, v) in rows {
+    if mobile::compact_ui(ui) {
+        for (k, v) in rows {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.label(RichText::new(k).color(theme::text_dim()));
                 ui.label(RichText::new(v).color(theme::plain()));
-                ui.end_row();
-            }
-        });
+            });
+            ui.add_space(4.0);
+        }
+    } else {
+        egui::Grid::new(id)
+            .num_columns(2)
+            .spacing([18.0, 5.0])
+            .striped(true)
+            .show(ui, |ui| {
+                for (k, v) in rows {
+                    ui.label(RichText::new(k).color(theme::text_dim()));
+                    ui.label(RichText::new(v).color(theme::plain()));
+                    ui.end_row();
+                }
+            });
+    }
 }
 
 /// 字段名中文化（顺带单位换算）；未知字段与无意义的 0 不展示。

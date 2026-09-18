@@ -1,6 +1,6 @@
 //! 跑步页：恒 sportType=1；距离/配速范围 + 开始时间（随机或指定，最多前 3 天）。
 
-use super::{theme, App};
+use super::{mobile, theme, App};
 use chrono::{Datelike, Duration, Local, TimeZone};
 use eframe::egui;
 
@@ -120,19 +120,36 @@ impl App {
     fn draw_run_content(&mut self, ui: &mut egui::Ui) {
         {
             let page = &mut self.run_page;
-            ui.horizontal(|ui| {
+            let compact = mobile::compact_ui(ui);
+            let mut draw_distance_inputs = |ui: &mut egui::Ui| {
+                mobile::drag_f32(ui, "run_dist_min", &mut page.dist_min, 0.5..=20.0, 0.05, 2, " km");
+                ui.label("至");
+                mobile::drag_f32(ui, "run_dist_max", &mut page.dist_max, 0.5..=20.0, 0.05, 2, " km");
+            };
+            if compact {
                 ui.label("距离范围（km）：");
-                ui.add(egui::DragValue::new(&mut page.dist_min).range(0.5..=20.0).speed(0.05).suffix(" km"));
+                ui.horizontal(draw_distance_inputs);
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("距离范围（km）：");
+                    draw_distance_inputs(ui);
+                });
+            }
+            let mut draw_pace_inputs = |ui: &mut egui::Ui| {
+                mobile::drag_f32(ui, "run_pace_min", &mut page.pace_min, 180.0..=520.0, 5.0, 0, "");
                 ui.label("至");
-                ui.add(egui::DragValue::new(&mut page.dist_max).range(0.5..=20.0).speed(0.05).suffix(" km"));
-            });
-            ui.horizontal(|ui| {
+                mobile::drag_f32(ui, "run_pace_max", &mut page.pace_max, 180.0..=520.0, 5.0, 0, "");
+            };
+            if compact {
                 ui.label("配速范围（秒/km）：");
-                ui.add(egui::DragValue::new(&mut page.pace_min).range(180..=520).speed(5));
-                ui.label("至");
-                ui.add(egui::DragValue::new(&mut page.pace_max).range(180..=520).speed(5));
-            });
-            ui.horizontal(|ui| {
+                ui.horizontal(draw_pace_inputs);
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("配速范围（秒/km）：");
+                    draw_pace_inputs(ui);
+                });
+            }
+            mobile::row(ui, |ui| {
                 ui.label("开始时间：");
                 ui.radio_value(&mut page.start_mode, 0, "随机过去时间");
                 ui.radio_value(&mut page.start_mode, 1, "指定时间");
@@ -140,11 +157,11 @@ impl App {
                     ui.label("（30-300 分钟前随机）");
                 } else {
                     ui.label("几天前：");
-                    ui.add(egui::DragValue::new(&mut page.days_ago).range(0..=3).suffix(" 天"));
+                    mobile::drag_i64(ui, "run_days_ago", &mut page.days_ago, 0..=3, 1.0, "", " 天");
                     ui.label("时刻：");
-                    ui.add(egui::DragValue::new(&mut page.hour).range(0..=23).suffix(" 点"));
+                    mobile::drag_i64(ui, "run_hour", &mut page.hour, 0..=23, 1.0, "", " 点");
                     ui.label(":");
-                    ui.add(egui::DragValue::new(&mut page.minute).range(0..=59).prefix(":"));
+                    mobile::drag_i64(ui, "run_minute", &mut page.minute, 0..=59, 1.0, ":", "");
                 }
             });
             if page.start_mode == 1 && page.days_ago == 0 {
@@ -159,7 +176,7 @@ impl App {
                     }
                 }
             }
-            ui.horizontal(|ui| {
+            mobile::row(ui, |ui| {
                 ui.label("人脸校验标记：");
                 ui.checkbox(&mut page.face_check, "faceCheck=1");
             });
@@ -194,7 +211,7 @@ impl App {
             }
             None => String::new(),
         };
-        ui.horizontal(|ui| {
+        mobile::row(ui, |ui| {
             ui.colored_label(theme::plain(), plan_label);
             if ui.small_button("换一版").clicked() {
                 self.run_page.regen_plan();
@@ -204,7 +221,7 @@ impl App {
         ui.add_space(8.0);
         let enabled = !self.run_busy && self.session.is_some();
         let btn = if self.run_busy { theme::primary_btn("提交中…") } else { theme::primary_btn("开始跑步") };
-        ui.horizontal(|ui| {
+        mobile::row(ui, |ui| {
             if ui.add_enabled(enabled, btn).clicked() {
                 self.start_run();
             }

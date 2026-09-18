@@ -1,6 +1,6 @@
 //! 运动记录页：跑步 / AI 两个分栏，egui_extras 表格。
 
-use super::{theme, App};
+use super::{mobile, theme, App};
 use chrono::TimeZone;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
@@ -24,7 +24,7 @@ pub struct RecordsPage {
 impl App {
     pub fn draw_records(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        mobile::row(ui, |ui| {
             ui.selectable_value(&mut self.records_page.sub, 0, "跑步");
             ui.selectable_value(&mut self.records_page.sub, 1, "AI 运动");
             ui.add_space(8.0);
@@ -74,7 +74,7 @@ impl App {
     fn draw_ai_detail_view(&mut self, ui: &mut egui::Ui) {
         let id = self.records_page.ai_detail_id.unwrap_or(0);
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        mobile::row(ui, |ui| {
             if ui.button("← 返回列表").clicked() {
                 self.records_page.ai_detail_id = None;
                 self.records_page.ai_detail_raw = None;
@@ -119,7 +119,7 @@ impl App {
     fn draw_detail_view(&mut self, ui: &mut egui::Ui) {
         let rrid = self.records_page.detail_rrid.unwrap_or(0);
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        mobile::row(ui, |ui| {
             if ui.button("← 返回列表").clicked() {
                 self.records_page.detail_rrid = None;
                 self.records_page.detail_raw = None;
@@ -172,6 +172,44 @@ impl App {
         };
 
         let toggle_target = std::cell::Cell::new(None::<i64>);
+
+        if mobile::compact_ui(ui) {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for r in &self.records_page.rows {
+                        let rrid = r.rrid;
+                        let (pace_min, pace_sec) = pace_of(r.total_dis, r.total_time);
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            mobile::row(ui, |ui| {
+                                ui.strong(fmt_time(r.start_time));
+                                if r.complete {
+                                    ui.colored_label(theme::ok(), "达标");
+                                } else {
+                                    ui.colored_label(theme::err(), "未达标");
+                                }
+                            });
+                            ui.label(format!(
+                                "{:.2} km · {} · 配速 {pace_min}:{pace_sec:02}/km",
+                                r.total_dis / 1000.0,
+                                fmt_dur(r.total_time),
+                            ));
+                            ui.label(format!("步频 {} spm · rrid {rrid}", r.avg_step_freq));
+                            if ui.add_sized([96.0, mobile::TOUCH_HEIGHT], egui::Button::new("详情")).clicked() {
+                                toggle_target.set(Some(rrid));
+                            }
+                        });
+                        ui.add_space(6.0);
+                    }
+                });
+            if let Some(rrid) = toggle_target.get() {
+                self.records_page.detail_rrid = Some(rrid);
+                self.records_page.detail_raw = None;
+                self.records_page.detail_loading = true;
+                self.fetch_run_detail(rrid);
+            }
+            return;
+        }
 
         TableBuilder::new(ui)
             .striped(true)
@@ -260,6 +298,49 @@ impl App {
         ));
         let num = |s: &str| s.parse::<f64>().unwrap_or(0.0);
         let toggle_target = std::cell::Cell::new(None::<i64>);
+        if mobile::compact_ui(ui) {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for g in &self.records_page.ai_groups {
+                        let date = chrono::Local
+                            .timestamp_millis_opt(g.score_date)
+                            .single()
+                            .map(|t| t.format("%Y-%m-%d").to_string())
+                            .unwrap_or_default();
+                        for r in &g.records {
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.strong(format!("{} · {}", date, r.name));
+                                let score = if r.rtype == 2 {
+                                    format!("{:.1} 秒", num(&r.score) / 1000.0)
+                                } else {
+                                    format!("{} 个", r.score)
+                                };
+                                ui.label(format!("成绩 {score} · 视频 {}", if r.has_video { "有" } else { "-" }));
+                                ui.label(format!(
+                                    "提交 {}",
+                                    chrono::Local
+                                        .timestamp_millis_opt(r.upload_time)
+                                        .single()
+                                        .map(|t| t.format("%m-%d %H:%M").to_string())
+                                        .unwrap_or_default(),
+                                ));
+                                if ui.add_sized([96.0, mobile::TOUCH_HEIGHT], egui::Button::new("详情")).clicked() {
+                                    toggle_target.set(Some(r.id));
+                                }
+                            });
+                            ui.add_space(6.0);
+                        }
+                    }
+                });
+            if let Some(id) = toggle_target.get() {
+                self.records_page.ai_detail_id = Some(id);
+                self.records_page.ai_detail_raw = None;
+                self.records_page.ai_detail_loading = true;
+                self.fetch_ai_detail(id);
+            }
+            return;
+        }
         TableBuilder::new(ui)
             .striped(true)
             .vscroll(true)
@@ -385,12 +466,7 @@ fn draw_ai_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
         format!("{} 个", i("score"))
     };
 
-    egui::Grid::new("ai_detail_grid")
-        .num_columns(2)
-        .spacing([18.0, 4.0])
-        .striped(true)
-        .show(ui, |ui| {
-            let mut rows: Vec<(&str, String)> = vec![
+    let mut rows: Vec<(&str, String)> = vec![
                 ("项目名称", s("name")),
                 ("类型", if rtype == 2 { "计时".into() } else { "计次".into() }),
                 ("成绩", score_text),
@@ -413,24 +489,41 @@ fn draw_ai_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
                 ("记录 UUID", s("uuid")),
                 ("视频", s("exerciseMediaUrl")),
             ];
-            if let Some(reason) = raw.get("reason").and_then(|v| v.as_str()) {
-                if !reason.is_empty() {
-                    rows.push(("原因", reason.to_string()));
-                }
+    if let Some(reason) = raw.get("reason").and_then(|v| v.as_str()) {
+        if !reason.is_empty() {
+            rows.push(("原因", reason.to_string()));
+        }
+    }
+    let draw_value = |ui: &mut egui::Ui, k: &str, v: &String| {
+        mobile::row(ui, |ui| {
+            ui.label(egui::RichText::new(v).color(theme::text()));
+            let copyable = (k == "视频" && v != "-") || k == "记录 UUID";
+            if copyable && ui.button("复制").clicked() {
+                ui.ctx().copy_text(v.clone());
             }
+        });
+    };
+    if mobile::compact_ui(ui) {
+        for (k, v) in &rows {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.label(egui::RichText::new(*k).color(theme::text_dim()));
+                draw_value(ui, k, v);
+            });
+            ui.add_space(4.0);
+        }
+    } else {
+        egui::Grid::new("ai_detail_grid")
+            .num_columns(2)
+            .spacing([18.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
             for (k, v) in rows {
                 ui.label(egui::RichText::new(k).color(theme::text_dim()));
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&v).color(theme::text()));
-                    // 长文本（UUID/视频链接）支持一键复制
-                    let copyable = (k == "视频" && v != "-") || k == "记录 UUID";
-                    if copyable && ui.small_button("复制").clicked() {
-                        ui.ctx().copy_text(v.clone());
-                    }
-                });
+                draw_value(ui, k, &v);
                 ui.end_row();
             }
         });
+    }
 }
 
 fn draw_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
@@ -444,12 +537,7 @@ fn draw_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
     let f = |k: &str| -> f64 { raw.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) };
     let i = |k: &str| -> i64 { raw.get(k).and_then(|v| v.as_i64()).unwrap_or(0) };
 
-    egui::Grid::new("detail_grid")
-        .num_columns(2)
-        .spacing([18.0, 4.0])
-        .striped(true)
-        .show(ui, |ui| {
-            let mut items: Vec<(&str, String)> = vec![
+    let mut items: Vec<(&str, String)> = vec![
                 ("距离", format!("{:.2} km", f("totalDis") / 1000.0)),
                 ("有效里程", format!("{:.2} km", f("validDis") / 1000.0)),
                 ("时长", {
@@ -473,18 +561,32 @@ fn draw_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
                 ("地址", g("address")),
                 ("状态", g("statusInfo")),
             ];
-            let st_ms = i("startTime");
-            if st_ms > 0 {
-                let st = chrono::Local
-                    .timestamp_millis_opt(st_ms)
-                    .single()
-                    .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-                    .unwrap_or_default();
-                if !st.is_empty() {
-                    items.push(("开始时间", st));
-                }
-            }
-            let _ = &mut items;
+    let st_ms = i("startTime");
+    if st_ms > 0 {
+        let st = chrono::Local
+            .timestamp_millis_opt(st_ms)
+            .single()
+            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_default();
+        if !st.is_empty() {
+            items.push(("开始时间", st));
+        }
+    }
+    if mobile::compact_ui(ui) {
+        for (k, v) in &items {
+            if v.is_empty() || v == "0" || v == "0.0" { continue; }
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.label(egui::RichText::new(*k).color(theme::text_dim()));
+                ui.label(egui::RichText::new(v).color(theme::text()));
+            });
+            ui.add_space(4.0);
+        }
+    } else {
+        egui::Grid::new("detail_grid")
+            .num_columns(2)
+            .spacing([18.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
             for (k, v) in &items {
                 if v.is_empty() || v == "0" || v == "0.0" { continue; }
                 ui.label(egui::RichText::new(*k).color(theme::text_dim()));
@@ -492,6 +594,7 @@ fn draw_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
                 ui.end_row();
             }
         });
+    }
 
     // 达标判定
     if let Some(list) = raw.get("reasonList").and_then(|x| x.as_array()) {
@@ -500,7 +603,7 @@ fn draw_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
         for r in list {
             let ok = r.get("complete").and_then(|x| x.as_bool()).unwrap_or(false);
             let reason = r.get("reason").and_then(|x| x.as_str()).unwrap_or("");
-            ui.horizontal(|ui| {
+            mobile::row(ui, |ui| {
                 if ok {
                     ui.colored_label(theme::ok(), "√");
                 } else {

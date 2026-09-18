@@ -56,25 +56,25 @@ pub fn apply(ctx: &egui::Context) {
     v.override_text_color = Some(TEXT);
     v.hyperlink_color = ACCENT;
     v.selection.bg_fill = ACCENT;
-    v.selection.stroke = egui::Stroke::new(1.0, ACCENT);
-    v.window_stroke = egui::Stroke::new(1.0, BORDER);
+    v.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
+    v.window_stroke = egui::Stroke::new(1.0_f32, BORDER);
 
     v.widgets.noninteractive.bg_fill = Color32::from_rgb(235, 241, 238);
-    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.1, TEXT);
+    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.1_f32, TEXT);
     v.widgets.inactive.bg_fill = WIDGET;
     v.widgets.inactive.weak_bg_fill = WIDGET;
-    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT_DIM);
-    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, BORDER);
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_DIM);
+    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, BORDER);
     v.widgets.hovered.bg_fill = WIDGET_HOVER;
     v.widgets.hovered.weak_bg_fill = WIDGET_HOVER;
-    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.2, TEXT);
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT);
+    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.2_f32, TEXT);
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, ACCENT);
     v.widgets.active.bg_fill = ACCENT_DIM;
     v.widgets.active.weak_bg_fill = ACCENT_DIM;
-    v.widgets.active.fg_stroke = egui::Stroke::new(1.3, Color32::WHITE);
+    v.widgets.active.fg_stroke = egui::Stroke::new(1.3_f32, Color32::WHITE);
     v.widgets.open.bg_fill = WIDGET;
     v.widgets.open.weak_bg_fill = WIDGET;
-    v.widgets.open.fg_stroke = egui::Stroke::new(1.2, TEXT);
+    v.widgets.open.fg_stroke = egui::Stroke::new(1.2_f32, TEXT);
     for w in [
         &mut v.widgets.noninteractive,
         &mut v.widgets.inactive,
@@ -99,6 +99,11 @@ pub fn apply(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(10.0, 7.0);
     style.spacing.button_padding = egui::vec2(12.0, 5.0);
     style.spacing.menu_margin = egui::Margin::same(8.0);
+    #[cfg(target_os = "android")]
+    {
+        style.spacing.interact_size = egui::vec2(44.0, 44.0);
+        style.spacing.button_padding = egui::vec2(14.0, 10.0);
+    }
 
     // 页面文字仅作展示：不可选中、不可复制，输入框不受影响
     style.interaction.selectable_labels = false;

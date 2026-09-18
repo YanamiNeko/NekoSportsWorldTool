@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.nekosportsworld.tool.tests">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
+    <application android:label="Neko Android checks" />
+    <instrumentation android:name="org.nekosportsworld.tool.tests.SmokeInstrumentation" android:targetPackage="org.nekosportsworld.tool" />
+</manifest>

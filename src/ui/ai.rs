@@ -1,6 +1,6 @@
 //! AI 运动页：多项目选择 / 按分钟与按次 / 单次提交 / 批量补签。
 
-use super::{theme, App};
+use super::{mobile, theme, App};
 use crate::api::ai::AiMode;
 use eframe::egui;
 
@@ -27,6 +27,12 @@ pub struct AiBatchPlan {
 
 impl App {
     pub fn draw_ai(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.draw_ai_content(ui));
+    }
+
+    fn draw_ai_content(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
 
         // 项目多选
@@ -35,7 +41,15 @@ impl App {
             ui.horizontal(|ui| {
                 for s in &self.ai_page.list {
                     let picked = self.ai_page.picked.contains(&s.id);
-                    if ui.selectable_label(picked, &s.name).clicked() {
+                    let response = if mobile::compact_ui(ui) {
+                        ui.add_sized(
+                            [96.0, mobile::TOUCH_HEIGHT],
+                            egui::SelectableLabel::new(picked, &s.name),
+                        )
+                    } else {
+                        ui.selectable_label(picked, &s.name)
+                    };
+                    if response.clicked() {
                         if picked {
                             self.ai_page.picked.retain(|&x| x != s.id);
                         } else {
@@ -47,7 +61,7 @@ impl App {
         });
 
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        mobile::row(ui, |ui| {
             ui.radio_value(&mut self.ai_page.mode, 0, "按分钟");
             ui.radio_value(&mut self.ai_page.mode, 1, "按次");
         });
@@ -55,35 +69,25 @@ impl App {
         egui::Grid::new("ai_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
             if self.ai_page.mode == 0 {
                 ui.label("时长（分钟）：");
-                ui.add(
-                    egui::DragValue::new(&mut self.config.ai_minutes)
-                        .range(1..=30)
-                        .speed(1)
-                        .suffix(" 分钟"),
-                );
+                mobile::drag_i64(ui, "ai_minutes", &mut self.config.ai_minutes, 1..=30, 1.0, "", " 分钟");
                 ui.end_row();
             } else {
                 ui.label("个数：");
-                ui.add(
-                    egui::DragValue::new(&mut self.config.ai_reps)
-                        .range(5..=1000)
-                        .speed(5)
-                        .suffix(" 个"),
-                );
+                mobile::drag_i64(ui, "ai_reps", &mut self.config.ai_reps, 5..=1000, 5.0, "", " 个");
                 ui.end_row();
             }
             ui.label("补签天数（含今天）：");
-            ui.add(egui::DragValue::new(&mut self.ai_page.days).range(1..=60).speed(1).suffix(" 天"));
+            mobile::drag_i64(ui, "ai_days", &mut self.ai_page.days, 1..=60, 1.0, "", " 天");
             ui.end_row();
             ui.label("每天次数：");
-            ui.add(egui::DragValue::new(&mut self.ai_page.per_day).range(1..=10).speed(1));
+            mobile::drag_i64(ui, "ai_per_day", &mut self.ai_page.per_day, 1..=10, 1.0, "", "");
             ui.end_row();
         });
 
         ui.add_space(8.0);
         let logged = self.session.is_some();
         let one_enabled = !self.ai_busy && logged && !self.ai_page.list.is_empty();
-        ui.horizontal(|ui| {
+        mobile::row(ui, |ui| {
             if ui.add_enabled(one_enabled, theme::primary_btn("提交成绩")).clicked() {
                 let sport_id = self
                     .ai_page
@@ -108,7 +112,7 @@ impl App {
         let days = self.ai_page.days.max(1);
         let per = self.ai_page.per_day.max(1);
         let total = picked.len() as i64 * days * per;
-        ui.horizontal(|ui| {
+        mobile::row(ui, |ui| {
             let batch_label = format!(
                 "批量提交（{}天 × {}次 × {}项 = {} 条）",
                 days,
@@ -117,7 +121,14 @@ impl App {
                 total
             );
             let btn = theme::primary_btn(&batch_label);
-            if ui.add_enabled(!self.ai_busy && logged && !picked.is_empty(), btn).clicked() {
+            let response = if mobile::compact_ui(ui) {
+                ui.add_enabled_ui(!self.ai_busy && logged && !picked.is_empty(), |ui| {
+                    ui.add_sized([ui.available_width(), mobile::TOUCH_HEIGHT], btn)
+                }).inner
+            } else {
+                ui.add_enabled(!self.ai_busy && logged && !picked.is_empty(), btn)
+            };
+            if response.clicked() {
                 self.ai_confirm = Some(AiBatchPlan {
                     sport_ids: picked,
                     days,
@@ -147,7 +158,7 @@ impl App {
                         .color(theme::text()),
                     );
                     ui.add_space(6.0);
-                    ui.horizontal(|ui| {
+                    mobile::row(ui, |ui| {
                         if ui.button("取消").clicked() {
                             cancelled = true;
                         }
@@ -266,7 +277,7 @@ impl App {
             .iter()
             .map(|s| format!("id={}  {}", s.id, s.name))
             .collect();
-        ui.horizontal(|ui| {
+        mobile::row(ui, |ui| {
             ui.label("单发项目：");
             let sel_text = names
                 .get(self.ai_page.selected)

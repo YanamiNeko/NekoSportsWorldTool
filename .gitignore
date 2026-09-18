@@ -18,3 +18,13 @@ docs/_preview.png
 /obs_*.json
 /rec_all.tmp
 /msg.txt
+/.superpowers/
+/android/build/
+/android/.signing/
+*.apk
+*.aab
+*.keystore
+*.jks
+/target-ui/
+/.android-test/
+/.worktrees/

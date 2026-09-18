@@ -6,9 +6,17 @@ description = "NekoSportsWorldTool：运动世界校园版协议自动化工具�
 license = "CC-BY-NC-4.0"
 repository = "https://github.com/YanamiNeko/NekoSportsWorldTool"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[patch.crates-io]
+# NativeActivity must release its event loop on Destroy and allow recreation.
+winit = { path = "vendor/winit-0.30.13" }
+
 [features]
 default = ["gui"]
 gui = ["dep:eframe", "dep:egui", "dep:egui_extras"]
+android = ["gui", "eframe/android-native-activity", "dep:android-activity", "dep:android_logger", "dep:jni", "dep:log", "dep:winit"]
 
 [dependencies]
 eframe = { version = "0.29", optional = true }
@@ -16,7 +24,7 @@ egui = { version = "0.29", optional = true }
 egui_extras = { version = "0.29", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-ureq = { version = "2", default-features = false, features = ["json", "tls", "native-certs"] }
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 aes = "0.9"
 cbc = { version = "0.2", features = ["alloc", "block-padding"] }
 rsa = "0.9"
@@ -29,6 +37,16 @@ flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+ureq = { version = "2", default-features = false, features = ["native-certs"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"], optional = true }
+android_logger = { version = "0.14", optional = true }
+jni = { version = "0.21", optional = true }
+log = { version = "0.4", optional = true }
+winit = { version = "0.30", default-features = false, features = ["android-native-activity"], optional = true }
 
 [profile.release]
 opt-level = 3

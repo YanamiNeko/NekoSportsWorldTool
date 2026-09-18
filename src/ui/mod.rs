@@ -14,6 +14,7 @@ pub mod fonts;
 pub mod jobs;
 pub mod msgs;
 pub mod log;
+pub mod mobile;
 pub mod records;
 pub mod run;
 pub mod user;
@@ -79,14 +80,30 @@ pub struct App {
 }
 
 impl eframe::App for App {
+    #[cfg(target_os = "android")]
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.panel_fill.to_normalized_gamma_f32()
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        crate::platform::apply_safe_area(ctx, input);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_messages();
+        #[cfg(target_os = "android")]
+        self.poll_device_info();
+        crate::platform::set_keep_screen_on(self.run_busy || self.ai_busy || self.login_busy);
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
 
         // ── 顶栏 ────────────────────────────────────────────────
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(6.0);
-            egui::Grid::new("top_row1").num_columns(6).spacing([10.0, 3.0]).show(ui, |ui| {
+            let compact = mobile::compact_ui(ui);
+            let logged = self.session.is_some();
+            let btn_text = if logged { "登出" } else { "登录" };
+            let mut login_clicked = false;
+            let draw_connection = |ui: &mut egui::Ui| {
                 ui.label("IP：");
                 if self.ip.is_empty() {
                     ui.colored_label(theme::warn(), "获取中…");
@@ -103,41 +120,85 @@ impl eframe::App for App {
                         ui.colored_label(theme::err(), "● 未登录");
                     }
                 }
-                ui.label("设备：");
-                ui.monospace(&self.identity.device_id);
-                ui.end_row();
-            });
-            ui.add_space(3.0);
-            egui::Grid::new("top_row2").num_columns(5).spacing([8.0, 3.0]).show(ui, |ui| {
+            };
+            if compact {
+                ui.horizontal_wrapped(draw_connection);
+                ui.label(format!("设备：{}", self.identity.device_id));
+                ui.add_space(4.0);
                 ui.label("账号：");
-                ui.add_sized(
-                    [220.0, 26.0],
-                    egui::TextEdit::singleline(&mut self.username),
+                mobile::text_edit(
+                    ui,
+                    "login_username",
+                    &mut self.username,
+                    crate::platform::InputKind::Text,
+                    ui.available_width(),
                 );
                 ui.label("密码：");
-                ui.add_sized(
-                    [200.0, 26.0],
-                    egui::TextEdit::singleline(&mut self.password).password(true),
+                mobile::text_edit(
+                    ui,
+                    "login_password",
+                    &mut self.password,
+                    crate::platform::InputKind::Password,
+                    ui.available_width(),
                 );
-                ui.checkbox(&mut self.remember, "记住密码");
-                let logged = self.session.as_ref().is_some();
-                let btn_text = if logged { "登出" } else { "登录" };
-                if ui.add_enabled(!self.login_busy, theme::primary_btn(btn_text)).clicked() {
-                    if logged {
-                        self.do_logout();
-                    } else {
-                        self.do_login();
-                    }
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(&mut self.remember, "记住密码");
+                    login_clicked = ui
+                        .add_enabled(!self.login_busy, theme::primary_btn(btn_text))
+                        .clicked();
+                });
+            } else {
+                egui::Grid::new("top_row1")
+                    .num_columns(6)
+                    .spacing([10.0, 3.0])
+                    .show(ui, |ui| {
+                        draw_connection(ui);
+                        ui.label("设备：");
+                        ui.monospace(&self.identity.device_id);
+                        ui.end_row();
+                    });
+                ui.add_space(3.0);
+                egui::Grid::new("top_row2")
+                    .num_columns(5)
+                    .spacing([8.0, 3.0])
+                    .show(ui, |ui| {
+                        ui.label("账号：");
+                        mobile::text_edit(
+                            ui,
+                            "login_username",
+                            &mut self.username,
+                            crate::platform::InputKind::Text,
+                            220.0,
+                        );
+                        ui.label("密码：");
+                        mobile::text_edit(
+                            ui,
+                            "login_password",
+                            &mut self.password,
+                            crate::platform::InputKind::Password,
+                            200.0,
+                        );
+                        ui.checkbox(&mut self.remember, "记住密码");
+                        login_clicked = ui
+                            .add_enabled(!self.login_busy, theme::primary_btn(btn_text))
+                            .clicked();
+                        ui.end_row();
+                    });
+            }
+            if login_clicked {
+                if logged {
+                    self.do_logout();
+                } else {
+                    self.do_login();
                 }
-                ui.end_row();
-            });
+            }
             ui.add_space(4.0);
         });
 
         // ── 底部状态栏 ──────────────────────────────────────────
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(format!("日志 {} 行", self.log.len()));
                 ui.separator();
                 if let Some(s) = &self.data_page.semester {
@@ -169,15 +230,7 @@ impl eframe::App for App {
 
         // ── 标签页 ──────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, 0, "跑步");
-                ui.selectable_value(&mut self.tab, 1, "AI运动");
-                ui.selectable_value(&mut self.tab, 2, "运动记录");
-                ui.selectable_value(&mut self.tab, 3, "数据");
-                ui.selectable_value(&mut self.tab, 4, "我的");
-                ui.selectable_value(&mut self.tab, 5, "设备信息");
-                ui.selectable_value(&mut self.tab, 6, "运行日志");
-            });
+            mobile::tab_bar(ui, &mut self.tab);
             ui.separator();
             match self.tab {
                 0 => self.draw_run(ui),
@@ -200,6 +253,7 @@ impl eframe::App for App {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
+                    ui.set_max_width((ctx.screen_rect().width() - 32.0).min(520.0));
                     for line in &p.lines {
                         ui.label(line);
                     }
@@ -212,6 +266,7 @@ impl eframe::App for App {
                 self.popup = None;
             }
         }
+        crate::platform::sync_clipboard(ctx);
     }
 }
 
@@ -273,6 +328,8 @@ impl App {
             app.log.push("未找到中文字体（msyh/simhei/simsun），界面中文可能显示为方块");
         }
         app.fetch_ip();
+        #[cfg(target_os = "android")]
+        crate::android::request_device_info(true);
         // AI 项目列表先上缓存，网络刷新后覆盖
         app.ai_page.list = crate::api::model::load_ai_sports().unwrap_or_default();
         if app.session.is_some() {

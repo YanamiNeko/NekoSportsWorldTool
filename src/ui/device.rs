@@ -73,26 +73,28 @@ impl App {
                 );
                 ui.end_row();
 
-                ui.label("定位锚点纬度：");
-                ui.add(
-                    egui::DragValue::new(&mut self.device_buf.anchor_lat)
-                        .speed(0.00001)
-                        .fixed_decimals(6),
-                );
-                ui.end_row();
-
-                ui.label("定位锚点经度：");
-                ui.add(
-                    egui::DragValue::new(&mut self.device_buf.anchor_lon)
-                        .speed(0.00001)
-                        .fixed_decimals(6),
-                );
+                ui.label("定位锚点：");
+                ui.monospace(format!(
+                    "{:.6}, {:.6}",
+                    self.identity.anchor_lat,
+                    self.identity.anchor_lon,
+                ));
                 ui.end_row();
             });
+
+        ui.add_space(6.0);
+        ui.colored_label(
+            theme::text_dim(),
+            "定位锚点每次跑步后自动校准为学校打卡点附近，无需手动设置。",
+        );
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.add(theme::primary_btn("保存")).clicked() {
+                // 锚点由跑步流程自动回写管理，保存前以磁盘最新值为准，避免旧值覆盖
+                let latest = crate::api::model::load_identity();
+                self.device_buf.anchor_lat = latest.anchor_lat;
+                self.device_buf.anchor_lon = latest.anchor_lon;
                 match crate::api::model::save_identity(&self.device_buf) {
                     Ok(()) => {
                         self.identity = self.device_buf.clone();

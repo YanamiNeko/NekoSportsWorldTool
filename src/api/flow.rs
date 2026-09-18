@@ -9,6 +9,7 @@ use super::records::fetch_one_record;
 use super::submit::{submit_record, SubmitParams, SubmitResult};
 use crate::track::generator::build as gen_track;
 use crate::track::wire::{build_obs_object, five_point_wrapper, obs_keys};
+use rand_distr::{Distribution, Normal};
 use serde_json::Value;
 
 #[derive(Clone, Copy)]
@@ -74,8 +75,10 @@ pub fn run_full_flow(
     if !pts_bd.is_empty() {
         let idx = (rand::random::<f64>() * pts_bd.len() as f64) as usize;
         let (clat, clng) = pts_bd[idx];
-        let dlat = (rand::random::<f64>() - 0.5) * 2.0 * 200.0 / crate::track::geom::MET_PER_DEG_LAT;
-        let dlng = (rand::random::<f64>() - 0.5) * 2.0 * 200.0 / crate::track::geom::MET_PER_DEG_LNG;
+        let mut rng = rand::thread_rng();
+        let normal = Normal::<f64>::new(0.0, 120.0).unwrap();
+        let dlat = normal.sample(&mut rng).clamp(-200.0, 200.0) / crate::track::geom::MET_PER_DEG_LAT;
+        let dlng = normal.sample(&mut rng).clamp(-200.0, 200.0) / crate::track::geom::MET_PER_DEG_LNG;
         client.identity.anchor_lat = clat + dlat;
         client.identity.anchor_lon = clng + dlng;
         if let Err(e) = super::model::save_identity(&client.identity) {

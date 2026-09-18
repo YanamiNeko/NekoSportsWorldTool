@@ -12,6 +12,7 @@ use crate::crypto::sign::{original_sign, signature};
 use crate::track::calorie::{avg_power, official_kcal};
 use crate::track::geom::round_to;
 use crate::track::model::{GenPoint, Track};
+use crate::track::wire::bd09_to_gcj02;
 use serde_json::{json, Map, Value};
 
 pub const RECORD_PATH: &str = "/api/v70260/runnings/save/record";
@@ -152,8 +153,9 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     body.insert("stepsPerTenSec".into(), Value::Array(android_tensec(track, start_ms, "steps")));
     body.insert("isUpload".into(), Value::Bool(false));
     body.insert("more".into(), Value::Bool(false));
-    body.insert("latitude".into(), Value::from(0.0));
-    body.insert("longitude".into(), Value::from(0.0));
+    let (gcj_lat, gcj_lng) = bd09_to_gcj02(track.startLatitude, track.startLongitude);
+    body.insert("latitude".into(), Value::from(round_to(gcj_lat, 7)));
+    body.insert("longitude".into(), Value::from(round_to(gcj_lng, 7)));
     body.insert("maxRunTime".into(), Value::from(0));
     body.insert("minSteps".into(), Value::from(0));
     if !p.five_point_json.is_empty() {

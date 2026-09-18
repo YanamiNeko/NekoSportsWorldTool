@@ -70,6 +70,18 @@ pub fn run_full_flow(
 
     // ③ 轨迹生成（打卡点拟合环）
     let pts_bd = points::points_bd(&pts);
+    // 用打卡点随机偏移更新锚点并持久化：下次拉点位即学校真实坐标，摆脱写死的默认值
+    if !pts_bd.is_empty() {
+        let idx = (rand::random::<f64>() * pts_bd.len() as f64) as usize;
+        let (clat, clng) = pts_bd[idx];
+        let dlat = (rand::random::<f64>() - 0.5) * 2.0 * 200.0 / crate::track::geom::MET_PER_DEG_LAT;
+        let dlng = (rand::random::<f64>() - 0.5) * 2.0 * 200.0 / crate::track::geom::MET_PER_DEG_LNG;
+        client.identity.anchor_lat = clat + dlat;
+        client.identity.anchor_lon = clng + dlng;
+        if let Err(e) = super::model::save_identity(&client.identity) {
+            log(&format!("⚠ 锚点持久化失败: {e}"));
+        }
+    }
     // 平均配速须落在有效窗口内（否则逐点速度无法全窗内），越界时修正时长
     let mut params = *params;
     let avg = params.dist / params.dur as f64;

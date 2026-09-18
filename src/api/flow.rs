@@ -9,6 +9,7 @@ use super::records::fetch_one_record;
 use super::submit::{submit_record, SubmitParams, SubmitResult};
 use crate::track::generator::build as gen_track;
 use crate::track::wire::{build_obs_object, five_point_wrapper, obs_keys};
+use rand_distr::{Distribution, Normal};
 use serde_json::Value;
 
 #[derive(Clone, Copy)]
@@ -70,6 +71,20 @@ pub fn run_full_flow(
 
     // ③ 轨迹生成（打卡点拟合环）
     let pts_bd = points::points_bd(&pts);
+    // 用打卡点随机偏移更新锚点并持久化：下次拉点位即学校真实坐标，摆脱写死的默认值
+    if !pts_bd.is_empty() {
+        let idx = (rand::random::<f64>() * pts_bd.len() as f64) as usize;
+        let (clat, clng) = pts_bd[idx];
+        let mut rng = rand::thread_rng();
+        let normal = Normal::<f64>::new(0.0, 120.0).unwrap();
+        let dlat = normal.sample(&mut rng).clamp(-200.0, 200.0) / crate::track::geom::MET_PER_DEG_LAT;
+        let dlng = normal.sample(&mut rng).clamp(-200.0, 200.0) / crate::track::geom::MET_PER_DEG_LNG;
+        client.identity.anchor_lat = clat + dlat;
+        client.identity.anchor_lon = clng + dlng;
+        if let Err(e) = super::model::save_identity(&client.identity) {
+            log(&format!("⚠ 锚点持久化失败: {e}"));
+        }
+    }
     // 平均配速须落在有效窗口内（否则逐点速度无法全窗内），越界时修正时长
     let mut params = *params;
     let avg = params.dist / params.dur as f64;

@@ -56,7 +56,7 @@ fn default_os_version() -> String { "26.5.2".into() }
 fn default_device_name() -> String { "iPhone".into() }
 fn default_anchor_lat() -> f64 { 38.901678 }
 fn default_anchor_lon() -> f64 { 121.540241 }
-fn default_city() -> String { "大连市".into() }
+fn default_city() -> String { String::new() }
 
 impl HeaderIdentity {
     /// 安装时间：持久值优先；缺失时按平台惯例回退（iOS 3 天 / Android 90 天前）。

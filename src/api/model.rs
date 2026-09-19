@@ -65,6 +65,16 @@ pub struct Config {
     pub ai_minutes: i64,
     #[serde(default = "default_ai_reps")]
     pub ai_reps: i64,
+    /// OSM 路网文件路径（真实道路路由用）。
+    #[serde(default)]
+    pub osm_path: String,
+    /// 路线算法：legacy | road。
+    #[serde(default = "default_route_mode")]
+    pub route_mode: String,
+}
+
+fn default_route_mode() -> String {
+    "legacy".into()
 }
 
 fn default_f32() -> f32 {
@@ -96,6 +106,8 @@ impl Default for Config {
             face_check: true,
             ai_minutes: default_ai_minutes(),
             ai_reps: default_ai_reps(),
+            osm_path: String::new(),
+            route_mode: default_route_mode(),
         }
     }
 }
@@ -193,4 +205,18 @@ pub fn save_points_cache(points: &[serde_json::Value]) -> Result<(), String> {
     let doc =
         serde_json::json!({ "ts": crate::crypto::envelope::now_ms(), "points": points });
     write_json("points_cache.json", &doc)
+}
+
+/// 围栏缓存：拉取成功后落盘，UI 预览无网时兜底。
+pub fn load_fence_cache() -> Option<Vec<Vec<(f64, f64)>>> {
+    let v: serde_json::Value = read_json("fence_cache.json")?;
+    serde_json::from_value(v.get("fences")?.clone()).ok()
+}
+
+pub fn save_fence_cache(fences: &[Vec<(f64, f64)>]) -> Result<(), String> {
+    let doc = serde_json::json!({
+        "ts": crate::crypto::envelope::now_ms(),
+        "fences": fences,
+    });
+    write_json("fence_cache.json", &doc)
 }

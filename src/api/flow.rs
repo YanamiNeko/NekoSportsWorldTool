@@ -10,6 +10,7 @@ use super::submit::{submit_record, SubmitParams, SubmitResult};
 use crate::track::generator::build as gen_track;
 use crate::track::wire::{build_obs_object, five_point_wrapper, obs_keys};
 use serde_json::Value;
+use rand_distr::{Distribution, Normal};
 
 #[derive(Clone, Copy)]
 pub struct RunParams {

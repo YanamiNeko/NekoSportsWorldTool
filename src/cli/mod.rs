@@ -21,8 +21,8 @@ fn usage() {
   login   --user <手机号> --pass <密码> [--remember]
                                            登录并保存会话；--remember 同时保存凭据供自动重登
   logout                                   登出并清理本地会话
-  run    [--dist km] [--pace 秒/km] [--ago 分钟] [--days-ago 0-3 --time HH:MM] [--face 0|1] [--seed n]
-                                           跑步全链：策略-点位-轨迹-提交-OBS-验证
+  run    [--dist km] [--pace 秒/km] [--ago 分钟] [--days-ago 0-3 --time HH:MM] [--face 0|1] [--seed n] [--route legacy|road]
+                                           跑步全链：策略-点位-轨迹-提交-OBS-验证（--route 选择路线算法）
   ai-list                                  AI 运动项目列表
   ai     --sport <id> [--mode min|count] [--score n]
                                            AI 运动：min 按分钟 1-30；count 按次 5-1000 步长 5

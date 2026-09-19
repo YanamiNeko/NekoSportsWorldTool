@@ -95,6 +95,10 @@ fn cmd_run(rest: &[&str]) -> i32 {
     let face = get(&flags, "face").map(|v| v == "1" || v == "true").unwrap_or(true);
     let seed: u64 = get(&flags, "seed").and_then(|v| v.parse().ok()).unwrap_or(0);
     let seed = if seed == 0 { (now_ms() % 2_147_483_647) as u64 } else { seed };
+    let cfg = model::load_config();
+    let route_mode = crate::track::generate_road::RouteMode::from_str(
+        get(&flags, "route").unwrap_or(&cfg.route_mode),
+    );
 
     let dist = if dist_km > 0.0 {
         dist_km as f64 * 1000.0
@@ -130,7 +134,7 @@ fn cmd_run(rest: &[&str]) -> i32 {
     );
 
     let mut log = logger();
-    let params = crate::api::flow::RunParams { dist, dur, start_ms, face_check: face as i64, seed };
+    let params = crate::api::flow::RunParams { dist, dur, start_ms, face_check: face as i64, seed, route_mode };
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {
             println!(

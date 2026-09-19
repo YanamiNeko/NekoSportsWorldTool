@@ -6,14 +6,20 @@ description = "NekoSportsWorldTool：运动世界校园版协议自动化工具�
 license = "CC-BY-NC-4.0"
 repository = "https://github.com/YanamiNeko/NekoSportsWorldTool"
 
+[workspace]
+members = [".", "crates/route-planner"]
+resolver = "2"
+
 [features]
 default = ["gui"]
-gui = ["dep:eframe", "dep:egui", "dep:egui_extras"]
+gui = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:rfd"]
 
 [dependencies]
+route-planner = { path = "crates/route-planner" }
 eframe = { version = "0.29", optional = true }
 egui = { version = "0.29", optional = true }
 egui_extras = { version = "0.29", optional = true }
+rfd = { version = "0.15", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 ureq = { version = "2", default-features = false, features = ["json", "tls", "native-certs"] }

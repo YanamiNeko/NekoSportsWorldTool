@@ -1,0 +1,16 @@
+[package]
+name = "route-planner"
+version = "0.1.0"
+edition = "2021"
+description = "真实道路拓扑路由 + 运动学物理仿真（路网解析 / 闭环路由 / 曲率限速 / OU 配速 / AR(1) 噪声 / 生物力学）"
+license = "CC-BY-NC-4.0"
+
+[dependencies]
+petgraph = "0.6"
+geo = "0.28"
+geo-types = "0.7"
+rstar = "0.12"
+quick-xml = "0.41"
+serde = { version = "1", features = ["derive"] }
+rand = "0.8"
+rand_distr = "0.4"

@@ -7,6 +7,7 @@ use super::points;
 use super::policy::fetch_policy;
 use super::records::fetch_one_record;
 use super::submit::{submit_record, SubmitParams, SubmitResult};
+use crate::track::generate_road::RouteMode;
 use crate::track::generator::build as gen_track;
 use crate::track::wire::{build_obs_object, five_point_wrapper, obs_keys};
 use serde_json::Value;
@@ -21,6 +22,8 @@ pub struct RunParams {
     pub start_ms: i64,
     pub face_check: i64,
     pub seed: u64,
+    /// 路线算法模式。
+    pub route_mode: RouteMode,
 }
 
 pub struct RunOutcome {
@@ -69,8 +72,46 @@ pub fn run_full_flow(
         ));
     }
 
-    // ③ 轨迹生成（打卡点拟合环）
+    // ③ 轨迹生成（必经点 + 打卡点）
     let pts_bd = points::points_bd(&pts);
+    // 必经点保持策略顺序置于前端（waypoints[0] 即起点），剩余打卡点去重后按质心角
+    // 排序，使环序自然且不破坏必经点顺序。
+    let mut route_pts: Vec<(f64, f64)> = pol.must_points.clone();
+    let mut free: Vec<(f64, f64)> = Vec::new();
+    for p in &pts_bd {
+        if !route_pts.iter().any(|q| (q.0 - p.0).abs() < 1e-6 && (q.1 - p.1).abs() < 1e-6) {
+            free.push(*p);
+        }
+    }
+    if !free.is_empty() {
+        route_pts.extend(crate::track::generate_road::radial_order(&free));
+    }
+    if !pol.must_points.is_empty() {
+        log(&format!(
+            "√ [policy] 必经点 {} 个（保持顺序），合并后路线 waypoint 共 {} 个",
+            pol.must_points.len(),
+            route_pts.len()
+        ));
+    } else {
+        log(&format!("[policy] 响应未含必经点列表，仅用打卡点 {} 个", route_pts.len()));
+    }
+    if let Some(&(slat, slon)) = route_pts.first() {
+        log(&format!("√ [track] 起点 BD=({slat:.6},{slon:.6})"));
+    }
+    // 用打卡点随机偏移更新锚点并持久化：下次拉点位即学校真实坐标，摆脱写死的默认值
+    if !pts_bd.is_empty() {
+        let idx = (rand::random::<f64>() * pts_bd.len() as f64) as usize;
+        let (clat, clng) = pts_bd[idx];
+        let mut rng = rand::thread_rng();
+        let normal = Normal::<f64>::new(0.0, 120.0).unwrap();
+        let dlat = normal.sample(&mut rng).clamp(-200.0, 200.0) / crate::track::geom::MET_PER_DEG_LAT;
+        let dlng = normal.sample(&mut rng).clamp(-200.0, 200.0) / crate::track::geom::MET_PER_DEG_LNG;
+        client.identity.anchor_lat = clat + dlat;
+        client.identity.anchor_lon = clng + dlng;
+        if let Err(e) = super::model::save_identity(&client.identity) {
+            log(&format!("⚠ 锚点持久化失败: {e}"));
+        }
+    }
     // 平均配速须落在有效窗口内（否则逐点速度无法全窗内），越界时修正时长
     let mut params = *params;
     let avg = params.dist / params.dur as f64;
@@ -89,14 +130,72 @@ pub fn run_full_flow(
         params.dur = fixed_dur;
     }
     log(&format!(
-        "[track] 生成轨迹 {:.0}m / {}s（{} 点位拟合环）…",
+        "[track] 生成轨迹 {:.0}m / {}s（{} 点位）…",
         params.dist,
         params.dur,
-        pts_bd.len()
+        route_pts.len()
     ));
     // 随机 0-4 秒偏移（终端上报的 flag 与首点差 <5s），轨迹/提交/OBS/五点统一使用
     let start_ms = params.start_ms + (rand::random::<i64>() % 5) * 1000;
-    let track = gen_track(params.dist, params.dur, params.seed, (0.0, 0.0), start_ms, &pts_bd);
+    let track = match params.route_mode {
+        RouteMode::Road => {
+            let cfg = crate::api::model::load_config();
+            if cfg.osm_path.is_empty() {
+                log("⚠ [track] 未配置 OSM 路网，回退经典算法");
+                gen_track(params.dist, params.dur, params.seed, (0.0, 0.0), start_ms, &pts_bd)
+            } else {
+                match crate::track::generate_road::load_network_path(&cfg.osm_path) {
+                    Ok(mut net) => {
+                        crate::track::generate_road::align_network(&mut net);
+                        // 电子围栏：裁剪到围栏内道路（失败/无围栏则跳过）
+                        let fences = match crate::api::fence::fetch_geo_fence(client) {
+                            Ok(f) => {
+                                let _ = crate::api::model::save_fence_cache(&f);
+                                log(&format!("√ [track] 电子围栏 {} 个", f.len()));
+                                f
+                            }
+                            Err(e) => {
+                                log(&format!("⚠ [track] 围栏获取失败，回退缓存: {e}"));
+                                crate::api::model::load_fence_cache().unwrap_or_default()
+                            }
+                        };
+                        let filtered = crate::track::generate_road::apply_fences(&net, &fences);
+                        // 强制必经点（不含起点）：其余打卡点仅软引导 + <40m 吸附
+                        let must_bd: Vec<(f64, f64)> =
+                            pol.must_points.iter().skip(1).copied().collect();
+                        match crate::track::generate_road::build_road(
+                            params.dist,
+                            params.dur,
+                            params.seed,
+                            start_ms,
+                            &route_pts,
+                            &must_bd,
+                            &filtered,
+                        ) {
+                            Ok(t) => {
+                                log(&format!(
+                                    "√ [track] 真实道路路由 {} 点 / {} 建筑 / {} 围栏",
+                                    t.locations.len(),
+                                    filtered.buildings.len(),
+                                    fences.len()
+                                ));
+                                t
+                            }
+                            Err(e) => {
+                                log(&format!("⚠ [track] 道路路由失败，回退经典算法: {e}"));
+                                gen_track(params.dist, params.dur, params.seed, (0.0, 0.0), start_ms, &pts_bd)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log(&format!("⚠ [track] 路网加载失败，回退经典算法: {e}"));
+                        gen_track(params.dist, params.dur, params.seed, (0.0, 0.0), start_ms, &pts_bd)
+                    }
+                }
+            }
+        }
+        RouteMode::Legacy => gen_track(params.dist, params.dur, params.seed, (0.0, 0.0), start_ms, &pts_bd),
+    };
     log(&format!(
         "√ [track] {} 点 totalDis={:.0}m steps={} 起点={}",
         track.locations.len(),

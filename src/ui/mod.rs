@@ -12,8 +12,10 @@ pub mod data;
 pub mod device;
 pub mod fonts;
 pub mod jobs;
+pub mod map;
 pub mod msgs;
 pub mod log;
+pub mod osm;
 pub mod records;
 pub mod run;
 pub mod user;
@@ -21,6 +23,7 @@ pub mod theme;
 
 use crate::api::model::{self, Config, HeaderIdentity, Session};
 use eframe::egui;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
 pub const IP: &str = "__IP_DONE__";
@@ -36,6 +39,7 @@ pub const RANK: &str = "__RANK__";
 pub const USER: &str = "__USER__";
 pub const AI_RECORDS: &str = "__AI_RECORDS__";
 pub const RUN_DETAIL: &str = "__RUN_DETAIL__";
+pub const FENCE_DONE: &str = "__FENCE_DONE__";
 
 /// 提交结果弹窗。
 pub struct PopupInfo {
@@ -76,6 +80,12 @@ pub struct App {
     pub data_page: data::DataPage,
     pub user_page: user::UserPage,
     pub device_page: device::DevicePage,
+
+    /// 已加载的 OSM 路网（真实道路路由 + 地图显示共用）。
+    pub network: Option<Arc<route_planner::RoadGraph>>,
+    pub osm_page: osm::OsmPage,
+    net_tx: Sender<Result<Arc<route_planner::RoadGraph>, String>>,
+    net_rx: Receiver<Result<Arc<route_planner::RoadGraph>, String>>,
 }
 
 impl eframe::App for App {
@@ -177,6 +187,7 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.tab, 4, "我的");
                 ui.selectable_value(&mut self.tab, 5, "设备信息");
                 ui.selectable_value(&mut self.tab, 6, "运行日志");
+                ui.selectable_value(&mut self.tab, 7, "路网");
             });
             ui.separator();
             match self.tab {
@@ -186,6 +197,7 @@ impl eframe::App for App {
                 3 => self.draw_data(ui),
                 4 => self.draw_user(ui),
                 5 => self.draw_device(ui),
+                7 => self.draw_osm_page(ui),
                 _ => self.log.render(ui),
             }
         });
@@ -218,6 +230,7 @@ impl eframe::App for App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
+        let (net_tx, net_rx) = std::sync::mpsc::channel();
         let font_loaded = fonts::install(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
         let identity = model::load_identity();
@@ -262,12 +275,24 @@ impl App {
                 minute: 0,
                 face_check: config.face_check,
                 plan: None,
+                route_mode: crate::track::generate_road::RouteMode::from_str(&config.route_mode),
+                map: map::MapState::default(),
+                preview: None,
+                preview_stale: true,
+                map_fitted: false,
             },
             ai_page: ai::AiPage { days: 1, per_day: 1, ..Default::default() },
             records_page: records::RecordsPage::default(),
             data_page: data::DataPage::default(),
             user_page: user::UserPage::default(),
             device_page: device::DevicePage::default(),
+            network: None,
+            osm_page: osm::OsmPage {
+                path: config.osm_path.clone(),
+                ..Default::default()
+            },
+            net_tx,
+            net_rx,
         };
         if app.font_loaded.is_none() {
             app.log.push("未找到中文字体（msyh/simhei/simsun），界面中文可能显示为方块");
@@ -280,6 +305,12 @@ impl App {
             app.refresh_records();
             app.refresh_user_page();
             app.refresh_ai_list();
+            app.refresh_fence();
+        }
+        // 已配置 OSM 路网则启动时后台加载
+        if !app.config.osm_path.is_empty() {
+            let path = app.config.osm_path.clone();
+            app.load_osm_async(path);
         }
         app
     }

@@ -1,6 +1,6 @@
 //! 消息协议分发与弹窗构建。
 
-use super::{App, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, IP, LOGIN_DONE, PopupInfo, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, USER};
+use super::{App, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, LOGIN_DONE, PopupInfo, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, USER};
 use crate::api::model;
 use chrono::TimeZone;
 
@@ -10,6 +10,7 @@ impl App {
         let mut done_login = None;
         let mut done_run = None;
         let mut done_ai = None;
+        let mut done_fence = false;
         let mut records_json = None;
         let mut ai_list_json = None;
         let mut semester_json = None;
@@ -22,6 +23,8 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             if let Some(v) = msg.strip_prefix(IP) {
                 done_ip = Some(v.to_string());
+            } else if msg == FENCE_DONE {
+                done_fence = true;
             } else if let Some(v) = msg.strip_prefix(LOGIN_DONE) {
                 done_login = Some(v.to_string());
             } else if let Some(v) = msg.strip_prefix(RUN_DONE) {
@@ -61,8 +64,30 @@ impl App {
         let got_semester = semester_json.is_some();
         let got_cheat = cheat_json.is_some();
         let got_rank = rank_json.is_some();
+
+        // OSM 路网加载回传
+        while let Ok(res) = self.net_rx.try_recv() {
+            self.osm_page.busy = false;
+            match res {
+                Ok(net) => {
+                    let nodes = net.graph.node_count();
+                    let bld = net.buildings.len();
+                    self.osm_page.fitted = false;
+                    self.osm_page.status = format!("√ 路网加载成功：{nodes} 节点 / {bld} 建筑");
+                    self.log.push(&format!("[osm] 路网加载成功：{nodes} 节点 / {bld} 建筑"));
+                    self.network = Some(net);
+                }
+                Err(e) => {
+                    self.osm_page.status = format!("路网加载失败：{e}");
+                    self.log.push(&format!("[osm] 路网加载失败：{e}"));
+                }
+            }
+        }
         if let Some(ip) = done_ip {
             self.ip = ip;
+        }
+        if done_fence {
+            self.run_page.preview_stale = true;
         }
         if let Some(v) = done_login {
             self.login_busy = false;
@@ -93,6 +118,7 @@ impl App {
                 self.refresh_records();
                 self.refresh_user_page();
                 self.refresh_ai_list();
+                self.refresh_fence();
             } else {
                 self.status = format!(
                     "登录失败：{}",

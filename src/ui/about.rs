@@ -48,6 +48,15 @@ impl App {
             egui::RichText::new(format!("https://github.com/{repo}/releases")).color(theme::text_dim()),
             format!("https://github.com/{repo}/releases"),
         );
+        ui.add_space(4.0);
+        ui.colored_label(
+            theme::text_dim(),
+            "手动更新：下载对应平台的新程序文件；Windows 用户退出软件后，用新的 nekosportsworldtool.exe 替换旧文件。",
+        );
+        ui.colored_label(
+            theme::text_dim(),
+            "请保留 config.json、identity.json、points_cache.json 等配置文件，不要删除或修改。",
+        );
         ui.add_space(10.0);
 
         // ── 检查 / 版本信息 ────────────────────────────────────

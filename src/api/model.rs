@@ -74,6 +74,16 @@ pub struct Config {
     /// 启动时检查更新：silent（静默，发现新版才弹窗）/ ask（每次询问）/ off
     #[serde(default = "default_update_check")]
     pub update_check: String,
+    /// OSM 路网文件路径（真实道路路由用）。
+    #[serde(default)]
+    pub osm_path: String,
+    /// 路线算法：legacy | road。
+    #[serde(default = "default_route_mode")]
+    pub route_mode: String,
+}
+
+fn default_route_mode() -> String {
+    "legacy".into()
 }
 
 fn default_f32() -> f32 {
@@ -111,6 +121,8 @@ impl Default for Config {
             ai_minutes: default_ai_minutes(),
             ai_reps: default_ai_reps(),
             update_check: default_update_check(),
+            osm_path: String::new(),
+            route_mode: default_route_mode(),
         }
     }
 }
@@ -137,7 +149,11 @@ fn write_json<T: serde::Serialize>(name: &str, value: &T) -> Result<(), String> 
 /// 加载设备身份；device_id / app_install_time 缺失时生成一次并立即落盘，
 /// 此后同一设备全生命周期复用（逐请求漂移会影响设备一致性）。
 pub fn load_identity() -> HeaderIdentity {
-    load_identity_for_platform(if cfg!(target_os = "android") { "android" } else { "ios" })
+    load_identity_for_platform(if cfg!(target_os = "android") {
+        "android"
+    } else {
+        "ios"
+    })
 }
 
 fn load_identity_for_platform(platform: &str) -> HeaderIdentity {
@@ -180,7 +196,10 @@ pub struct DeviceInfo {
 }
 
 #[cfg(any(target_os = "android", test))]
-pub fn identity_with_device_info(identity: &HeaderIdentity, info: &DeviceInfo) -> Result<HeaderIdentity, String> {
+pub fn identity_with_device_info(
+    identity: &HeaderIdentity,
+    info: &DeviceInfo,
+) -> Result<HeaderIdentity, String> {
     if info.model.trim().is_empty() || info.os_version.trim().is_empty() {
         return Err("未能读取完整的机型和系统版本，请手动填写".into());
     }
@@ -231,7 +250,8 @@ mod storage_tests {
 
     #[test]
     fn android_identity_import_persists_brand_and_reuses_uuid() {
-        let directory = std::env::temp_dir().join(format!("neko-identity-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neko-identity-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         crate::platform::TEST_DATA_DIR.with(|p| *p.borrow_mut() = Some(directory.clone()));
         struct Cleanup(std::path::PathBuf);
@@ -247,7 +267,10 @@ mod storage_tests {
         assert_ne!(first.device_name, "iPhone");
         assert!(uuid::Uuid::parse_str(&first.device_id).is_ok());
         let again = load_identity_for_platform("android");
-        assert_eq!(serde_json::to_value(&first).unwrap(), serde_json::to_value(&again).unwrap());
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&again).unwrap()
+        );
 
         let mut existing = first.clone();
         existing.platform = "ios".into();
@@ -257,12 +280,16 @@ mod storage_tests {
         legacy.as_object_mut().unwrap().remove("manufacturer");
         write_json("identity.json", &legacy).unwrap();
         let loaded = load_identity_for_platform("android");
-        assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&existing).unwrap(),
-            "opening an existing install must not overwrite a manual identity");
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&existing).unwrap(),
+            "opening an existing install must not overwrite a manual identity"
+        );
 
         let info: DeviceInfo = serde_json::from_str(
             r#"{"manufacturer":"Example","model":"Phone 16","os_version":"16"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(info.manufacturer, "Example");
         let imported = identity_with_device_info(&loaded, &info).unwrap();
         assert_eq!(imported.platform, "android");
@@ -273,31 +300,54 @@ mod storage_tests {
         expected["device_name"] = "Phone 16".into();
         expected["manufacturer"] = "Example".into();
         expected["os_version"] = "16".into();
-        assert_eq!(serde_json::to_value(&imported).unwrap(), expected,
-            "import must preserve UUID, MAC, manual IMEI/IDFA, install time and location");
-        assert_eq!(load_identity().device_name, existing.device_name, "preview must not save implicitly");
+        assert_eq!(
+            serde_json::to_value(&imported).unwrap(),
+            expected,
+            "import must preserve UUID, MAC, manual IMEI/IDFA, install time and location"
+        );
+        assert_eq!(
+            load_identity().device_name,
+            existing.device_name,
+            "preview must not save implicitly"
+        );
         save_identity(&imported).unwrap();
         let stored: serde_json::Value = read_json("identity.json").unwrap();
-        assert_eq!(stored.get("manufacturer").and_then(|value| value.as_str()), Some("Example"),
-            "the consented brand must be written to identity.json");
+        assert_eq!(
+            stored.get("manufacturer").and_then(|value| value.as_str()),
+            Some("Example"),
+            "the consented brand must be written to identity.json"
+        );
         let reloaded = load_identity();
-        assert_eq!(serde_json::to_value(&reloaded).unwrap(), serde_json::to_value(&imported).unwrap(),
-            "brand and identity must survive a fresh load from disk");
+        assert_eq!(
+            serde_json::to_value(&reloaded).unwrap(),
+            serde_json::to_value(&imported).unwrap(),
+            "brand and identity must survive a fresh load from disk"
+        );
         assert_eq!(reloaded.device_id, first.device_id);
-        let (header, _) = crate::crypto::header::build_header_for(&reloaded, 0, "", Some(1_700_000_000_000));
+        let (header, _) =
+            crate::crypto::header::build_header_for(&reloaded, 0, "", Some(1_700_000_000_000));
         let header: serde_json::Value = serde_json::from_str(&header).unwrap();
         assert_eq!(header["DeviceId"], first.device_id);
-        assert_eq!(header["deviceName"], "Phone 16", "brand must not be prepended to the protocol model field");
+        assert_eq!(
+            header["deviceName"], "Phone 16",
+            "brand must not be prepended to the protocol model field"
+        );
         assert_eq!(header["osVersion"], "16");
-        assert!(header.get("manufacturer").is_none() && header.get("brand").is_none(),
-            "persisting local brand metadata must not invent new protocol fields");
+        assert!(
+            header.get("manufacturer").is_none() && header.get("brand").is_none(),
+            "persisting local brand metadata must not invent new protocol fields"
+        );
     }
 
     #[test]
     fn incomplete_native_device_info_cannot_replace_identity() {
         let identity = HeaderIdentity::default();
         for (model, os_version) in [("", "16"), ("Phone", " ")] {
-            let info = DeviceInfo { manufacturer: String::new(), model: model.into(), os_version: os_version.into() };
+            let info = DeviceInfo {
+                manufacturer: String::new(),
+                model: model.into(),
+                os_version: os_version.into(),
+            };
             assert!(identity_with_device_info(&identity, &info).is_err());
         }
     }
@@ -315,8 +365,16 @@ mod storage_tests {
             }
         }
         let _cleanup = Cleanup(directory.clone());
-        assert_eq!(exe_dir(), directory, "storage must use the injected app directory");
-        let session = Session { uid: 123, token: "test-only-token".into(), ..Default::default() };
+        assert_eq!(
+            exe_dir(),
+            directory,
+            "storage must use the injected app directory"
+        );
+        let session = Session {
+            uid: 123,
+            token: "test-only-token".into(),
+            ..Default::default()
+        };
         save_session(&session).unwrap();
         assert!(directory.join("session.json").is_file());
         assert_eq!(load_session().uid, 123);
@@ -338,17 +396,28 @@ struct PointsCache {
 }
 
 /// 只返回与本次锚点相同的缓存。旧版未记录锚点的缓存会自然失效，避免串城市。
-pub fn load_points_cache_for(anchor: crate::location::Coordinate) -> Option<(i64, Vec<serde_json::Value>)> {
+pub fn load_points_cache_for(
+    anchor: crate::location::Coordinate,
+) -> Option<(i64, Vec<serde_json::Value>)> {
     let v: serde_json::Value = read_json("points_cache.json")?;
     let cache: PointsCache = serde_json::from_value(v).ok()?;
-    if !cache.anchor.is_near(anchor, 0.0001) { return None; }
+    if !cache.anchor.is_near(anchor, 0.0001) {
+        return None;
+    }
     let ts = cache.ts;
     let pts = cache.points;
     Some((ts, pts))
 }
 
-pub fn save_points_cache(anchor: crate::location::Coordinate, points: &[serde_json::Value]) -> Result<(), String> {
-    let doc = PointsCache { ts: crate::crypto::envelope::now_ms(), anchor, points: points.to_vec() };
+pub fn save_points_cache(
+    anchor: crate::location::Coordinate,
+    points: &[serde_json::Value],
+) -> Result<(), String> {
+    let doc = PointsCache {
+        ts: crate::crypto::envelope::now_ms(),
+        anchor,
+        points: points.to_vec(),
+    };
     write_json("points_cache.json", &doc)
 }
 
@@ -357,9 +426,34 @@ mod points_cache_tests {
     use super::*;
     #[test]
     fn cache_is_scoped_to_anchor() {
-        let cache = PointsCache { ts: 1, anchor: crate::location::Coordinate::new(39.9, 116.4, 0.0).unwrap(), points: vec![] };
-        let decoded: PointsCache = serde_json::from_value(serde_json::to_value(cache).unwrap()).unwrap();
-        assert!(decoded.anchor.is_near(crate::location::Coordinate::new(39.9, 116.4, 0.0).unwrap(), 0.0001));
-        assert!(!decoded.anchor.is_near(crate::location::Coordinate::new(38.9, 121.5, 0.0).unwrap(), 0.0001));
+        let cache = PointsCache {
+            ts: 1,
+            anchor: crate::location::Coordinate::new(39.9, 116.4, 0.0).unwrap(),
+            points: vec![],
+        };
+        let decoded: PointsCache =
+            serde_json::from_value(serde_json::to_value(cache).unwrap()).unwrap();
+        assert!(decoded.anchor.is_near(
+            crate::location::Coordinate::new(39.9, 116.4, 0.0).unwrap(),
+            0.0001
+        ));
+        assert!(!decoded.anchor.is_near(
+            crate::location::Coordinate::new(38.9, 121.5, 0.0).unwrap(),
+            0.0001
+        ));
     }
+}
+
+/// 围栏缓存：拉取成功后落盘，UI 预览无网时兜底。
+pub fn load_fence_cache() -> Option<Vec<Vec<(f64, f64)>>> {
+    let v: serde_json::Value = read_json("fence_cache.json")?;
+    serde_json::from_value(v.get("fences")?.clone()).ok()
+}
+
+pub fn save_fence_cache(fences: &[Vec<(f64, f64)>]) -> Result<(), String> {
+    let doc = serde_json::json!({
+        "ts": crate::crypto::envelope::now_ms(),
+        "fences": fences,
+    });
+    write_json("fence_cache.json", &doc)
 }

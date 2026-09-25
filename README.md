@@ -58,6 +58,7 @@ NekoSportsWorldTool help                                 # 全部命令
 - **10603 点位限流**：点位接口 5 分钟限 3 次，程序内置 300s 缓存，正常使用不会触发
 - **榜单为空**：当天还没有人产生有效里程，查询会自动回退最近 3 天
 - **检查更新失败**：更新仅直连 GitHub，网络不通时到 [Release](https://github.com/YanamiNeko/NekoSportsWorldTool/releases) 手动下载
+- **手动更新方式**：Windows 下载新的 `nekosportsworldtool.exe` 后退出软件，用新文件替换旧文件；请保留 `config.json`、`identity.json`、`points_cache.json` 等配置文件，不要删除或修改。
 - **人机验证失败**：自动重试 3 轮，仍失败大概率是网络波动，稍后再试
 - **杀软误报**：未签名编译产物可能被误报，自行判断后加白
 

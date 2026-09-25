@@ -141,6 +141,22 @@ impl App {
                 });
         }
 
+        ui.add_space(4.0);
+        ui.colored_label(
+            theme::text_dim(),
+            "定位锚点填写顺序：先填纬度，再填经度；地图常见的“经度,纬度”格式需要调换后填写。",
+        );
+        ui.colored_label(
+            theme::text_dim(),
+            "修改城市或定位锚点后，请点击“保存”；跑步流程只使用已保存的身份信息。",
+        );
+        if location_fields_changed(&self.identity, &self.device_buf) {
+            ui.colored_label(
+                theme::warn(),
+                "检测到城市或定位锚点有未保存修改，当前跑步仍会使用上次保存的值。",
+            );
+        }
+
         ui.add_space(8.0);
         mobile::row(ui, |ui| {
             if ui.add(theme::primary_btn("保存")).clicked() {
@@ -197,6 +213,12 @@ impl App {
     }
 }
 
+fn location_fields_changed(saved: &HeaderIdentity, pending: &HeaderIdentity) -> bool {
+    saved.city.trim() != pending.city.trim()
+        || (saved.anchor_lat - pending.anchor_lat).abs() > 1e-9
+        || (saved.anchor_lon - pending.anchor_lon).abs() > 1e-9
+}
+
 /// 整套随机：uuid v4 设备 ID（大写）；机型/系统按平台池抽取。
 fn randomize(buf: &mut HeaderIdentity, platform: &str) {
     buf.manufacturer.clear();
@@ -223,6 +245,20 @@ fn randomize(buf: &mut HeaderIdentity, platform: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn location_changes_are_detected_until_saved() {
+        let saved = HeaderIdentity::default();
+        let mut pending = saved.clone();
+        assert!(!location_fields_changed(&saved, &pending));
+
+        pending.city = "北京市".into();
+        assert!(location_fields_changed(&saved, &pending));
+
+        pending = saved.clone();
+        pending.anchor_lat += 0.000001;
+        assert!(location_fields_changed(&saved, &pending));
+    }
 
     #[test]
     fn random_device_does_not_keep_a_previously_imported_brand() {

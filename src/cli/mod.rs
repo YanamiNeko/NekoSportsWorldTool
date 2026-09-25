@@ -126,7 +126,8 @@ pub(crate) fn print_rows(rows: &[RecordRow]) {
         "时间", "距离m", "时长", "配速", "步频", "达标"
     );
     for r in rows {
-        let t = fmt_hms(r.start_time)[5..].to_string();
+        let formatted = fmt_hms(r.start_time);
+        let t = formatted.get(5..).unwrap_or("-");
         let pace = if r.total_dis > 0.0 && r.total_time > 0 {
             let p = r.total_time as f64 / (r.total_dis / 1000.0);
             format!("{}:{:02}", (p / 60.0) as i64, (p as i64) % 60)

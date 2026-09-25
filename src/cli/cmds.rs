@@ -89,10 +89,31 @@ fn cmd_run(rest: &[&str]) -> i32 {
             return 1;
         }
     };
-    let dist_km: f32 = get(&flags, "dist")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.0);
-    let pace: f32 = get(&flags, "pace").map(parse_pace).unwrap_or(0.0);
+    // Keep explicit values bounded before they reach the point generator.  A
+    // non-finite or enormous distance would otherwise turn into a huge number
+    // of sampled points and can exhaust memory/CPU.
+    let dist_km = match get(&flags, "dist") {
+        None => 0.0,
+        Some(value) => match value.parse::<f32>() {
+            Ok(value) if value.is_finite() && value > 0.0 && value <= 50.0 => value,
+            _ => {
+                eprintln!("--dist 必须是大于 0 且不超过 50 km 的有限数值");
+                return 1;
+            }
+        },
+    };
+    let pace = match get(&flags, "pace") {
+        None => 0.0,
+        Some(value) => {
+            let pace = parse_pace(value);
+            if pace.is_finite() && pace > 0.0 && pace <= 1200.0 {
+                pace
+            } else {
+                eprintln!("--pace 必须是大于 0 且不超过 1200 秒/km 的有限数值");
+                return 1;
+            }
+        }
+    };
     let ago_min: i64 = get(&flags, "ago").and_then(|v| v.parse().ok()).unwrap_or(0);
     let days_ago: i64 = get(&flags, "days-ago")
         .and_then(|v| v.parse().ok())
@@ -340,16 +361,16 @@ fn cmd_records_raw(rest: &[&str]) -> i32 {
             } else if n > 0 {
                 println!(
                     "首条: {}",
-                    &arr[0].to_string()[..arr[0].to_string().len().min(300)]
+                    crate::textlog::truncate(&arr[0].to_string(), 300)
                 );
                 println!(
                     "末条: {}",
-                    &arr[n - 1].to_string()[..arr[n - 1].to_string().len().min(300)]
+                    crate::textlog::truncate(&arr[n - 1].to_string(), 300)
                 );
             } else {
                 println!(
                     "data: {}",
-                    data.to_string()[..data.to_string().len().min(500)].to_string()
+                    crate::textlog::truncate(&data.to_string(), 500)
                 );
             }
             0

@@ -172,7 +172,7 @@ pub fn ureq_err(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(code, resp) => {
             let body = resp.into_string().unwrap_or_default();
-            format!("HTTP {code}: {}", &body[..body.len().min(300)])
+            format!("HTTP {code}: {}", crate::textlog::truncate(&body, 300))
         }
         ureq::Error::Transport(t) => format!("网络错误: {t}"),
     }

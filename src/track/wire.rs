@@ -37,6 +37,17 @@ impl Default for RunAreaMeta {
     }
 }
 
+/// 只有服务端返回了可解析的非空围栏数组时才允许覆盖原始固定点协议。
+/// 未知格式会回退到旧版默认值，避免详情页丢弃整份路线对象。
+fn payload_area(area: &RunAreaMeta) -> RunAreaMeta {
+    let valid = area.run_area_id >= 0
+        && area.freedom_show_fence
+        && serde_json::from_str::<Value>(&area.geo_fences_json)
+            .ok()
+            .is_some_and(|value| matches!(value, Value::Array(ref items) if !items.is_empty()));
+    if valid { area.clone() } else { RunAreaMeta::default() }
+}
+
 /// 百度 BD-09 → 高德 GCJ-02。
 pub fn bd09_to_gcj02(bd_lat: f64, bd_lng: f64) -> (f64, f64) {
     let x = bd_lng - 0.0065;
@@ -132,6 +143,7 @@ pub fn five_point_wrapper_with_area(
     area: &RunAreaMeta,
 ) -> String {
     let five = five_point_payload(points, start_ms);
+    let area = payload_area(area);
     json!({
         "useZip": false,
         "fivePointJson": Value::Array(five).to_string(),
@@ -175,6 +187,23 @@ mod validation_tests {
         assert_eq!(value["freedomShowFence"], true);
     }
 
+    #[test]
+    fn malformed_area_falls_back_to_route_compatible_defaults() {
+        let area = RunAreaMeta { run_area_id: 42, geo_fences_json: "not-json".into(), freedom_show_fence: true };
+        let value: Value = serde_json::from_str(&five_point_wrapper_with_area(&[json!({"lat": 39.9, "lon": 116.4, "glat": 39.9, "glon": 116.4})], 1_700_000_000_000, &area)).unwrap();
+        assert_eq!(value["runAreaId"], -1);
+        assert_eq!(value["geoFencesJson"], "[]");
+        assert_eq!(value["freedomShowFence"], false);
+    }
+
+    #[test]
+    fn fence_without_area_id_falls_back_to_route_compatible_defaults() {
+        let area = RunAreaMeta { run_area_id: -1, geo_fences_json: "[{\"lat\":39.4,\"lon\":116.2}]".into(), freedom_show_fence: true };
+        let value: Value = serde_json::from_str(&five_point_wrapper_with_area(&[json!({"lat": 39.9, "lon": 116.4, "glat": 39.9, "glon": 116.4})], 1_700_000_000_000, &area)).unwrap();
+        assert_eq!(value["runAreaId"], -1);
+        assert_eq!(value["geoFencesJson"], "[]");
+        assert_eq!(value["freedomShowFence"], false);
+    }
     #[test]
     fn laps_are_rebuilt_from_overridden_altitude() {
         let points = vec![(38.901678, 121.540241), (38.902564, 121.541233)];
@@ -316,6 +345,7 @@ pub fn build_obs_object_with_area(
     let (sp, stf) = build_windows(track, rrid);
     let laps = build_laps(track, start_ms);
     let five = five_point_payload(live_points, start_ms);
+    let area = payload_area(area);
     let fx = json!({
         "fivePointJson": Value::Array(five).to_string(),
         "freedomShowFence": area.freedom_show_fence,

@@ -182,6 +182,8 @@ mod tests {
         assert_eq!(wrap["useZip"], false);
         let pts: Vec<serde_json::Value> =
             serde_json::from_str(wrap["allLocJson"].as_str().unwrap()).unwrap();
+        assert!(pts.len() > 20, "run_data 必须包含完整路线点");
+        assert!(pts.iter().all(|point| point["gLat"].as_f64().is_some() && point["gLng"].as_f64().is_some()), "路线点必须包含 GCJ 坐标");
         assert_eq!(pts[0].as_object().unwrap().len(), 27, "点键数必须 27");
         // segment_json 是空串 gzip
         let raw = crate::crypto::envelope::b64_decode(obj["segment_json"].as_str().unwrap()).unwrap();

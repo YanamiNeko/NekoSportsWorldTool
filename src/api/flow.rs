@@ -162,19 +162,56 @@ pub fn run_full_flow(
     let mut track_for_obs = sp.track.clone();
     track_for_obs.startTime = result.start_ms;
     let obj = build_obs_object_with_area(&track_for_obs, result.rrid, &result.uuid, sess.uid, &pts, &points_ctx.area);
+    let expected_summary = super::obs::summarize_object(&obj).ok();
+    if expected_summary.as_ref().map(|summary| !summary.is_expected()).unwrap_or(true) {
+        log("⚠ [obs] 本地待上传对象缺少有效路线/区域/围栏数据");
+    }
     let payload = obj.to_string().into_bytes();
     let keys = obs_keys(&track_for_obs, result.rrid, &result.uuid);
     let obs_ok = super::obs::upload_both_keys(client, &keys, &payload, log);
-    if obs_ok == 2 {
+    let obs_content_ok = if obs_ok == 2 {
         log("√ [obs] 双 key 上传成功");
+        sleep_secs(1);
+        let mut all_valid = expected_summary.as_ref().is_some_and(|summary| summary.is_expected());
+        for key in &keys {
+            match super::obs::fetch_object(client, key, log)
+                .and_then(|value| super::obs::summarize_object(&value))
+            {
+                Ok(summary) => {
+                    let valid = expected_summary
+                        .as_ref()
+                        .is_some_and(|expected| summary.matches(expected));
+                    all_valid &= valid;
+                    log(&format!(
+                        "{} [obs] 回读校验 key={} matches_upload={} route_points={} runAreaId={} 绿色围栏={} fence_points={}（{} 字节）",
+                        if valid { "√" } else { "⚠" },
+                        key.rsplit('/').next().unwrap_or(key),
+                        valid,
+                        summary.route_points,
+                        summary.run_area_id,
+                        summary.show_fence,
+                        summary.fence_count,
+                        summary.fence_bytes,
+                    ));
+                }
+                Err(error) => {
+                    all_valid = false;
+                    log(&format!("⚠ [obs] 回读校验失败 key={}: {error}", key.rsplit('/').next().unwrap_or(key)));
+                }
+            }
+        }
+        if all_valid { log("√ [obs] 双 key 内容校验通过"); }
+        else { log("⚠ [obs] 双 key 内容校验未通过"); }
+        all_valid
     } else {
         log(&format!("⚠ [obs] 上传成功 {obs_ok}/2"));
-    }
+        false
+    };
 
     // ⑦ 详情验证
     sleep_secs(2);
     log("[verify] 拉取详情验证…");
-    let detail_ok = match fetch_one_record(client, result.rrid) {
+    let record_ok = match fetch_one_record(client, result.rrid) {
         Ok(d) => {
             log(&format!(
                 "√ [verify] rrid={} complete={:?} dis={:?} time={:?}",
@@ -193,6 +230,10 @@ pub fn run_full_flow(
             false
         }
     };
+    let detail_ok = obs_content_ok && record_ok;
+    if !obs_content_ok {
+        log("⚠ [verify] OBS 对象内容校验未通过");
+    }
     Ok(RunOutcome { result, obs_ok, detail_ok })
 }
 

@@ -60,6 +60,7 @@ pub fn fetch_points_context_ext(
     // ① TTL 内命中缓存直接返回
     if let Some((ts, pts, area)) = model::load_points_cache_context_for(anchor) {
         if !pts.is_empty()
+            && area.run_area_id >= 0
             && area.freedom_show_fence
             && area.geo_fences_json.trim() != "[]"
             && crate::crypto::envelope::now_ms() - ts < model::POINTS_TTL_MS
@@ -169,23 +170,33 @@ fn find_value_recursive(root: &Value, names: &[&str], depth: usize) -> Option<Va
 }
 
 pub(crate) fn area_from_payload(payload: &Value, points: &[Value]) -> crate::track::wire::RunAreaMeta {
-    let id_names = ["runAreaId", "runAreaID", "areaId", "areaID", "runId"];
+    let id_names = ["runAreaId", "runAreaID", "areaId", "areaID"];
     let fence_names = [
         "geoFencesJson", "geoFenceJson", "geoFences", "geoFence", "geoFenceList",
         "fenceList", "fences", "runAreaGeoFences", "runAreaFence",
     ];
     let show_names = ["freedomShowFence", "showFence", "showGeoFence", "isShowFence"];
-    let mut run_area = find_value_recursive(payload, &id_names, 8)
-        .or_else(|| find_value_recursive(payload, &["runArea", "runAreaInfo"], 8));
-    let mut fences = find_value_recursive(payload, &fence_names, 8)
-        .filter(|value| usable_fence(value));
-    let mut show = find_value_recursive(payload, &show_names, 8);
+    // Prefer a non-negative area id. Some responses contain a default -1 near
+    // the top level and the real id inside runArea/runAreaInfo; taking the
+    // first recursive match would permanently hide the valid id.
+    let mut run_area_id = find_nonnegative_field(payload, &id_names, 8)
+        .or_else(|| find_nonnegative_field(payload, &["runArea", "runAreaInfo"], 8))
+        .or_else(|| find_nonnegative_field(payload, &["runId"], 8));
+    let mut fences = find_usable_field(payload, &fence_names, 8);
+    let mut show = find_true_field(payload, &show_names, 8)
+        .or_else(|| find_value_recursive(payload, &show_names, 8));
     for point in points {
-        if run_area.is_none() { run_area = find_value_recursive(point, &id_names, 3); }
-        if fences.is_none() { fences = find_value_recursive(point, &fence_names, 3).filter(usable_fence); }
-        if show.is_none() { show = find_value_recursive(point, &show_names, 3); }
+        if run_area_id.is_none() {
+            run_area_id = find_nonnegative_field(point, &id_names, 3)
+                .or_else(|| find_nonnegative_field(point, &["runArea", "runAreaInfo"], 3));
+        }
+        if fences.is_none() { fences = find_usable_field(point, &fence_names, 3); }
+        if show.is_none() {
+            show = find_true_field(point, &show_names, 3)
+                .or_else(|| find_value_recursive(point, &show_names, 3));
+        }
     }
-    let run_area_id = run_area.as_ref().and_then(value_as_i64).unwrap_or(-1);
+    let run_area_id = run_area_id.unwrap_or(-1);
     let geo_fences_json = fences.as_ref()
         .map(value_as_json_string)
         .filter(|value| !value.trim().is_empty() && value.trim() != "null" && value.trim() != "[]")
@@ -194,6 +205,96 @@ pub(crate) fn area_from_payload(payload: &Value, points: &[Value]) -> crate::tra
         .and_then(value_as_bool)
         .unwrap_or(geo_fences_json.trim() != "[]");
     crate::track::wire::RunAreaMeta { run_area_id, geo_fences_json, freedom_show_fence }
+}
+
+fn find_usable_field(root: &Value, names: &[&str], depth: usize) -> Option<Value> {
+    if depth == 0 { return None; }
+    match root {
+        Value::Object(map) => {
+            for name in names {
+                if let Some(value) = map.get(*name).filter(|value| usable_fence(value)) {
+                    return Some(value.clone());
+                }
+            }
+            for value in map.values() {
+                if let Some(found) = find_usable_field(value, names, depth - 1) { return Some(found); }
+            }
+        }
+        Value::Array(items) => {
+            for value in items {
+                if let Some(found) = find_usable_field(value, names, depth - 1) { return Some(found); }
+            }
+        }
+        Value::String(text) => {
+            if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                return find_usable_field(&parsed, names, depth - 1);
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn find_true_field(root: &Value, names: &[&str], depth: usize) -> Option<Value> {
+    if depth == 0 { return None; }
+    match root {
+        Value::Object(map) => {
+            for name in names {
+                if let Some(value) = map.get(*name).filter(|value| value_as_bool(value) == Some(true)) {
+                    return Some(value.clone());
+                }
+            }
+            for value in map.values() {
+                if let Some(found) = find_true_field(value, names, depth - 1) { return Some(found); }
+            }
+        }
+        Value::Array(items) => {
+            for value in items {
+                if let Some(found) = find_true_field(value, names, depth - 1) { return Some(found); }
+            }
+        }
+        Value::String(text) => {
+            if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                return find_true_field(&parsed, names, depth - 1);
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn find_nonnegative_field(root: &Value, names: &[&str], depth: usize) -> Option<i64> {
+    if depth == 0 { return None; }
+    match root {
+        Value::Object(map) => {
+            for name in names {
+                if let Some(value) = map.get(*name) {
+                    if let Some(id) = value_as_i64(value).filter(|id| *id >= 0) {
+                        return Some(id);
+                    }
+                }
+            }
+            for value in map.values() {
+                if let Some(id) = find_nonnegative_field(value, names, depth - 1) {
+                    return Some(id);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for value in items {
+                if let Some(id) = find_nonnegative_field(value, names, depth - 1) {
+                    return Some(id);
+                }
+            }
+        }
+        Value::String(text) => {
+            if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                return find_nonnegative_field(&parsed, names, depth - 1);
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 fn value_as_i64(value: &Value) -> Option<i64> {
@@ -262,6 +363,35 @@ mod tests {
             "runAreaId": "42",
             "geoFencesJson": [{"lat": 1.0, "lon": 2.0}],
             "freedomShowFence": true,
+        });
+        let area = area_from_payload(&payload, &[]);
+        assert_eq!(area.run_area_id, 42);
+        assert_eq!(area.geo_fences_json, "[{\"lat\":1.0,\"lon\":2.0}]");
+        assert!(area.freedom_show_fence);
+    }
+
+    #[test]
+    fn area_metadata_prefers_valid_nested_id_over_default_minus_one() {
+        let payload = json!({
+            "runAreaId": -1,
+            "runArea": {"id": 42},
+            "geoFencesJson": [{"lat": 1.0, "lon": 2.0}],
+            "freedomShowFence": true,
+        });
+        let area = area_from_payload(&payload, &[]);
+        assert_eq!(area.run_area_id, 42);
+        assert!(area.freedom_show_fence);
+    }
+
+    #[test]
+    fn area_metadata_skips_invalid_fence_fields_and_false_defaults() {
+        let payload = json!({
+            "geoFencesJson": "not-json",
+            "freedomShowFence": false,
+            "data": {
+                "geoFenceList": [{"lat": 1.0, "lon": 2.0}],
+                "runAreaInfo": {"runAreaId": 42, "showFence": true},
+            },
         });
         let area = area_from_payload(&payload, &[]);
         assert_eq!(area.run_area_id, 42);

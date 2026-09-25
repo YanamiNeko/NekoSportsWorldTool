@@ -1,0 +1,218 @@
+# NekoSportsWorldTool Android APK 自动构建
+#
+# 触发方式：
+#   ① 推送 tag：git tag v0.2.6 && git push origin v0.2.6
+#      —— APK 以固定资产名 NekoSportsWorldTool-android-arm64.apk 挂到该 tag 的
+#        Release（与 release.yml 写同一个 Release，桌面端产物由那边附加），
+#        Android 端「关于页」自更新按此资产名精确匹配（src/update.rs asset_name）。
+#   ② 推送 main：仅出 Actions 构建产物（不发布），用于验证 Android 链路可编译。
+#   ③ 手动：Actions 页面 Run workflow。
+#
+# 版本盖章（与 android/release.ps1 同一套编码）：
+#   versionName = <version>-android.<rev>
+#   versionCode = major*1e6 + minor*1e4 + patch*1e2 + rev（覆盖安装要求单调递增）
+#   rev 取值：tag 形如 v0.2.6-android.2 时取 2；普通 tag v0.2.6 取 1；
+#             非 tag 构建（main/手动）取 run_number，仅用于测试、不发布。
+#   tag 构建以 tag 中的版本为基准（设备端自更新用「APK 内 versionName」与
+#   「Release tag」互相比较，二者必须一致；Cargo.toml 忘记 bump 也不会错位），
+#   非 tag 构建读 Cargo.toml。
+#
+# 签名（关键！Android 覆盖安装要求签名一致）：
+#   - tag 构建必须配置仓库 Secret ANDROID_KEYSTORE_BASE64（keystore 文件的
+#     base64），缺失时直接失败——绝不能换密钥静默发布，否则所有已装用户
+#     无法覆盖安装，卸载重装还会丢 identity/session。
+#   - 可选 Secret：ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS /
+#     ANDROID_KEY_PASSWORD（默认 android / androiddebugkey / android）。
+#   - 非 tag 构建无 Secret 时生成一次性调试密钥，产物仅供冒烟安装。
+#   注意：本地脚本默认用 android/.signing/local-test.keystore（不入库）。
+#     若历史 APK 均由该密钥签名，请把它 base64 后配成上述 Secret，保持连续。
+#
+# 构建流程是 android/build.ps1 的 Linux 移植：NDK 29 交叉编译 + ELF 16KB
+# 对齐检查 + javac/d8 + aapt2 + zipalign -P 16 + apksigner 签名校验。
+
+name: APK
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ABI: arm64-v8a
+  TARGET: aarch64-linux-android
+  NDK_VERSION: 29.0.14206865
+  BUILD_TOOLS: 36.0.0
+  PLATFORM: android-36
+  APK_ASSET: NekoSportsWorldTool-android-arm64.apk
+
+jobs:
+  apk:
+    name: APK (arm64-v8a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-apk
+
+      - name: 安装 Android SDK 组件（NDK / build-tools / platform）
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          yes | "$SDKMANAGER" \
+            "ndk;${NDK_VERSION}" "build-tools;${BUILD_TOOLS}" "platforms;${PLATFORM}" > /dev/null
+
+      - name: 盖章版本号（tag 构建以 tag 为准，其余读 Cargo.toml）
+        run: |
+          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          if [ -z "$cargo_version" ]; then echo "Cargo.toml 中找不到 version"; exit 1; fi
+          version=""; rev=""
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            if [[ "${tag#v}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-android\.([0-9]+))?$ ]]; then
+              version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+              rev="${BASH_REMATCH[5]:-1}"
+            else
+              echo "tag 「$tag」不符合 v<major>.<minor>.<patch>[-android.<rev>]，退回 Cargo.toml 版本 + rev 1"
+            fi
+          fi
+          if [ -z "$version" ]; then version="$cargo_version"; rev="${GITHUB_RUN_NUMBER}"; fi
+          IFS='.' read -r major minor patch <<< "$version"
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::warning::tag 版本 $version 与 Cargo.toml 版本 $cargo_version 不一致（以 tag 为准）"
+          fi
+          version_name="$version-android.$rev"
+          version_code=$((10#$major * 1000000 + 10#$minor * 10000 + 10#$patch * 100 + 10#$rev))
+          echo "VERSION_NAME=$version_name" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$version_code" >> "$GITHUB_ENV"
+          echo "版本：$version_name（versionCode $version_code）"
+
+      - name: 编译 Rust 原生库（cdylib + 16KB 页对齐链接参数）
+        run: |
+          NDK_BIN="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "NDK_BIN=$NDK_BIN" >> "$GITHUB_ENV"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/${TARGET}26-clang"
+          export CC_aarch64_linux_android="$NDK_BIN/${TARGET}26-clang"
+          export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS='-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384'
+          cargo build --locked --release --target "$TARGET" --features android --lib
+
+      - name: ELF 16KB 对齐检查
+        run: |
+          so="target/$TARGET/release/libnekosportsworldtool.so"
+          if [ ! -f "$so" ]; then echo "缺少原生库：$so"; exit 1; fi
+          aligns="$("$NDK_BIN/llvm-readelf" -lW "$so" | awk '/^ *LOAD /{print $NF}')"
+          if [ -z "$aligns" ]; then echo "未找到 LOAD 段"; exit 1; fi
+          for a in $aligns; do
+            if [ "$((a))" -lt 16384 ]; then echo "ELF 未按 16KB 对齐：align=$a"; exit 1; fi
+          done
+          echo "ELF LOAD 段均为 16KB 对齐 ✓"
+
+      - name: 打包 APK（javac/d8/aapt2/zipalign，复刻 android/build.ps1）
+        run: |
+          set -e
+          BT="$ANDROID_HOME/build-tools/$BUILD_TOOLS"
+          ANDROID_JAR="$ANDROID_HOME/platforms/$PLATFORM/android.jar"
+          out="android/ci-package"
+          rm -rf "$out"; mkdir -p "$out/classes" "$out/dex" "$out/staging/lib/$ABI"
+
+          # 源码副本 + 盖章 manifest（不动仓库文件）
+          cp -r android/java android/res android/AndroidManifest.xml "$out/"
+          sed -i -E "s/android:versionCode=\"[0-9]+\"/android:versionCode=\"$VERSION_CODE\"/" "$out/AndroidManifest.xml"
+          sed -i -E "s/android:versionName=\"[^\"]*\"/android:versionName=\"$VERSION_NAME\"/" "$out/AndroidManifest.xml"
+          grep -q "android:versionName=\"$VERSION_NAME\"" "$out/AndroidManifest.xml" || { echo "manifest 盖章失败"; exit 1; }
+
+          # Java → dex
+          find "$out/java" -name '*.java' > "$out/sources.txt"
+          javac -encoding UTF-8 -source 8 -target 8 -Xlint:-options \
+            -bootclasspath "$ANDROID_JAR:$BT/core-lambda-stubs.jar" \
+            -d "$out/classes" @"$out/sources.txt"
+          jar cf "$out/classes.jar" -C "$out/classes" .
+          "$BT/d8" --lib "$ANDROID_JAR" --min-api 26 --output "$out/dex" "$out/classes.jar"
+
+          # 资源链接 → 未签名 APK
+          "$BT/aapt2" compile --dir "$out/res" -o "$out/resources.zip"
+          "$BT/aapt2" link -o "$out/unsigned.apk" -I "$ANDROID_JAR" \
+            --manifest "$out/AndroidManifest.xml" "$out/resources.zip"
+
+          # 只装入声明的原生库与 dex（与本地脚本一致，不带多余文件）
+          cp "target/$TARGET/release/libnekosportsworldtool.so" "$out/staging/lib/$ABI/libnekosportsworldtool.so"
+          cp "$out/dex/classes.dex" "$out/staging/classes.dex"
+          ( cd "$out/staging" \
+            && zip -q -d ../unsigned.apk 'classes.dex' 'lib/*' || true \
+            && zip -q -X ../unsigned.apk classes.dex "lib/$ABI/libnekosportsworldtool.so" )
+          "$BT/zipalign" -f -P 16 4 "$out/unsigned.apk" "$out/aligned.apk"
+
+      - name: 准备签名密钥（tag 构建必须有 Secret；否则一次性调试密钥）
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS_SECR: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS_SECR: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS_SECR: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ks="$PWD/android/ci-package/ci.keystore"
+          echo "KEYSTORE=$ks" >> "$GITHUB_ENV"
+          if [ -n "$KS_B64" ]; then
+            printf '%s' "$KS_B64" | base64 -d > "$ks"
+            [ -s "$ks" ] || { echo "ANDROID_KEYSTORE_BASE64 解码为空"; exit 1; }
+            echo "KS_PASS=${KS_PASS_SECR:-android}" >> "$GITHUB_ENV"
+            echo "KS_ALIAS=${KS_ALIAS_SECR:-androiddebugkey}" >> "$GITHUB_ENV"
+            echo "KEY_PASS=${KEY_PASS_SECR:-android}" >> "$GITHUB_ENV"
+            echo "使用仓库 Secret 签名密钥"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "::error::tag 构建必须配置 Secret ANDROID_KEYSTORE_BASE64（keystore 的 base64）。签名不一致会导致所有已装用户无法覆盖安装；本地历史密钥为 android/.signing/local-test.keystore，请将其 base64 后配置。"
+            exit 1
+          else
+            keytool -genkeypair -keystore "$ks" -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname 'CN=Android Debug,O=Android,C=US'
+            echo "KS_PASS=android" >> "$GITHUB_ENV"
+            echo "KS_ALIAS=androiddebugkey" >> "$GITHUB_ENV"
+            echo "KEY_PASS=android" >> "$GITHUB_ENV"
+            echo "::warning::未配置签名 Secret，使用一次性调试密钥（产物仅供冒烟安装，不可覆盖安装到已发布版本）"
+          fi
+
+      - name: 签名与验证
+        run: |
+          set -e
+          BT="$ANDROID_HOME/build-tools/$BUILD_TOOLS"
+          mkdir -p dist
+          apk="dist/$APK_ASSET"
+          "$BT/apksigner" sign --ks "$KEYSTORE" --ks-key-alias "$KS_ALIAS" \
+            --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS" \
+            --out "$apk" android/ci-package/aligned.apk
+          "$BT/apksigner" verify --verbose "$apk"
+          "$BT/zipalign" -c -P 16 4 "$apk"
+          "$BT/aapt2" dump badging "$apk" | grep -E 'package:|sdkVersion:|targetSdkVersion:|native-code:'
+          sha256sum "$apk"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        with:
+          name: NekoSportsWorldTool-android-arm64
+          path: dist/*
+
+      - name: 发布到 Release（tag 触发）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

@@ -25,6 +25,19 @@ Android 移植保留 Rust 业务逻辑、桌面 GUI/CLI 与七个功能页面。
 
 脚本会读 Cargo.toml 版本、盖章 AndroidManifest（versionName=`<版本>-android.<N>`）、构建 arm64 并以固定资产名 `NekoSportsWorldTool-android-arm64.apk` 上传。**必须一直用同一个签名密钥**（`android/.signing/local-test.keystore`）：签名变化后手机无法覆盖安装，卸载重装还会丢 identity/session。
 
+## CI 自动构建（`.github/workflows/apk.yml`）
+
+推送 main 或 tag（`v*`）时在 Ubuntu runner 上自动构建 arm64 APK，流程为本目录 `build.ps1` 的 Linux 移植（NDK 29 交叉编译、ELF 16KB 对齐检查、javac/d8/aapt2/zipalign/apksigner 校验）：
+
+- **main / 手动触发**：仅产出 Actions 构建产物（不发布），用于验证 Android 链路可编译；无签名 Secret 时用一次性调试密钥，仅供冒烟安装。
+- **tag 触发**（如 `v0.2.6` 或 `v0.2.6-android.2`）：自动盖章版本（以 tag 为准，`<版本>-android.<rev>`，versionCode 编码与 release.ps1 相同），并把 `NekoSportsWorldTool-android-arm64.apk` 挂到该 tag 的 Release——Android 端自更新按此资产名精确匹配。
+
+**发布前必须配置仓库 Secret `ANDROID_KEYSTORE_BASE64`**（签名 keystore 文件的 base64，建议直接用 `android/.signing/local-test.keystore` 以保持与历史 APK 签名连续；可选 `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD`，默认 `android` / `androiddebugkey` / `android`）。tag 构建缺失该 Secret 会直接失败——换密钥静默发布会让所有已装用户无法覆盖安装。生成 base64：
+
+```bash
+base64 -w0 android/.signing/local-test.keystore   # Windows: certutil -encode ... 后去掉头尾换行
+```
+
 ## Windows 构建
 
 需要 PowerShell 7、Rust、JDK 21（`javac` 在 PATH 中）和以下 Android SDK 组件：

@@ -100,6 +100,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_route_passes_checkpoints_in_server_order() {
+        let pts = sample_points();
+        for seed in 0..8 {
+            let track = build(2200.0, 900, seed, (38.9, 121.54), 1_788_958_186_123, &pts);
+            let mut previous_index = None;
+            for point in &pts {
+                let first_hit = track
+                    .locations
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, location)| {
+                        let distance = (((location.gLat - point.0) * MET_PER_DEG_LAT).powi(2)
+                            + ((location.gLng - point.1) * MET_PER_DEG_LNG).powi(2))
+                        .sqrt();
+                        (distance <= 20.0).then_some(index)
+                    })
+                    .unwrap_or_else(|| panic!("seed={seed}: route missed checkpoint {point:?}"));
+                if let Some(previous_index) = previous_index {
+                    assert!(
+                        first_hit > previous_index,
+                        "seed={seed}: checkpoint {point:?} at {first_hit} followed an earlier checkpoint at {previous_index}"
+                    );
+                }
+                previous_index = Some(first_hit);
+            }
+        }
+    }
+
     /// 10 秒窗均值配速全部落在有效窗口内（判定规则 2'21"-10'00"/km），且总距精确。
     /// 逐点 avgSpeed 允许越界（真人爬坡期同样低于窗口，见 OBS 样本）。
     #[test]

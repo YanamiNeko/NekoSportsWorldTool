@@ -65,13 +65,9 @@ pub fn make_point_ring(bd_points: &[(f64, f64)]) -> PointRing {
     let n = bd_points.len();
     let cx = bd_points.iter().map(|q| q.0).sum::<f64>() / n as f64;
     let cy = bd_points.iter().map(|q| q.1).sum::<f64>() / n as f64;
-    let mut ordered = bd_points.to_vec();
-    ordered.sort_by(|a, b| {
-        let ka = (a.0 - cx).atan2(a.1 - cy);
-        let kb = (b.0 - cx).atan2(b.1 - cy);
-        ka.partial_cmp(&kb).unwrap()
-    });
-    let plane: Vec<(f64, f64)> = ordered
+    // The API's point order is the required check-in order; reordering by
+    // geometry can make the route visit valid coordinates in the wrong order.
+    let plane: Vec<(f64, f64)> = bd_points
         .iter()
         .map(|q| ((q.1 - cy) * MET_PER_DEG_LNG, (q.0 - cx) * MET_PER_DEG_LAT))
         .collect();

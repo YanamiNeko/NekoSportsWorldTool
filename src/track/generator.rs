@@ -45,8 +45,10 @@ pub fn build(
     let dur_f = dur as f64;
     let (dense, arcs, pc) = make_point_ring(points_bd);
     let (c_lat, c_lng) = pc;
-    let direction: f64 = rng.choice(&[1.0, -1.0]);
-    let s0 = rng.uniform(0.0, *arcs.last().unwrap_or(&400.0));
+    // Start at checkpoint 1 and follow the server-provided order so the
+    // checkpoint tracker can recognize each pass in sequence.
+    let direction = 1.0;
+    let s0 = 0.0;
     let phase_v = rng.uniform(0.0, std::f64::consts::TAU);
     let phase_l = rng.uniform(0.0, std::f64::consts::TAU);
 

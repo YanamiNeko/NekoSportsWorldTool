@@ -67,9 +67,19 @@ pub fn make_point_ring(bd_points: &[(f64, f64)]) -> PointRing {
     let n = bd_points.len();
     let cx = bd_points.iter().map(|q| q.0).sum::<f64>() / n as f64;
     let cy = bd_points.iter().map(|q| q.1).sum::<f64>() / n as f64;
-    // The API's point order is the required check-in order; reordering by
-    // geometry can make the route visit valid coordinates in the wrong order.
-    let plane: Vec<(f64, f64)> = bd_points
+    // The point endpoint returns business records, not points ordered around
+    // the track. Connecting that array directly can create a bow-tie route.
+    // Keep the server array untouched for fixed-point metadata, but order the
+    // route itself around its center so it follows the outside of the track.
+    let mut ordered = bd_points.to_vec();
+    ordered.sort_by(|a, b| {
+        let angle_a = (a.0 - cx).atan2(a.1 - cy);
+        let angle_b = (b.0 - cx).atan2(b.1 - cy);
+        angle_a
+            .partial_cmp(&angle_b)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let plane: Vec<(f64, f64)> = ordered
         .iter()
         .map(|q| ((q.1 - cy) * MET_PER_DEG_LNG, (q.0 - cx) * MET_PER_DEG_LAT))
         .collect();

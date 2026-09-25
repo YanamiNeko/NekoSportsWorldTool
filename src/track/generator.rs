@@ -48,8 +48,8 @@ pub fn build(
     let dur_f = dur as f64;
     let (dense, arcs, pc) = make_point_ring(points_bd);
     let (c_lat, c_lng) = pc;
-    // Start at checkpoint 1 and follow the server-provided order so the
-    // checkpoint tracker can recognize each pass in sequence.
+    // The route ring has been ordered geometrically around the track; the
+    // source point array remains unchanged for the server's fixed-point data.
     let direction = 1.0;
     let s0 = 0.0;
     let phase_v = rng.uniform(0.0, std::f64::consts::TAU);

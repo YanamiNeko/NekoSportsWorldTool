@@ -222,31 +222,31 @@ mod tests {
     }
 
     #[test]
-    fn test_route_passes_checkpoints_in_server_order() {
-        let pts = sample_points();
-        for seed in 0..8 {
-            let track = build(2200.0, 900, seed, (38.9, 121.54), 1_788_958_186_123, &pts);
-            let mut previous_index = None;
-            for point in &pts {
-                let first_hit = track
-                    .locations
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, location)| {
-                        let distance = (((location.gLat - point.0) * MET_PER_DEG_LAT).powi(2)
-                            + ((location.gLng - point.1) * MET_PER_DEG_LNG).powi(2))
-                        .sqrt();
-                        (distance <= 20.0).then_some(index)
-                    })
-                    .unwrap_or_else(|| panic!("seed={seed}: route missed checkpoint {point:?}"));
-                if let Some(previous_index) = previous_index {
-                    assert!(
-                        first_hit > previous_index,
-                        "seed={seed}: checkpoint {point:?} at {first_hit} followed an earlier checkpoint at {previous_index}"
-                    );
-                }
-                previous_index = Some(first_hit);
-            }
+    fn test_unsorted_checkpoints_form_a_track_perimeter_and_route_hits_them() {
+        // Same rectangle in deliberately crossed service response order.
+        let points = [
+            (38.9009, 121.5410), // northeast
+            (38.8991, 121.5390), // southwest
+            (38.9009, 121.5390), // northwest
+            (38.8991, 121.5410), // southeast
+        ];
+        let (_, arcs, _) = super::geom::make_point_ring(&points);
+        let perimeter = *arcs.last().unwrap();
+        let expected = 2.0 * (0.0018 * MET_PER_DEG_LAT + 0.002 * MET_PER_DEG_LNG);
+        assert!((perimeter - expected).abs() < 0.1, "perimeter={perimeter}");
+
+        let track = build(2200.0, 900, 7, (38.9, 121.54), 1_788_958_186_123, &points);
+        for point in &points {
+            let min_m = track
+                .locations
+                .iter()
+                .map(|location| {
+                    (((location.gLat - point.0) * MET_PER_DEG_LAT).powi(2)
+                        + ((location.gLng - point.1) * MET_PER_DEG_LNG).powi(2))
+                    .sqrt()
+                })
+                .fold(f64::INFINITY, f64::min);
+            assert!(min_m < 1.0, "route missed checkpoint {point:?}: {min_m}m");
         }
     }
 

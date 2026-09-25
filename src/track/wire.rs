@@ -77,6 +77,38 @@ fn gz_str(v: &str) -> String {
     gz(v.as_bytes())
 }
 
+fn value_as_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+        .filter(|number: &f64| number.is_finite())
+}
+
+fn value_as_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .or_else(|| value_as_f64(value).map(|number| number as i64))
+        .or_else(|| value.as_bool().map(|value| if value { 1 } else { 0 }))
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| match text.trim().to_ascii_lowercase().as_str() {
+                    "true" | "yes" => Some(1),
+                    "false" | "no" => Some(0),
+                    _ => None,
+                })
+        })
+}
+
+fn server_or(value: &Value, field: &str, fallback: Value) -> Value {
+    value
+        .get(field)
+        .filter(|item| !item.is_null())
+        .cloned()
+        .unwrap_or(fallback)
+}
+
 /// 28 键协议点集（gen 点 → OBS 点；gLat/gLng 由 BD 转 GCJ）。
 pub fn conv_point(p: &GenPoint, start_ms: i64) -> Value {
     let (glat, glng) = bd09_to_gcj02(p.gLat, p.gLng);
@@ -120,16 +152,16 @@ pub fn five_point_payload(points: &[Value], start_ms: i64) -> Vec<Value> {
         .map(|(i, p)| {
             json!({
                 "flag": start_ms,
-                "glat": p["glat"].as_f64().unwrap_or(0.0),
-                "glon": p["glon"].as_f64().unwrap_or(0.0),
-                "id": i as i64 + 1,
-                "isFixed": p["isFixed"].as_i64().unwrap_or(0),
+                "glat": p.get("glat").and_then(value_as_f64).unwrap_or(0.0),
+                "glon": p.get("glon").and_then(value_as_f64).unwrap_or(0.0),
+                "id": server_or(p, "id", json!(i as i64 + 1)),
+                "isFixed": p.get("isFixed").and_then(value_as_i64).unwrap_or(0),
                 "isPass": true,
-                "lat": p["lat"].as_f64().unwrap_or(0.0),
-                "lon": p["lon"].as_f64().unwrap_or(0.0),
+                "lat": p.get("lat").and_then(value_as_f64).unwrap_or(0.0),
+                "lon": p.get("lon").and_then(value_as_f64).unwrap_or(0.0),
                 "pointName": p["pointName"].as_str().unwrap_or(""),
-                "position": 999,
-                "state": 0,
+                "position": server_or(p, "position", json!(999)),
+                "state": server_or(p, "state", json!(0)),
             })
         })
         .collect()
@@ -189,6 +221,42 @@ mod validation_tests {
     fn rejects_empty_or_malformed_five_point_payload() {
         assert!(validate_five_point_wrapper("{}").is_err());
         assert!(validate_five_point_wrapper(r#"{"fivePointJson":"[]"}"#).is_err());
+    }
+
+    #[test]
+    fn fixed_point_payload_accepts_string_coordinates_and_boolean_flags() {
+        let points = vec![json!({
+            "lat": "39.493046", "lon": "116.255475",
+            "glat": "39.493046", "glon": "116.255475",
+            "isFixed": true, "pointName": "点位1",
+            "id": 73, "position": 4, "state": 1,
+        })];
+        let payload = five_point_payload(&points, 123);
+        assert_eq!(payload.len(), 1);
+        assert_eq!(payload[0]["lat"], 39.493046);
+        assert_eq!(payload[0]["lon"], 116.255475);
+        assert_eq!(payload[0]["glat"], 39.493046);
+        assert_eq!(payload[0]["glon"], 116.255475);
+        assert_eq!(payload[0]["isFixed"], 1);
+        assert_eq!(payload[0]["isPass"], true);
+        assert_eq!(payload[0]["id"], 73);
+        assert_eq!(payload[0]["position"], 4);
+        assert_eq!(payload[0]["state"], 1);
+    }
+
+    #[test]
+    fn fixed_point_payload_parses_string_fixed_flag_and_keeps_defaults() {
+        let payload = five_point_payload(
+            &[json!({
+                "lat": 39.4, "lon": 116.2, "glat": 39.4, "glon": 116.2,
+                "isFixed": "1",
+            })],
+            123,
+        );
+        assert_eq!(payload[0]["isFixed"], 1);
+        assert_eq!(payload[0]["id"], 1);
+        assert_eq!(payload[0]["position"], 999);
+        assert_eq!(payload[0]["state"], 0);
     }
 
     #[test]

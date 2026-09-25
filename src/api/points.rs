@@ -336,9 +336,28 @@ fn value_as_json_string(value: &Value) -> String {
 #[allow(dead_code)]
 pub fn center_bd(points: &[Value]) -> (f64, f64) {
     let n = points.len().max(1) as f64;
-    let lat = points.iter().filter_map(|p| p.get("lat").and_then(|v| v.as_f64())).sum::<f64>() / n;
-    let lon = points.iter().filter_map(|p| p.get("lon").and_then(|v| v.as_f64())).sum::<f64>() / n;
+    let lat = points
+        .iter()
+        .filter_map(|p| p.get("lat").and_then(value_as_f64))
+        .sum::<f64>()
+        / n;
+    let lon = points
+        .iter()
+        .filter_map(|p| p.get("lon").and_then(value_as_f64))
+        .sum::<f64>()
+        / n;
     (lat, lon)
+}
+
+fn value_as_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| text.trim().parse::<f64>().ok())
+        })
+        .filter(|number| number.is_finite())
 }
 
 /// 点位 → (lat, lon) BD 系数组（轨迹输入）。
@@ -346,8 +365,8 @@ pub fn points_bd(points: &[Value]) -> Vec<(f64, f64)> {
     points
         .iter()
         .filter_map(|p| {
-            let lat = p.get("lat")?.as_f64()?;
-            let lon = p.get("lon")?.as_f64()?;
+            let lat = p.get("lat").and_then(value_as_f64)?;
+            let lon = p.get("lon").and_then(value_as_f64)?;
             Some((lat, lon))
         })
         .collect()
@@ -427,5 +446,11 @@ mod tests {
         assert_eq!(area.run_area_id, -1);
         assert!(area.freedom_show_fence);
         assert_eq!(area.geo_fences_json, "[{\"lat\":39.4,\"lon\":116.2}]");
+    }
+
+    #[test]
+    fn point_coordinates_accept_numeric_strings_without_zero_fallbacks() {
+        let points = vec![json!({"lat": "39.493046", "lon": "116.255475"})];
+        assert_eq!(points_bd(&points), vec![(39.493046, 116.255475)]);
     }
 }

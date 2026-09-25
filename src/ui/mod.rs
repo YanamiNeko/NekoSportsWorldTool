@@ -335,8 +335,12 @@ impl App {
                 dist_max: config.dist_max,
                 pace_min: config.pace_min,
                 pace_max: config.pace_max,
-                manual_altitude: config.manual_altitude_range
-                    .map(|r| format!("{}-{}", r.min_m, r.max_m))
+                manual_altitude_min: config.manual_altitude_range
+                    .map(|r| r.min_m.to_string())
+                    .or_else(|| config.manual_altitude.map(|v| v.to_string()))
+                    .unwrap_or_default(),
+                manual_altitude_max: config.manual_altitude_range
+                    .map(|r| r.max_m.to_string())
                     .or_else(|| config.manual_altitude.map(|v| v.to_string()))
                     .unwrap_or_default(),
                 start_mode: 0,

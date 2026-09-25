@@ -89,12 +89,40 @@ fn cmd_run(rest: &[&str]) -> i32 {
             return 1;
         }
     };
-    let dist_km: f32 = get(&flags, "dist").and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    let pace: f32 = get(&flags, "pace").map(parse_pace).unwrap_or(0.0);
+    // Keep explicit values bounded before they reach the point generator.  A
+    // non-finite or enormous distance would otherwise turn into a huge number
+    // of sampled points and can exhaust memory/CPU.
+    let dist_km = match get(&flags, "dist") {
+        None => 0.0,
+        Some(value) => match value.parse::<f32>() {
+            Ok(value) if value.is_finite() && value > 0.0 && value <= 50.0 => value,
+            _ => {
+                eprintln!("--dist 必须是大于 0 且不超过 50 km 的有限数值");
+                return 1;
+            }
+        },
+    };
+    let pace = match get(&flags, "pace") {
+        None => 0.0,
+        Some(value) => {
+            let pace = parse_pace(value);
+            if pace.is_finite() && pace > 0.0 && pace <= 1200.0 {
+                pace
+            } else {
+                eprintln!("--pace 必须是大于 0 且不超过 1200 秒/km 的有限数值");
+                return 1;
+            }
+        }
+    };
     let ago_min: i64 = get(&flags, "ago").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let days_ago: i64 = get(&flags, "days-ago").and_then(|v| v.parse().ok()).unwrap_or(0).clamp(0, 3);
+    let days_ago: i64 = get(&flags, "days-ago")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+        .clamp(0, 3);
     let time_spec = get(&flags, "time").unwrap_or("");
-    let face = get(&flags, "face").map(|v| v == "1" || v == "true").unwrap_or(true);
+    let face = get(&flags, "face")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(true);
     let (manual_altitude, manual_altitude_range) = match get(&flags, "altitude") {
         Some(value) => match crate::track::altitude::parse_spec(value) {
             Ok(Some(crate::track::altitude::AltitudeSpec::Single(value))) => (Some(value), None),
@@ -107,20 +135,33 @@ fn cmd_run(rest: &[&str]) -> i32 {
         },
         None => (None, None),
     };
-    let seed: u64 = get(&flags, "seed").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let seed = if seed == 0 { (now_ms() % 2_147_483_647) as u64 } else { seed };
+    let seed: u64 = get(&flags, "seed")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let seed = if seed == 0 {
+        (now_ms() % 2_147_483_647) as u64
+    } else {
+        seed
+    };
 
     let dist = if dist_km > 0.0 {
         dist_km as f64 * 1000.0
     } else {
         (1.0 + rand::random::<f32>() * 0.5) as f64 * 1000.0
     };
-    let pace_s = if pace > 0.0 { pace } else { 360.0 + rand::random::<f32>() * 120.0 };
+    let pace_s = if pace > 0.0 {
+        pace
+    } else {
+        360.0 + rand::random::<f32>() * 120.0
+    };
     let dur = (dist as f32 / 1000.0 * pace_s) as i64;
     let start_ms = if !time_spec.is_empty() {
         // --time "HH:MM" 配合 --days-ago（0-3）
         let (h, m) = time_spec.split_once(':').unwrap_or((time_spec, "0"));
-        let (h, m) = (h.parse::<u32>().unwrap_or(7) % 24, m.parse::<u32>().unwrap_or(0));
+        let (h, m) = (
+            h.parse::<u32>().unwrap_or(7) % 24,
+            m.parse::<u32>().unwrap_or(0),
+        );
         let base = chrono::Local::now() - chrono::Duration::days(days_ago);
         use chrono::{Datelike, TimeZone};
         chrono::Local
@@ -144,15 +185,26 @@ fn cmd_run(rest: &[&str]) -> i32 {
     );
 
     let mut log = logger();
-    let params = crate::api::flow::RunParams { dist, dur, start_ms, face_check: face as i64, manual_altitude, manual_altitude_range, seed };
+    let params = crate::api::flow::RunParams {
+        dist,
+        dur,
+        start_ms,
+        face_check: face as i64,
+        manual_altitude,
+        manual_altitude_range,
+        seed,
+    };
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {
             println!(
-                "跑步提交成功 rrid={} uuid={} obs={}/2 verify={}",
+                "跑步提交成功 rrid={} uuid={} obs_upload={}/2 obs_roundtrip={} detail_request={} detail_complete={} detail_checks_passed={}",
                 out.result.rrid,
                 out.result.uuid,
-                out.obs_ok,
-                if out.detail_ok { "通过" } else { "未通过" }
+                out.obs_upload,
+                out.obs_roundtrip,
+                out.detail_request,
+                out.detail_complete,
+                out.detail_checks_passed,
             );
             0
         }
@@ -176,7 +228,10 @@ fn cmd_template(rest: &[&str]) -> i32 {
             println!("文件：{}", summary.source);
             println!("采样点：{}", summary.samples);
             println!("海拔范围：{:.1}–{:.1} m", summary.min_m, summary.max_m);
-            println!("累计上升：{:.1} m；累计下降：{:.1} m", summary.gain_m, summary.loss_m);
+            println!(
+                "累计上升：{:.1} m；累计下降：{:.1} m",
+                summary.gain_m, summary.loss_m
+            );
             0
         }
         Err(e) => {
@@ -200,7 +255,9 @@ fn cmd_ai(rest: &[&str]) -> i32 {
                 .and_then(|v| v.parse::<i64>().ok())
                 .unwrap_or(5)
                 .clamp(5, 1000);
-            AiMode::Count { reps: (reps / 5) * 5 }
+            AiMode::Count {
+                reps: (reps / 5) * 5,
+            }
         }
         _ => {
             let minutes = get(&flags, "score")
@@ -302,10 +359,19 @@ fn cmd_records_raw(rest: &[&str]) -> i32 {
                     .ok();
                 println!("已保存 {out}");
             } else if n > 0 {
-                println!("首条: {}", &arr[0].to_string()[..arr[0].to_string().len().min(300)]);
-                println!("末条: {}", &arr[n - 1].to_string()[..arr[n - 1].to_string().len().min(300)]);
+                println!(
+                    "首条: {}",
+                    crate::textlog::truncate(&arr[0].to_string(), 300)
+                );
+                println!(
+                    "末条: {}",
+                    crate::textlog::truncate(&arr[n - 1].to_string(), 300)
+                );
             } else {
-                println!("data: {}", data.to_string()[..data.to_string().len().min(500)].to_string());
+                println!(
+                    "data: {}",
+                    crate::textlog::truncate(&data.to_string(), 500)
+                );
             }
             0
         }
@@ -336,9 +402,12 @@ fn cmd_obs_get(rest: &[&str]) -> i32 {
             let out = get(&flags, "out").unwrap_or("obs_real.json");
             // 解码 gzip+base64 值便于直接阅读
             let decoded = decode_gz_fields(&v);
-            std::fs::write(out, serde_json::to_string_pretty(&decoded).unwrap_or_default())
-                .map_err(|e| eprintln!("写入失败: {e}"))
-                .ok();
+            std::fs::write(
+                out,
+                serde_json::to_string_pretty(&decoded).unwrap_or_default(),
+            )
+            .map_err(|e| eprintln!("写入失败: {e}"))
+            .ok();
             println!("已保存 {out}");
             0
         }
@@ -381,10 +450,18 @@ fn decode_gz_fields(v: &serde_json::Value) -> serde_json::Value {
 /// 本地生成一份 OBS 对象样本（不提交；结构对照用）。
 fn cmd_obs_sample(rest: &[&str]) -> i32 {
     let flags = parse_flags(rest);
-    let dist = get(&flags, "dist").and_then(|v| v.parse::<f64>().ok()).unwrap_or(1050.0);
-    let dur = get(&flags, "dur").and_then(|v| v.parse::<i64>().ok()).unwrap_or(480);
-    let rrid = get(&flags, "rrid").and_then(|v| v.parse::<i64>().ok()).unwrap_or(1320000000);
-    let seed = get(&flags, "seed").and_then(|v| v.parse::<u64>().ok()).unwrap_or(7);
+    let dist = get(&flags, "dist")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(1050.0);
+    let dur = get(&flags, "dur")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(480);
+    let rrid = get(&flags, "rrid")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(1320000000);
+    let seed = get(&flags, "seed")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(7);
     let mut client = match make_client() {
         Ok(c) => c,
         Err(e) => {
@@ -409,15 +486,25 @@ fn cmd_obs_sample(rest: &[&str]) -> i32 {
     };
     let pts_bd = crate::api::points::points_bd(&pts);
     let start_ms = crate::crypto::envelope::now_ms() - dur * 1000;
-    let track = crate::track::generator::build(dist, dur, seed, (anchor.latitude, anchor.longitude), start_ms, &pts_bd);
+    let track = crate::track::generator::build(
+        dist,
+        dur,
+        seed,
+        (anchor.latitude, anchor.longitude),
+        start_ms,
+        &pts_bd,
+    );
     let sess = client.login.clone().unwrap_or_default();
     let uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
     let obj = crate::track::wire::build_obs_object(&track, rrid, &uuid, sess.uid, &pts);
     let out = get(&flags, "out").unwrap_or("obs_ours.json");
     let decoded = decode_gz_fields(&obj);
-    std::fs::write(out, serde_json::to_string_pretty(&decoded).unwrap_or_default())
-        .map_err(|e| eprintln!("写入失败: {e}"))
-        .ok();
+    std::fs::write(
+        out,
+        serde_json::to_string_pretty(&decoded).unwrap_or_default(),
+    )
+    .map_err(|e| eprintln!("写入失败: {e}"))
+    .ok();
     println!("已保存 {out}");
     0
 }
@@ -552,7 +639,9 @@ fn cmd_semester() -> i32 {
 
 fn cmd_cheat(rest: &[&str]) -> i32 {
     let flags = parse_flags(rest);
-    let page: i64 = get(&flags, "page").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let page: i64 = get(&flags, "page")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
     let mut client = match make_client() {
         Ok(c) => c,
         Err(e) => {
@@ -598,16 +687,24 @@ fn cmd_rank(rest: &[&str]) -> i32 {
     };
     let res = match kind {
         "indoor" => {
-            let range: i64 = get(&flags, "range").and_then(|v| v.parse().ok()).unwrap_or(1);
+            let range: i64 = get(&flags, "range")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
             crate::api::rank::indoor_rank(&mut client, range, -1)
         }
         "history" => {
-            let sort: i64 = get(&flags, "sort").and_then(|v| v.parse().ok()).unwrap_or(1);
+            let sort: i64 = get(&flags, "sort")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
             crate::api::rank::history_rank(&mut client, sort, -1)
         }
         _ => {
-            let rtype: i64 = get(&flags, "type").and_then(|v| v.parse().ok()).unwrap_or(1);
-            let sort: i64 = get(&flags, "sort").and_then(|v| v.parse().ok()).unwrap_or(1);
+            let rtype: i64 = get(&flags, "type")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            let sort: i64 = get(&flags, "sort")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
             let gender = get(&flags, "gender").and_then(|v| v.parse().ok());
             let date = get(&flags, "date").map(|v| v.to_string());
             crate::api::rank::main_rank(&mut client, rtype, sort, gender, date)

@@ -20,8 +20,12 @@ const JITTER_MARGIN_MS: i64 = 5_000;
 /// 退化为 latest_ms，宁可贴近当前时间，也不产生「未来开跑」。
 fn random_time_ago(days_ago: i64, latest_ms: i64) -> i64 {
     let base = Local::now() - Duration::days(days_ago.clamp(0, 3));
-    let lo = Local.with_ymd_and_hms(base.year(), base.month(), base.day(), RAND_HOUR_LO, 0, 0).single();
-    let hi = Local.with_ymd_and_hms(base.year(), base.month(), base.day(), RAND_HOUR_HI, 0, 0).single();
+    let lo = Local
+        .with_ymd_and_hms(base.year(), base.month(), base.day(), RAND_HOUR_LO, 0, 0)
+        .single();
+    let hi = Local
+        .with_ymd_and_hms(base.year(), base.month(), base.day(), RAND_HOUR_HI, 0, 0)
+        .single();
     let (lo_ms, hi_ms) = match (lo, hi) {
         (Some(l), Some(h)) => (l.timestamp_millis(), h.timestamp_millis()),
         _ => return latest_ms,
@@ -61,8 +65,10 @@ pub struct RunPage {
     pub dist_max: f32,
     pub pace_min: f32,
     pub pace_max: f32,
-    /// 手动绝对海拔（米）；空白表示使用生成器默认海拔。
-    pub manual_altitude: String,
+    /// 手动海拔范围最低值；与最高值同时为空表示使用生成器默认海拔。
+    pub manual_altitude_min: String,
+    /// 手动海拔范围最高值。
+    pub manual_altitude_max: String,
     /// 0=随机时刻 1=指定时刻
     pub start_mode: usize,
     pub days_ago: i64,
@@ -119,8 +125,14 @@ impl RunPage {
 
     /// 按当前参数抽样运动量（距离 / 配速 / 用时）。
     fn sample_shape(&self) -> (f64, f32, i64) {
-        let (lo, hi) = (self.dist_min.min(self.dist_max), self.dist_min.max(self.dist_max));
-        let (plo, phi) = (self.pace_min.min(self.pace_max), self.pace_min.max(self.pace_max));
+        let (lo, hi) = (
+            self.dist_min.min(self.dist_max),
+            self.dist_min.max(self.dist_max),
+        );
+        let (plo, phi) = (
+            self.pace_min.min(self.pace_max),
+            self.pace_min.max(self.pace_max),
+        );
         let pace = plo + (phi - plo) * rand::random::<f32>();
         let dist = (lo + (hi - lo) * rand::random::<f32>()) as f64;
         let dur = (dist * pace as f64).round() as i64;
@@ -245,9 +257,25 @@ impl App {
             let page = &mut self.run_page;
             let compact = mobile::compact_ui(ui);
             let mut draw_distance_inputs = |ui: &mut egui::Ui| {
-                mobile::drag_f32(ui, "run_dist_min", &mut page.dist_min, 0.5..=20.0, 0.05, 2, " km");
+                mobile::drag_f32(
+                    ui,
+                    "run_dist_min",
+                    &mut page.dist_min,
+                    0.5..=20.0,
+                    0.05,
+                    2,
+                    " km",
+                );
                 ui.label("至");
-                mobile::drag_f32(ui, "run_dist_max", &mut page.dist_max, 0.5..=20.0, 0.05, 2, " km");
+                mobile::drag_f32(
+                    ui,
+                    "run_dist_max",
+                    &mut page.dist_max,
+                    0.5..=20.0,
+                    0.05,
+                    2,
+                    " km",
+                );
             };
             if compact {
                 ui.label("距离范围（km）：");
@@ -259,9 +287,25 @@ impl App {
                 });
             }
             let mut draw_pace_inputs = |ui: &mut egui::Ui| {
-                mobile::drag_f32(ui, "run_pace_min", &mut page.pace_min, 180.0..=520.0, 5.0, 0, "");
+                mobile::drag_f32(
+                    ui,
+                    "run_pace_min",
+                    &mut page.pace_min,
+                    180.0..=520.0,
+                    5.0,
+                    0,
+                    "",
+                );
                 ui.label("至");
-                mobile::drag_f32(ui, "run_pace_max", &mut page.pace_max, 180.0..=520.0, 5.0, 0, "");
+                mobile::drag_f32(
+                    ui,
+                    "run_pace_max",
+                    &mut page.pace_max,
+                    180.0..=520.0,
+                    5.0,
+                    0,
+                    "",
+                );
             };
             if compact {
                 ui.label("配速范围（秒/km）：");
@@ -273,15 +317,25 @@ impl App {
                 });
             }
             mobile::row(ui, |ui| {
-                ui.label("手动海拔（米/区间）：");
+                ui.label("海拔范围（米）：");
+                ui.label("最低");
                 mobile::text_edit(
                     ui,
-                    "run_manual_altitude",
-                    &mut page.manual_altitude,
+                    "run_manual_altitude_min",
+                    &mut page.manual_altitude_min,
                     crate::platform::InputKind::Text,
-                    120.0,
+                    80.0,
                 );
-                ui.label("留空自动；可填 17.2 或 11.6-22.8");
+                ui.label("-");
+                ui.label("最高");
+                mobile::text_edit(
+                    ui,
+                    "run_manual_altitude_max",
+                    &mut page.manual_altitude_max,
+                    crate::platform::InputKind::Text,
+                    80.0,
+                );
+                ui.label("留空自动");
             });
             mobile::row(ui, |ui| {
                 ui.label("开始时间：");
@@ -309,11 +363,21 @@ impl App {
                 // 今天 + 指定时刻：提示是否落在未来
                 let now = Local::now();
                 let spec = Local
-                    .with_ymd_and_hms(now.year(), now.month(), now.day(), page.hour as u32, page.minute as u32, 0)
+                    .with_ymd_and_hms(
+                        now.year(),
+                        now.month(),
+                        now.day(),
+                        page.hour as u32,
+                        page.minute as u32,
+                        0,
+                    )
                     .single();
                 if let Some(t) = spec {
                     if t.timestamp_millis() > crate::crypto::envelope::now_ms() {
-                        ui.colored_label(theme::warn(), "指定时刻在今天且尚未到达，将按当前时间提交");
+                        ui.colored_label(
+                            theme::warn(),
+                            "指定时刻在今天且尚未到达，将按当前时间提交",
+                        );
                     }
                 }
             }
@@ -360,7 +424,11 @@ impl App {
 
         ui.add_space(8.0);
         let enabled = !self.run_busy && self.session.is_some();
-        let btn = if self.run_busy { theme::primary_btn("提交中…") } else { theme::primary_btn("开始跑步") };
+        let btn = if self.run_busy {
+            theme::primary_btn("提交中…")
+        } else {
+            theme::primary_btn("开始跑步")
+        };
         mobile::row(ui, |ui| {
             if ui.add_enabled(enabled, btn).clicked() {
                 self.start_run();
@@ -415,18 +483,17 @@ impl App {
             Some(p) => p,
             None => return,
         };
-        let altitude_spec = match crate::track::altitude::parse_spec(&page.manual_altitude) {
-            Ok(spec) => spec,
+        let manual_altitude_range = match crate::track::altitude::parse_range_fields(
+            &page.manual_altitude_min,
+            &page.manual_altitude_max,
+        ) {
+            Ok(range) => range,
             Err(e) => {
                 self.status = e;
                 return;
             }
         };
-        let (manual_altitude, manual_altitude_range) = match altitude_spec {
-            None => (None, None),
-            Some(crate::track::altitude::AltitudeSpec::Single(value)) => (Some(value), None),
-            Some(crate::track::altitude::AltitudeSpec::Range(range)) => (None, Some(range)),
-        };
+        let manual_altitude = None;
         let (dist, dur) = (plan.dist * 1000.0, plan.dur); // 米
         let start_ms = plan.start_ms;
         let face_check = if page.face_check { 1 } else { 0 };
@@ -457,12 +524,23 @@ impl App {
             let payload = match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
                 Ok(out) => {
                     log(&format!(
-                        "全链完成 rrid={} obs={}/2 verify={} uuid={}",
-                        out.result.rrid, out.obs_ok, out.detail_ok, out.result.uuid
+                        "全链完成 rrid={} obs_upload={}/2 obs_roundtrip={} detail_request={} detail_complete={} detail_checks_passed={} uuid={}",
+                        out.result.rrid,
+                        out.obs_upload,
+                        out.obs_roundtrip,
+                        out.detail_request,
+                        out.detail_complete,
+                        out.detail_checks_passed,
+                        out.result.uuid
                     ));
                     serde_json::json!({
                         "ok": true, "rrid": out.result.rrid,
-                        "obs_ok": out.obs_ok, "verify": out.detail_ok,
+                        "obs_upload": out.obs_upload,
+                        "obs_roundtrip": out.obs_roundtrip,
+                        "detail_request": out.detail_request,
+                        "detail_complete": out.detail_complete,
+                        "reason_list": out.reason_list,
+                        "detail_checks_passed": out.detail_checks_passed,
                         "uuid": out.result.uuid,
                         "dist": out.result.total_dis, "dur": out.result.total_time,
                         "steps": out.result.total_steps, "avg_step_freq": out.result.avg_step_freq,
@@ -491,7 +569,8 @@ mod tests {
             dist_max: 2.2,
             pace_min: 350.0,
             pace_max: 370.0,
-            manual_altitude: String::new(),
+            manual_altitude_min: String::new(),
+            manual_altitude_max: String::new(),
             start_mode,
             days_ago,
             hour: 12,
@@ -649,7 +728,11 @@ mod tests {
             .unwrap()
             .timestamp_millis();
         let now_ms = crate::crypto::envelope::now_ms();
-        assert_eq!(plan.start_ms, want.min(now_ms), "指定时刻未按 min(填入, 现在) 处理");
+        assert_eq!(
+            plan.start_ms,
+            want.min(now_ms),
+            "指定时刻未按 min(填入, 现在) 处理"
+        );
         assert_start_not_future(&plan);
     }
 
@@ -669,7 +752,11 @@ mod tests {
         p.dist_max = 3.5;
         p.ensure_plan();
         let after = p.plan.clone().unwrap();
-        assert_ne!((after.dist, after.pace), (before.dist, before.pace), "运动量未重抽");
+        assert_ne!(
+            (after.dist, after.pace),
+            (before.dist, before.pace),
+            "运动量未重抽"
+        );
         assert_eq!(after.start_ms, before.start_ms, "改距离不应改动指定时刻");
         assert_eq!((p.hour, p.minute), (9, 15));
     }
@@ -686,7 +773,10 @@ mod tests {
         p.ensure_plan();
         let after = p.plan.clone().unwrap();
         assert_eq!((after.hour, after.minute), (8, 45));
-        assert_eq!((after.dist, after.pace, after.dur), (before.dist, before.pace, before.dur));
+        assert_eq!(
+            (after.dist, after.pace, after.dur),
+            (before.dist, before.pace, before.dur)
+        );
         assert_start_not_future(&after);
     }
 
@@ -701,7 +791,10 @@ mod tests {
         p.ensure_plan();
         let after = p.plan.clone().unwrap();
         assert_eq!(after.start_mode, 0);
-        assert_eq!((after.dist, after.pace, after.dur), (before.dist, before.pace, before.dur));
+        assert_eq!(
+            (after.dist, after.pace, after.dur),
+            (before.dist, before.pace, before.dur)
+        );
         assert_random_not_future(&after);
     }
 
@@ -852,6 +945,9 @@ mod tests {
             plan.days_ago = 0;
             plan.start_ms = early;
         }
-        assert!(!p.random_window_ok(), "今天 03:00 不应被判为在 7:00-20:00 窗口内");
+        assert!(
+            !p.random_window_ok(),
+            "今天 03:00 不应被判为在 7:00-20:00 窗口内"
+        );
     }
 }

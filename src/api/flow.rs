@@ -7,9 +7,10 @@ use super::points;
 use super::policy::fetch_policy;
 use super::records::fetch_one_record;
 use super::submit::{submit_record, SubmitParams, SubmitResult};
-use crate::track::generator::build as gen_track;
-use crate::track::wire::{build_obs_object, five_point_wrapper, obs_keys};
 use crate::location::Coordinate;
+use crate::track::generator::build as gen_track;
+use crate::track::wire::{build_obs_object_with_area, five_point_wrapper_with_area, obs_keys};
+use rand::Rng;
 use serde_json::Value;
 
 #[derive(Clone, Copy)]
@@ -29,12 +30,33 @@ pub struct RunParams {
 
 pub struct RunOutcome {
     pub result: SubmitResult,
-    pub obs_ok: usize,
-    pub detail_ok: bool,
+    pub obs_upload: usize,
+    pub obs_roundtrip: bool,
+    pub detail_request: bool,
+    pub detail_complete: bool,
+    pub reason_list: Vec<Value>,
+    pub detail_checks_passed: bool,
 }
 
 fn sleep_secs(s: u64) {
     std::thread::sleep(std::time::Duration::from_secs(s));
+}
+
+fn reason_list_complete(reason_list: &[Value]) -> bool {
+    !reason_list.is_empty()
+        && reason_list.iter().all(|item| {
+            item.get("complete")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+        })
+}
+
+fn detail_checks_passed(
+    detail_request: bool,
+    detail_complete: bool,
+    reason_list: &[Value],
+) -> bool {
+    detail_request && detail_complete && reason_list_complete(reason_list)
 }
 
 /// 跑步全链。
@@ -60,11 +82,28 @@ pub fn run_full_flow(
         return Err("请先在设备信息页填写本次跑步所在城市和定位锚点，不能使用大连默认配置".into());
     }
     let anchor: Coordinate = client.identity.anchor_coordinate()?;
-    let pts = points::fetch_points(client, anchor, log)?;
+    let requested_area_id = (pol.area.run_area_id >= 0).then(|| pol.area.run_area_id.to_string());
+    let mut points_ctx = points::fetch_points_context_ext(client, anchor, requested_area_id, log)?;
+    // 校园围栏可能随 runModePolicy 返回，而点位接口只给打卡点。
+    // 优先保留策略中的真实区域；仅当策略缺失时使用点位中的区域。
+    if pol.area.run_area_id >= 0 {
+        points_ctx.area.run_area_id = pol.area.run_area_id;
+    }
+    if pol.area.geo_fences_json.trim() != "[]" {
+        points_ctx.area.geo_fences_json = pol.area.geo_fences_json.clone();
+        points_ctx.area.freedom_show_fence = pol.area.freedom_show_fence;
+    }
+    let pts = points_ctx.points.clone();
     if pts.is_empty() {
         return Err("实时点位为空 —— 拒绝本地样本兜底".into());
     }
-    log(&format!("√ [points] {} 个点位", pts.len()));
+    log(&format!(
+        "√ [points] {} 个点位，runAreaId={}，绿色围栏={}（{} 字节）",
+        pts.len(),
+        points_ctx.area.run_area_id,
+        points_ctx.area.freedom_show_fence,
+        points_ctx.area.geo_fences_json.len(),
+    ));
     for p in pts.iter().take(5) {
         log(&format!(
             "  [points] {} BD=({:.6},{:.6}) GCJ=({},{})",
@@ -102,26 +141,45 @@ pub fn run_full_flow(
         pts_bd.len()
     ));
     // 随机 0-4 秒偏移（终端上报的 flag 与首点差 <5s），轨迹/提交/OBS/五点统一使用
-    let start_ms = params.start_ms + (rand::random::<i64>() % 5) * 1000;
-    let mut track = gen_track(params.dist, params.dur, params.seed, (anchor.latitude, anchor.longitude), start_ms, &pts_bd);
+    let start_ms = params.start_ms + rand::thread_rng().gen_range(0..5) * 1000;
+    let mut track = gen_track(
+        params.dist,
+        params.dur,
+        params.seed,
+        (anchor.latitude, anchor.longitude),
+        start_ms,
+        &pts_bd,
+    );
     if let Some(range) = params.manual_altitude_range {
         crate::track::altitude::override_bd_a_range(&mut track, range)?;
-        log(&format!("√ [track] 已将海拔曲线映射到 {:.2}-{:.2}m，覆盖 {} 个点，爬升/圈数据将按覆盖值计算", range.min_m, range.max_m, track.locations.len()));
+        log(&format!(
+            "√ [track] 已将海拔曲线映射到 {:.2}-{:.2}m，覆盖 {} 个点，爬升/圈数据将按覆盖值计算",
+            range.min_m,
+            range.max_m,
+            track.locations.len()
+        ));
     } else if let Some(altitude_m) = params.manual_altitude {
         crate::track::altitude::override_bd_a(&mut track, altitude_m)?;
-        log(&format!("√ [track] 已用手动海拔 {:.2}m 覆盖 {} 个点，爬升/圈数据将按覆盖值计算", altitude_m, track.locations.len()));
+        log(&format!(
+            "√ [track] 已用手动海拔 {:.2}m 覆盖 {} 个点，爬升/圈数据将按覆盖值计算",
+            altitude_m,
+            track.locations.len()
+        ));
     }
     log(&format!(
         "√ [track] {} 点 totalDis={:.0}m steps={} 起点={}",
         track.locations.len(),
         track.totalDistance,
         track.totalSteps,
-        chrono::Local.timestamp_millis_opt(params.start_ms).single()
-            .map(|t| t.format("%H:%M:%S").to_string()).unwrap_or_default(),
+        chrono::Local
+            .timestamp_millis_opt(start_ms)
+            .single()
+            .map(|t| t.format("%H:%M:%S").to_string())
+            .unwrap_or_default(),
     ));
 
     // ④ 五点 wrapper（跑完态）
-    let five = five_point_wrapper(&pts, track.startTime);
+    let five = five_point_wrapper_with_area(&pts, track.startTime, &points_ctx.area);
     let _ = &five;
 
     // ⑤ 提交（sportType=1）
@@ -146,39 +204,173 @@ pub fn run_full_flow(
     // 从提交结果回填 track.startTime（含随机秒偏移），保证 body/OBS/flag 全链一致
     let mut track_for_obs = sp.track.clone();
     track_for_obs.startTime = result.start_ms;
-    let obj = build_obs_object(&track_for_obs, result.rrid, &result.uuid, sess.uid, &pts);
+    let obj = build_obs_object_with_area(
+        &track_for_obs,
+        result.rrid,
+        &result.uuid,
+        sess.uid,
+        &pts,
+        &points_ctx.area,
+    );
+    let expected_summary = super::obs::summarize_object(&obj).ok();
+    if expected_summary
+        .as_ref()
+        .map(|summary| !summary.is_expected())
+        .unwrap_or(true)
+    {
+        log("⚠ [obs] 本地待上传对象缺少有效路线/区域/围栏数据");
+    }
     let payload = obj.to_string().into_bytes();
     let keys = obs_keys(&track_for_obs, result.rrid, &result.uuid);
     let obs_ok = super::obs::upload_both_keys(client, &keys, &payload, log);
-    if obs_ok == 2 {
+    let obs_content_ok = if obs_ok == 2 {
         log("√ [obs] 双 key 上传成功");
+        sleep_secs(1);
+        let mut all_valid = expected_summary
+            .as_ref()
+            .is_some_and(|summary| summary.is_expected());
+        for key in &keys {
+            match super::obs::fetch_object(client, key, log)
+                .and_then(|value| super::obs::summarize_object(&value))
+            {
+                Ok(summary) => {
+                    let valid = expected_summary
+                        .as_ref()
+                        .is_some_and(|expected| summary.matches(expected));
+                    all_valid &= valid;
+                    log(&format!(
+                        "{} [obs] 回读摘要 key={} obs_summary_match={} route_points={} runAreaId={} 绿色围栏={} fence_points={}（{} 字节）",
+                        if valid { "√" } else { "⚠" },
+                        key.rsplit('/').next().unwrap_or(key),
+                        valid,
+                        summary.route_points,
+                        summary.run_area_id,
+                        summary.show_fence,
+                        summary.fence_count,
+                        summary.fence_bytes,
+                    ));
+                }
+                Err(error) => {
+                    all_valid = false;
+                    log(&format!(
+                        "⚠ [obs] 回读校验失败 key={}: {error}",
+                        key.rsplit('/').next().unwrap_or(key)
+                    ));
+                }
+            }
+        }
+        if all_valid {
+            log("√ [obs] obs_roundtrip=pass (summary match)");
+        } else {
+            log("⚠ [obs] obs_roundtrip=fail (summary mismatch)");
+        }
+        all_valid
     } else {
         log(&format!("⚠ [obs] 上传成功 {obs_ok}/2"));
-    }
+        false
+    };
 
     // ⑦ 详情验证
     sleep_secs(2);
     log("[verify] 拉取详情验证…");
-    let detail_ok = match fetch_one_record(client, result.rrid) {
+    if let Ok(mut slot) = VERIFY_DETAIL.lock() {
+        *slot = None;
+    }
+    let (detail_request, detail_complete, reason_list) = match fetch_one_record(client, result.rrid)
+    {
         Ok(d) => {
+            let detail_complete = d.get("complete").and_then(|v| v.as_bool()).unwrap_or(false);
+            let reason_list = d
+                .get("reasonList")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
             log(&format!(
-                "√ [verify] rrid={} complete={:?} dis={:?} time={:?}",
-                result.rrid,
-                d.get("complete").and_then(|v| v.as_bool()),
-                d.get("totalDis"),
-                d.get("totalTime"),
+                "[detail] detail_request=pass rrid={} detail_complete={} reasonList_count={} dis={:?} time={:?}",
+                result.rrid, detail_complete, reason_list.len(), d.get("totalDis"), d.get("totalTime"),
             ));
+            if reason_list.is_empty() {
+                log("⚠ [detail] reasonList=missing_or_empty");
+            }
+            for (index, item) in reason_list.iter().enumerate() {
+                let complete = item
+                    .get("complete")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let reason = item
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<missing reason>");
+                log(&format!(
+                    "{} [detail] reasonList[{}] complete={} reason={}",
+                    if complete { "√" } else { "⚠" },
+                    index,
+                    complete,
+                    reason,
+                ));
+            }
             if let Ok(mut slot) = VERIFY_DETAIL.lock() {
                 slot.replace(d.clone());
             }
-            true
+            (true, detail_complete, reason_list)
         }
         Err(e) => {
-            log(&format!("⚠ [verify] 详情拉取失败（提交已成功 rrid={}）：{e}", result.rrid));
-            false
+            log(&format!(
+                "⚠ [detail] detail_request=fail rrid={}：{e}",
+                result.rrid
+            ));
+            (false, false, Vec::new())
         }
     };
-    Ok(RunOutcome { result, obs_ok, detail_ok })
+    let reason_list_ok = reason_list_complete(&reason_list);
+    let detail_checks_passed = detail_checks_passed(detail_request, detail_complete, &reason_list);
+    if !obs_content_ok {
+        log("⚠ [verify] obs_roundtrip=fail");
+    }
+    log(&format!(
+        "[verify] obs_upload={}/2 obs_roundtrip={} detail_request={} detail_complete={} reasonList_ok={} detail_checks_passed={}",
+        obs_ok,
+        obs_content_ok,
+        detail_request,
+        detail_complete,
+        reason_list_ok,
+        detail_checks_passed,
+    ));
+    Ok(RunOutcome {
+        result,
+        obs_upload: obs_ok,
+        obs_roundtrip: obs_content_ok,
+        detail_request,
+        detail_complete,
+        reason_list,
+        detail_checks_passed,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{detail_checks_passed, reason_list_complete};
+    use serde_json::json;
+
+    #[test]
+    fn incomplete_detail_cannot_be_reported_as_passed() {
+        let reasons = vec![json!({"reason": "距离不足", "complete": false})];
+        assert!(!reason_list_complete(&reasons));
+        assert!(!detail_checks_passed(true, false, &reasons));
+        assert!(!detail_checks_passed(true, true, &reasons));
+        assert!(!reason_list_complete(&[]));
+        assert!(!reason_list_complete(&[json!({"reason": "unknown"})]));
+        assert!(!detail_checks_passed(
+            false,
+            true,
+            &[json!({"complete": true})]
+        ));
+        assert!(detail_checks_passed(
+            true,
+            true,
+            &[json!({"complete": true})]
+        ));
+    }
 }
 
 /// AI 提交流（UI 线程用）。
@@ -195,7 +387,10 @@ pub fn run_ai_submit(
 }
 
 /// AI 列表（UI 线程用）。
-pub fn run_ai_list(client: &mut ApiClient, log: &mut dyn FnMut(&str)) -> Result<Vec<super::ai::AiSport>, String> {
+pub fn run_ai_list(
+    client: &mut ApiClient,
+    log: &mut dyn FnMut(&str),
+) -> Result<Vec<super::ai::AiSport>, String> {
     log("[ai] 拉取项目列表…");
     let list = super::ai::fetch_list(client)?;
     log(&format!("√ [ai] {} 个项目", list.len()));
@@ -203,7 +398,10 @@ pub fn run_ai_list(client: &mut ApiClient, log: &mut dyn FnMut(&str)) -> Result<
 }
 
 /// 记录列表（UI 线程用）。
-pub fn run_records(client: &mut ApiClient, log: &mut dyn FnMut(&str)) -> Result<Vec<super::records::RecordRow>, String> {
+pub fn run_records(
+    client: &mut ApiClient,
+    log: &mut dyn FnMut(&str),
+) -> Result<Vec<super::records::RecordRow>, String> {
     log("[records] 拉取跑步记录…");
     let rows = super::records::fetch_records(client)?;
     log(&format!("√ [records] {} 条记录", rows.len()));

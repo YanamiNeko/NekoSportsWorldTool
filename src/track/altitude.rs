@@ -36,6 +36,17 @@ pub fn parse_spec(text: &str) -> Result<Option<AltitudeSpec>, String> {
     Ok(Some(AltitudeSpec::Single(altitude_m)))
 }
 
+/// 解析 UI 中分开的最低、最高海拔输入框。连接符由界面绘制。
+pub fn parse_range_fields(min_text: &str, max_text: &str) -> Result<Option<AltitudeRange>, String> {
+    let min_text = min_text.trim();
+    let max_text = max_text.trim();
+    if min_text.is_empty() && max_text.is_empty() { return Ok(None); }
+    if min_text.is_empty() || max_text.is_empty() { return Err("最低海拔和最高海拔需要同时填写，或同时留空".into()); }
+    let min_m = min_text.parse::<f64>().map_err(|_| "最低海拔必须是数字".to_string())?;
+    let max_m = max_text.parse::<f64>().map_err(|_| "最高海拔必须是数字".to_string())?;
+    validate_range(min_m, max_m).map(Some)
+}
+
 fn validate_altitude(altitude_m: f64) -> Result<(), String> {
     if !altitude_m.is_finite() || !(-500.0..=9000.0).contains(&altitude_m) {
         return Err("手动海拔必须是 -500 到 9000 米之间的数字".into());
@@ -62,6 +73,7 @@ pub fn override_bd_a(track: &mut Track, altitude_m: f64) -> Result<(), String> {
         point.bdA = round_to(altitude_m, 2);
         point.hasAltitude = true;
     }
+    track.altitude_gain_override = Some(0.0);
     Ok(())
 }
 
@@ -84,6 +96,7 @@ pub fn override_bd_a_range(track: &mut Track, range: AltitudeRange) -> Result<()
         point.bdA = round_to(mapped.clamp(range.min_m, range.max_m), 2);
         point.hasAltitude = true;
     }
+    track.altitude_gain_override = Some(target_span);
     Ok(())
 }
 
@@ -120,9 +133,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_separate_range_fields_without_typed_separator() {
+        assert_eq!(parse_range_fields("1", "13").unwrap(), Some(AltitudeRange { min_m: 1.0, max_m: 13.0 }));
+        assert!(parse_range_fields("1", "").is_err());
+        assert!(parse_range_fields("13", "1").is_err());
+        assert_eq!(parse_range_fields(" ", " ").unwrap(), None);
+    }
+
+    #[test]
     fn range_mapping_stays_inside_requested_bounds() {
         let mut track = build(1200.0, 600, 7, (38.9, 121.54), 1_700_000_000_000, &points());
         override_bd_a_range(&mut track, AltitudeRange { min_m: 11.6, max_m: 22.8 }).unwrap();
         assert!(track.locations.iter().all(|p| (11.6..=22.8).contains(&p.bdA)));
+        assert!((track.altitude_gain_override.unwrap() - 11.2).abs() < 1e-9);
     }
 }

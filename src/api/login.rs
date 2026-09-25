@@ -165,14 +165,12 @@ pub fn login(
     if let Err(e) = super::model::save_session(&sess) {
         eprintln!("[login] 会话保存失败: {e}");
     }
+    // Never write the bearer token to logs: stderr may be captured by a shell,
+    // scheduler, or GUI log file and would otherwise become an authentication
+    // credential leak.
     eprintln!(
-        "[session] uid={} token={} unid={} name={} weight={} device={}",
-        sess.uid,
-        &sess.token,
-        sess.unid,
-        sess.name,
-        sess.weight,
-        &sess.device_id
+        "[session] uid={} unid={} name={} weight={}",
+        sess.uid, sess.unid, sess.name, sess.weight
     );
     eprintln!(
         "[session] profile 字段数={}",

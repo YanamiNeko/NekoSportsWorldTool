@@ -1,22 +1,20 @@
 //! 轨迹后处理：
-//! 结尾断崖（最后正常点压速 1.2-2.6km/h、时间延伸 6-14s）、起终点哨兵
-//! （索引1 type=5 全零 / 末点 type=6 / 首点 type∈{0,7}）、后半段 type=1/2 散布、
+//! 结尾断崖（最后点压速 1.2-2.6km/h）、起终点哨兵
+//! （索引1 type=5 全零 / 末点 type=6 / 首点 type=0）、
 //! 索引2 avgSpeed 边界修正、首点速度取首个非零值。
 
 use super::geom::{fmt_gain_time, round_to, Rng};
 use super::model::GenPoint;
 
 pub fn apply_post_fixes(locs: &mut [GenPoint], rng: &mut Rng, start_ms: i64) {
-    // 结尾断崖：最后正常点压速 + 时间自然延伸 6-14s
+    // 结尾断崖：压低最后点速度，但不延长该点时间，保证路线与记录时长一致。
     if locs.len() >= 4 {
         let mut ci = locs.len() - 1;
         while ci > 0 && locs[ci].ptype == -1 {
             ci -= 1;
         }
         if ci > 1 {
-            let stop_t = locs[ci].totalTime + rng.randint(6, 14);
-            locs[ci].totalTime = stop_t;
-            locs[ci].validTime = stop_t;
+            let stop_t = locs[ci].totalTime;
             // 收尾减速仍须落在有效配速窗口内（2.0-2.6 m/s ≈ 7.2-9.4 km/h）
             let stop_ms = round_to(rng.uniform(2.0, 2.6), 4);
             locs[ci].speed = round_to(stop_ms * 3.6, 4);
@@ -48,28 +46,27 @@ pub fn apply_post_fixes(locs: &mut [GenPoint], rng: &mut Rng, start_ms: i64) {
         e.ptype = 6;
         e.locType = 1;
         e.radius = round_to(rng.uniform(1.5, 3.0), 2);
-        // 后半段散布 type=1/2/8（67-99% 行程区间；type=8 真人低频出现）
-        let from = (locs.len() as f64 * 0.67) as usize;
-        for i in from..locs.len().saturating_sub(2) {
-            if rng.random() < 0.06 {
-                locs[i].ptype = rng.choice(&[1, 1, 2, 8]);
-                locs[i].locType = 1;
-            }
-        }
+        // Keep intermediate route-point types unchanged; only the last point
+        // uses the endpoint sentinel type.
     }
     // 边界修正①：索引2 首个真实点 avgSpeed 不跨哨兵计算，并保持在有效窗口内
     if locs.len() > 3 {
         let p2 = &mut locs[2];
-        p2.avgSpeed = round_to(p2.totalDis / 1.0f64.max(p2.totalTime as f64), 4)
-            .clamp(crate::track::generator::SPEED_FLOOR, crate::track::generator::SPEED_CEIL);
+        p2.avgSpeed = round_to(p2.totalDis / 1.0f64.max(p2.totalTime as f64), 4).clamp(
+            crate::track::generator::SPEED_FLOOR,
+            crate::track::generator::SPEED_CEIL,
+        );
         p2.speed = round_to(p2.avgSpeed * 3.6, 4);
     }
-    // 首点 = 起点：totalTime=0、type∈{0,7}、速度取首个非零值
+    // 首点 = 起点：totalTime=0、type=0、速度取首个非零值
     if !locs.is_empty() {
         locs[0].totalTime = 0;
+        locs[0].totalDis = 0.0;
+        locs[0].validDis = 0.0;
         locs[0].validTime = 0;
+        locs[0].steps = 0;
         locs[0].state = 1;
-        locs[0].ptype = rng.choice(&[0, 0, 0, 7]);
+        locs[0].ptype = 0;
         locs[0].locType = 1;
         locs[0].radius = round_to(rng.uniform(1.5, 3.0), 2);
         for j in 1..locs.len() {

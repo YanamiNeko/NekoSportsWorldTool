@@ -11,6 +11,7 @@ pub struct PolicyInfo {
     pub policy: i64,
     pub min_distance: i64,
     pub valid_time: i64,
+    pub area: crate::track::wire::RunAreaMeta,
 }
 
 /// body：{"runMode":1,"ruleUpdateTime":0,"geoFenceUpdateTime":0,"selectUnid":<unid>,"operateType":0}
@@ -40,5 +41,6 @@ pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
         policy,
         min_distance: rule.get("minDistance").and_then(|t| t.as_i64()).unwrap_or(1000),
         valid_time: rule.get("validTime").and_then(|t| t.as_i64()).unwrap_or(0),
+        area: super::points::area_from_payload(&biz, &[]),
     })
 }

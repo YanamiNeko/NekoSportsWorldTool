@@ -7,25 +7,58 @@ use std::io::Read;
 
 pub const OBS_SIGN_PATH: &str = "/api/obs/temporary/url";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ObsSummary {
     pub route_points: usize,
     pub run_area_id: i64,
     pub show_fence: bool,
     pub fence_count: usize,
     pub fence_bytes: usize,
+    route_fields: Vec<RoutePointSummary>,
+    fence_value: Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RoutePointSummary {
+    ptype: Option<i64>,
+    state: Option<i64>,
+    loc_type: Option<i64>,
+    glat_1e7: Option<i64>,
+    glng_1e7: Option<i64>,
+    total_time: Option<i64>,
+    total_dis_1e4: Option<i64>,
+    steps: Option<i64>,
+}
+
+impl RoutePointSummary {
+    fn from_value(point: &Value) -> Self {
+        let scaled = |name: &str, scale: f64| {
+            point
+                .get(name)
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+                .map(|value| (value * scale).round() as i64)
+        };
+        Self {
+            ptype: point.get("type").and_then(value_as_i64),
+            state: point.get("state").and_then(value_as_i64),
+            loc_type: point.get("locType").and_then(value_as_i64),
+            glat_1e7: scaled("gLat", 10_000_000.0),
+            glng_1e7: scaled("gLng", 10_000_000.0),
+            total_time: point.get("totalTime").and_then(value_as_i64),
+            total_dis_1e4: scaled("totalDis", 10_000.0),
+            steps: point.get("steps").and_then(value_as_i64),
+        }
+    }
 }
 
 impl ObsSummary {
     pub fn is_expected(&self) -> bool {
-        self.route_points > 0
-            && self.run_area_id >= -1
-            && self.show_fence
-            && self.fence_count > 0
+        self.route_points > 0 && self.run_area_id >= -1 && self.show_fence && self.fence_count > 0
     }
 
     pub fn matches(&self, expected: &Self) -> bool {
-        expected.is_expected() && self == expected
+        self == expected
     }
 }
 
@@ -50,14 +83,22 @@ pub fn sign_url(client: &mut ApiClient, method: &str, key: &str) -> Result<Strin
 }
 
 /// PUT 上传 OBS 对象。
-pub fn put_object(signed_url: &str, payload: &[u8], log: &mut dyn FnMut(&str)) -> Result<(), String> {
+pub fn put_object(
+    signed_url: &str,
+    payload: &[u8],
+    log: &mut dyn FnMut(&str),
+) -> Result<(), String> {
     let agent = super::client::make_agent();
     let resp = agent
         .put(signed_url)
         .set("Content-Type", "application/json")
         .send_bytes(payload)
         .map_err(super::client::ureq_err)?;
-    log(&format!("[obs] PUT {} -> {}", shorten(signed_url), resp.status()));
+    log(&format!(
+        "[obs] PUT {} -> {}",
+        shorten(signed_url),
+        resp.status()
+    ));
     Ok(())
 }
 
@@ -89,7 +130,9 @@ fn decode_gz_json(encoded: &str) -> Result<Value, String> {
     let compressed = crate::crypto::envelope::b64_decode(encoded)?;
     let mut decoder = GzDecoder::new(compressed.as_slice());
     let mut raw = String::new();
-    decoder.read_to_string(&mut raw).map_err(|e| format!("gzip 解压失败: {e}"))?;
+    decoder
+        .read_to_string(&mut raw)
+        .map_err(|e| format!("gzip 解压失败: {e}"))?;
     serde_json::from_str(&raw).map_err(|e| format!("OBS JSON 无效: {e}"))
 }
 
@@ -105,40 +148,51 @@ fn value_as_i64(value: &Value) -> Option<i64> {
     value
         .as_i64()
         .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
-        .or_else(|| value.as_f64().filter(|number| number.is_finite()).map(|number| number as i64))
+        .or_else(|| {
+            value
+                .as_f64()
+                .filter(|number| number.is_finite())
+                .map(|number| number as i64)
+        })
         .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
 }
 
 fn value_as_bool(value: &Value) -> Option<bool> {
     value.as_bool().or_else(|| {
-        value.as_str().and_then(|text| match text.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" => Some(true),
-            "false" | "0" | "no" => Some(false),
-            _ => None,
-        })
+        value
+            .as_str()
+            .and_then(|text| match text.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" => Some(true),
+                "false" | "0" | "no" => Some(false),
+                _ => None,
+            })
     })
 }
 
-fn array_field(value: &Value, name: &str) -> Result<(usize, usize), String> {
+fn array_field(value: &Value, name: &str) -> Result<(usize, usize, Value), String> {
     let parsed = match value {
-        Value::String(text) => serde_json::from_str::<Value>(text).map_err(|e| format!("{name} JSON 无效: {e}"))?,
+        Value::String(text) => {
+            serde_json::from_str::<Value>(text).map_err(|e| format!("{name} JSON 无效: {e}"))?
+        }
         other => other.clone(),
     };
-    let items = parsed.as_array().ok_or_else(|| format!("{name} 不是数组"))?;
+    let items = parsed
+        .as_array()
+        .ok_or_else(|| format!("{name} 不是数组"))?;
     let bytes = match value {
         Value::String(text) => text.len(),
         _ => parsed.to_string().len(),
     };
-    Ok((items.len(), bytes))
+    Ok((items.len(), bytes, parsed))
 }
 
 pub fn summarize_object(obj: &Value) -> Result<ObsSummary, String> {
     let run = decode_object_field(obj, "run_data")?;
-    let points_value = run
-        .get("allLocJson")
-        .ok_or("run_data 缺少 allLocJson")?;
+    let points_value = run.get("allLocJson").ok_or("run_data 缺少 allLocJson")?;
     let points = match points_value {
-        Value::String(text) => serde_json::from_str::<Value>(text).map_err(|e| format!("路线 JSON 无效: {e}"))?,
+        Value::String(text) => {
+            serde_json::from_str::<Value>(text).map_err(|e| format!("路线 JSON 无效: {e}"))?
+        }
         other => other.clone(),
     };
     let route_points = points
@@ -148,6 +202,12 @@ pub fn summarize_object(obj: &Value) -> Result<ObsSummary, String> {
     if route_points == 0 {
         return Err("路线 JSON 为空".into());
     }
+    let route_fields = points
+        .as_array()
+        .expect("route_points checked above")
+        .iter()
+        .map(RoutePointSummary::from_value)
+        .collect();
 
     let fixed = decode_object_field(obj, "fixed_point_json")?;
     let run_area_id = fixed
@@ -161,7 +221,7 @@ pub fn summarize_object(obj: &Value) -> Result<ObsSummary, String> {
     let fence_value = fixed
         .get("geoFencesJson")
         .ok_or("fixed_point_json 缺少 geoFencesJson")?;
-    let (fence_count, fence_bytes) = array_field(fence_value, "geoFencesJson")?;
+    let (fence_count, fence_bytes, fence_value) = array_field(fence_value, "geoFencesJson")?;
 
     Ok(ObsSummary {
         route_points,
@@ -169,12 +229,18 @@ pub fn summarize_object(obj: &Value) -> Result<ObsSummary, String> {
         show_fence,
         fence_count,
         fence_bytes,
+        route_fields,
+        fence_value,
     })
 }
 
 /// 回读验证（GET 签名）。
 #[allow(dead_code)]
-pub fn fetch_object(client: &mut ApiClient, key: &str, log: &mut dyn FnMut(&str)) -> Result<Value, String> {
+pub fn fetch_object(
+    client: &mut ApiClient,
+    key: &str,
+    log: &mut dyn FnMut(&str),
+) -> Result<Value, String> {
     let signed = sign_url(client, "Get", key)?;
     let agent = super::client::make_agent();
     let resp = agent.get(&signed).call().map_err(super::client::ureq_err)?;
@@ -182,7 +248,6 @@ pub fn fetch_object(client: &mut ApiClient, key: &str, log: &mut dyn FnMut(&str)
     log(&format!("[obs] GET 回读 {} 字节", text.len()));
     serde_json::from_str(&text).map_err(|e| format!("OBS 对象解析失败: {e}"))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -202,7 +267,7 @@ mod tests {
         assert!(summary.is_expected());
         assert!(summary.matches(&summary));
 
-        let mut truncated = summary;
+        let mut truncated = summary.clone();
         truncated.route_points -= 1;
         assert!(!truncated.matches(&summary));
     }
@@ -227,5 +292,55 @@ mod tests {
         assert_eq!(summary.run_area_id, -1);
         assert!(summary.is_expected());
         assert!(summary.matches(&summary));
+    }
+
+    #[test]
+    fn summary_match_detects_each_required_route_field_and_fence_changes() {
+        let make_object = |route: Value, fence_lat: i64| {
+            let run = json!({
+                "allLocJson": serde_json::Value::Array(vec![route]).to_string(),
+                "useZip": false,
+            });
+            let fixed = json!({
+                "runAreaId": -1, "freedomShowFence": true,
+                "geoFencesJson": format!("[{{\"lat\":{fence_lat},\"lon\":2}}]"),
+                "useZip": false,
+            });
+            json!({
+                "run_data": crate::track::wire::gz(run.to_string().as_bytes()),
+                "fixed_point_json": crate::track::wire::gz(fixed.to_string().as_bytes()),
+            })
+        };
+        let route = || {
+            json!({
+                "type": 0, "state": 1, "locType": 1,
+                "gLat": 39.4, "gLng": 116.2,
+                "totalTime": 10, "totalDis": 25.5, "steps": 26,
+            })
+        };
+        let expected = summarize_object(&make_object(route(), 1)).unwrap();
+        assert!(summarize_object(&make_object(route(), 1))
+            .unwrap()
+            .matches(&expected));
+        for changed in [
+            json!({"type": 3, "state": 1, "locType": 1, "gLat": 39.4, "gLng": 116.2, "totalTime": 10, "totalDis": 25.5, "steps": 26}),
+            json!({"type": 0, "state": 2, "locType": 1, "gLat": 39.4, "gLng": 116.2, "totalTime": 10, "totalDis": 25.5, "steps": 26}),
+            json!({"type": 0, "state": 1, "locType": 2, "gLat": 39.4, "gLng": 116.2, "totalTime": 10, "totalDis": 25.5, "steps": 26}),
+            json!({"type": 0, "state": 1, "locType": 1, "gLat": 39.5, "gLng": 116.2, "totalTime": 10, "totalDis": 25.5, "steps": 26}),
+            json!({"type": 0, "state": 1, "locType": 1, "gLat": 39.4, "gLng": 116.3, "totalTime": 10, "totalDis": 25.5, "steps": 26}),
+            json!({"type": 0, "state": 1, "locType": 1, "gLat": 39.4, "gLng": 116.2, "totalTime": 11, "totalDis": 25.5, "steps": 26}),
+            json!({"type": 0, "state": 1, "locType": 1, "gLat": 39.4, "gLng": 116.2, "totalTime": 10, "totalDis": 25.6, "steps": 26}),
+            json!({"type": 0, "state": 1, "locType": 1, "gLat": 39.4, "gLng": 116.2, "totalTime": 10, "totalDis": 25.5, "steps": 27}),
+        ] {
+            assert!(
+                !summarize_object(&make_object(changed, 1))
+                    .unwrap()
+                    .matches(&expected),
+                "route summary mismatch should detect every required field",
+            );
+        }
+        assert!(!summarize_object(&make_object(route(), 3))
+            .unwrap()
+            .matches(&expected));
     }
 }

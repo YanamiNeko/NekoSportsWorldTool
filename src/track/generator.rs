@@ -1,13 +1,16 @@
 //! 自然轨迹生成器。
 //!
-//! 画像驱动：打卡点拟合闭合环（Catmull-Rom，每段 18 采样）→ 弧长表；
+//! 画像驱动：打卡点沿线段组成闭合环（每段 18 采样）→ 弧长表；
 //! 采样间隔主 5s（80%）；速度曲线 = ramp × 疲劳 × 三正弦 × 余弦凹陷 × 微噪；
-//! 正常点按速度曲线分配位移并归一到精确总距离；所有采样点保持在跑步区域环线上，避免被服务端标成无效灰段；
-//! 哨兵点（首 type∈{0,7}、索引1 type=5、末 type=6）；结尾断崖；点位吸附。
+//! 正常点按速度曲线分配位移并归一到精确总距离；所有采样点保持在打卡点闭环线上；
+//! 哨兵点（首 type=0、索引1 type=5、末 type=6）；结尾断崖；点位吸附。
 #![allow(non_snake_case)]
 
-use super::geom::{fmt_gain_time, make_point_ring, ring_point_at, round_to, to_bd, Rng, MET_PER_DEG_LAT, MET_PER_DEG_LNG};
-use super::model::{GenPoint, Segment, TenWindow, Track};
+use super::geom::{
+    fmt_gain_time, make_point_ring, ring_point_at, round_to, to_bd, Rng, MET_PER_DEG_LAT,
+    MET_PER_DEG_LNG,
+};
+use super::model::{GenPoint, Segment, Track};
 use super::postfix::apply_post_fixes;
 
 /// 有效配速窗口（判定规则 2'21"-10'00"/km ≈ 1.667-7.092 m/s），硬边界留余量。
@@ -93,8 +96,13 @@ pub fn build(
             1.0
         };
         let km_done = (tt / dur_f) * dist / 1000.0;
-        let fatigue = if km_done <= 0.5 { 1.03 } else { (1.03 - 0.06 * (km_done - 0.5)).max(0.80) };
-        let wave = (1.0 + 0.010 * (std::f64::consts::TAU * tt / 115.0 + phase_v).sin()
+        let fatigue = if km_done <= 0.5 {
+            1.03
+        } else {
+            (1.03 - 0.06 * (km_done - 0.5)).max(0.80)
+        };
+        let wave = (1.0
+            + 0.010 * (std::f64::consts::TAU * tt / 115.0 + phase_v).sin()
             + 0.035 * (std::f64::consts::TAU * tt / 47.0 + phase_v * 2.3).sin()
             + 0.015 * (std::f64::consts::TAU * tt / 19.0 + phase_v * 3.7).sin())
             * dip_factor(tt);
@@ -108,35 +116,10 @@ pub fn build(
     let seg_dist: Vec<f64> = (0..n).map(|i| w[i] * dts[i]).collect();
     let speeds: Vec<f64> = w.clone();
 
-    let mut kinds: Vec<(i64, i64)> = Vec::with_capacity(n);
-    for _ in 0..n {
-        let u = rng.random();
-        if u < 0.39 {
-            kinds.push((3, 1));
-        } else if u < 0.93 {
-            kinds.push((0, 1));
-        } else if u < 0.96 {
-            // Invalid (-1) drift points make the server render gray segments
-            // and are not appropriate for a campus run that must stay inside
-            // the returned green area fence.
-            kinds.push(rng.choice(&[(3, 1), (0, 1), (1, 1), (2, 1)]));
-        } else {
-            kinds.push((rng.choice(&[1, 1, 1, 1, 2, 2]), 1));
-        }
-    }
-    for i in 1..kinds.len() {
-        let prev_drift = (-1 == kinds[i - 1].0) || kinds[i - 1].0 == 5 || kinds[i - 1].0 == 6;
-        if kinds[i].0 != -1 && prev_drift && rng.random() < 0.08 {
-            kinds[i] = (if rng.random() < 0.75 { 7 } else { 8 }, 1);
-        }
-    }
-    for i in 1..n {
-        if kinds[i].0 == -1 && kinds[i - 1].0 == -1 {
-            kinds[i] = (rng.choice(&[3, 0]), 1);
-        }
-    }
-    let normal_idx: Vec<usize> =
-        (0..n).filter(|&i| kinds[i].0 != -1 && i > 1).collect();
+    // Keep campus route samples on one ordinary point protocol. The start and
+    // end sentinels are assigned explicitly by apply_post_fixes below.
+    let kinds: Vec<(i64, i64)> = vec![(0, 1); n];
+    let normal_idx: Vec<usize> = (0..n).filter(|&i| kinds[i].0 != -1).collect();
     let share: f64 = normal_idx.iter().map(|&i| seg_dist[i]).sum();
     let share = if share == 0.0 { 1.0 } else { share };
     let mut disp_of = vec![0.0f64; n];
@@ -149,16 +132,9 @@ pub fn build(
     let mut t_acc = 0.0f64;
     let mut dist_acc = 0.0f64;
     let mut steps_acc = 0.0f64;
-    let mut jx = 0.0f64;
-    let mut jy = 0.0f64;
     let mut alt = 82.0 + rng.uniform(-1.0, 1.0);
     let n_est = 1.max((dur_f / 5.0) as i64);
     let alt_sigma = rng.uniform(3.8, 6.2) / (0.40 * n_est as f64);
-    let mut ten_t = 0.0f64;
-    let mut ten_d = 0.0f64;
-    let mut ten_st = 0.0f64;
-    let mut ten_speed: Vec<TenWindow> = Vec::new();
-    let mut ten_steps: Vec<TenWindow> = Vec::new();
 
     for i in 0..n {
         let dt = dts[i];
@@ -178,24 +154,20 @@ pub fn build(
             let (bx, by) = pos(s);
             x = bx;
             y = by;
-            jx = 0.72 * jx + rng.gauss(0.0, 0.75);
-            jy = 0.72 * jy + rng.gauss(0.0, 0.75);
-            px = bx + jx;
-            py = by + jy;
-            rad = round_to(
-                if typ == 3 { rng.uniform(1.4, 5.1) } else { rng.uniform(1.4, 2.4) },
-                2,
-            );
-            state = if typ == 0 {
-                rng.weighted(&[(1, 145), (2, 45), (3, 164)])
-            } else {
-                rng.weighted(&[(1, 145), (2, 256), (3, 151)])
-            };
+            // Keep route positions on the sampled checkpoint ring.
+            px = bx;
+            py = by;
+            rad = round_to(rng.uniform(1.4, 2.4), 2);
+            state = 1;
         } else {
             match lt {
                 4 => {
                     if rng.random() >= 0.68 {
-                        d_step = if rng.random() < 0.95 { rng.uniform(2.0, 60.0) } else { rng.uniform(60.0, 250.0) };
+                        d_step = if rng.random() < 0.95 {
+                            rng.uniform(2.0, 60.0)
+                        } else {
+                            rng.uniform(60.0, 250.0)
+                        };
                     }
                 }
                 1 => {
@@ -204,7 +176,11 @@ pub fn build(
                     }
                 }
                 12 => {
-                    d_step = if rng.random() < 0.9 { rng.uniform(5.0, 80.0) } else { rng.uniform(80.0, 220.0) };
+                    d_step = if rng.random() < 0.9 {
+                        rng.uniform(5.0, 80.0)
+                    } else {
+                        rng.uniform(80.0, 220.0)
+                    };
                 }
                 5 => d_step = rng.uniform(5.0, 60.0),
                 _ => d_step = rng.uniform(100.0, 300.0),
@@ -221,13 +197,27 @@ pub fn build(
                 py = (last.gLat - c_lat) * MET_PER_DEG_LAT;
                 px = (last.gLng - c_lng) * MET_PER_DEG_LNG;
             } else {
-                px = x + jx;
-                py = y + jy;
+                px = x;
+                py = y;
             }
             rad = if lt == 4 {
-                round_to(if rng.random() < 0.75 { rng.uniform(30.0, 100.0) } else { rng.uniform(100.0, 550.0) }, 2)
+                round_to(
+                    if rng.random() < 0.75 {
+                        rng.uniform(30.0, 100.0)
+                    } else {
+                        rng.uniform(100.0, 550.0)
+                    },
+                    2,
+                )
             } else if lt == 1 {
-                round_to(if rng.random() < 0.75 { rng.uniform(1.6, 12.0) } else { rng.uniform(12.0, 95.0) }, 2)
+                round_to(
+                    if rng.random() < 0.75 {
+                        rng.uniform(1.6, 12.0)
+                    } else {
+                        rng.uniform(12.0, 95.0)
+                    },
+                    2,
+                )
             } else if lt == 12 {
                 round_to(rng.uniform(30.0, 125.0), 2)
             } else if lt == 5 {
@@ -243,14 +233,16 @@ pub fn build(
         let (lat, lng) = to_bd(px, py, c_lat, c_lng);
         alt += 0.04 * (82.0 - alt) + rng.gauss(0.0, alt_sigma);
         let v_now = dist / dur_f;
-        let stride_target = 0.62 + 0.17 * v_now
+        let stride_target = 0.62
+            + 0.17 * v_now
             + 0.03 * (std::f64::consts::TAU * t_acc / 200.0 + phase_l).sin()
             + rng.gauss(0.0, 0.008);
         let v_cad = v_now * (1.0 + 0.03 * (std::f64::consts::TAU * t_acc / 70.0 + phase_v).sin());
         let cad = (v_cad / stride_target * 60.0).clamp(100.0, 200.0);
         steps_acc += cad / 60.0 * dt;
         let nxt = pos(s + direction * 2.0);
-        let brg = ((nxt.0 - x).atan2(nxt.1 - y).to_degrees() + rng.gauss(0.0, 35.0)).rem_euclid(360.0);
+        let brg =
+            ((nxt.0 - x).atan2(nxt.1 - y).to_degrees() + rng.gauss(0.0, 35.0)).rem_euclid(360.0);
         // 保留累计均值与 GPS 瞬时速度的轻微波动，但不生成越出跑步区域的漂移点。
         let (avg_sp, gps_speed) = if typ == -1 {
             let avg = round_to(dist_acc / t_acc.max(1.0), 4);
@@ -272,18 +264,6 @@ pub fn build(
             (avg, gps)
         };
 
-        ten_t += dt;
-        ten_d += speeds[i] * dt;
-        ten_st += cad / 60.0 * dt;
-        while ten_t >= 10.0 {
-            let k = 10.0 / ten_t; // 只取前 10s 的量，余量留给下一窗
-            let (out_d, out_st) = (ten_d * k, ten_st * k);
-            ten_speed.push(TenWindow { time: 10, value: round_to(out_d, 2) });
-            ten_steps.push(TenWindow { time: 10, value: round_to(out_st, 0) });
-            ten_t -= 10.0;
-            ten_d -= out_d;
-            ten_st -= out_st;
-        }
         locs.push(GenPoint {
             id: i as i64 + 1,
             flag: start_ms,
@@ -311,20 +291,13 @@ pub fn build(
             bdA: round_to(alt, 2),
             bdD: round_to(brg, 2),
             bdS: round_to((avg_sp * rng.uniform(0.6, 0.95)).max(0.0), 3),
-            bdG: rng.choice(&[1, 1, 1, -1]),
+            bdG: 1,
             count: rng.randint(20, 88),
             dtr: 0.0,
             state,
             locationId: String::new(),
         });
     }
-    if ten_t > 1.0 {
-        // 尾窗：限制放大倍数 ≤1.4
-        let k = (10.0 / ten_t).min(1.4);
-        ten_speed.push(TenWindow { time: 10, value: round_to(ten_d * k, 2) });
-        ten_steps.push(TenWindow { time: 10, value: round_to(ten_st * k, 0) });
-    }
-
     let mut segments: Vec<Segment> = Vec::new();
     let (mut seg_t, mut seg_d, mut seg_n) = (0.0f64, 0.0f64, 0i64);
     let mut seg_v: Vec<f64> = Vec::new();
@@ -351,6 +324,34 @@ pub fn build(
     }
     let _ = seg_n;
 
+    // Keep both zeroed start sentinels separate from the first measured
+    // interval, so no time, distance, or steps are discarded or rolled back.
+    if let Some(first) = locs.first().cloned() {
+        let (start_x, start_y) = ring_point_at(&dense, &arcs, s0);
+        let (start_lat, start_lng) = to_bd(start_x, start_y, c_lat, c_lng);
+        let mut sentinel = first;
+        sentinel.gLat = round_to(start_lat, 7);
+        sentinel.gLng = round_to(start_lng, 7);
+        sentinel.totalTime = 0;
+        sentinel.totalDis = 0.0;
+        sentinel.validDis = 0.0;
+        sentinel.validTime = 0;
+        sentinel.steps = 0;
+        sentinel.stepDistance = 0.0;
+        sentinel.speed = 0.0;
+        sentinel.avgSpeed = 0.0;
+        sentinel.bdS = 0.0;
+        sentinel.gainTime = fmt_gain_time(start_ms);
+        sentinel.gainTimeMs = start_ms;
+        sentinel.state = 1;
+        sentinel.ptype = 0;
+        sentinel.locType = 1;
+        locs.insert(0, sentinel.clone());
+        locs.insert(1, sentinel);
+        for (index, point) in locs.iter_mut().enumerate() {
+            point.id = index as i64 + 1;
+        }
+    }
     apply_post_fixes(&mut locs, &mut rng, start_ms);
 
     // 点位吸附：<40m 精确落位
@@ -374,7 +375,7 @@ pub fn build(
     }
 
     let total_dis = round_to(dist, 3);
-    Track {
+    let mut track = Track {
         totalTime: round_to(t_acc, 0) as i64,
         totalDistance: total_dis,
         validDistance: total_dis,
@@ -384,9 +385,13 @@ pub fn build(
         startLongitude: locs[0].gLng,
         totalSteps: steps_acc as i64,
         locations: locs,
-        speedPerTenSec: ten_speed,
-        stepsPerTenSec: ten_steps,
+        speedPerTenSec: Vec::new(),
+        stepsPerTenSec: Vec::new(),
         segments,
         altitude_gain_override: None,
-    }
+    };
+    let (speed_windows, step_windows) = track.ten_second_windows();
+    track.speedPerTenSec = speed_windows;
+    track.stepsPerTenSec = step_windows;
+    track
 }

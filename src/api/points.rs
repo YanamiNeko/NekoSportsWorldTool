@@ -416,4 +416,16 @@ mod tests {
         assert!(!area.freedom_show_fence);
         assert_eq!(area.geo_fences_json, "[]");
     }
+
+    #[test]
+    fn area_metadata_keeps_real_fence_when_server_omits_area_id() {
+        let payload = json!({
+            "freedomShowFence": true,
+            "geoFencesJson": [{"lat": 39.4, "lon": 116.2}],
+        });
+        let area = area_from_payload(&payload, &[]);
+        assert_eq!(area.run_area_id, -1);
+        assert!(area.freedom_show_fence);
+        assert_eq!(area.geo_fences_json, "[{\"lat\":39.4,\"lon\":116.2}]");
+    }
 }

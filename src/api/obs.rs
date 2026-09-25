@@ -19,7 +19,7 @@ pub struct ObsSummary {
 impl ObsSummary {
     pub fn is_expected(&self) -> bool {
         self.route_points > 0
-            && self.run_area_id >= 0
+            && self.run_area_id >= -1
             && self.show_fence
             && self.fence_count > 0
     }
@@ -215,5 +215,17 @@ mod tests {
         let summary = summarize_object(&obj).unwrap();
         assert_eq!(summary.route_points, 1);
         assert!(!summary.is_expected());
+    }
+
+    #[test]
+    fn accepts_server_fence_when_area_id_is_unspecified() {
+        let run = json!({"allLocJson": "[{\"gLat\":39.4,\"gLng\":116.2}]", "useZip": false});
+        let fence_json = "[{\"lat\":39.4,\"lon\":116.2}]";
+        let fixed = json!({"runAreaId": -1, "freedomShowFence": true, "geoFencesJson": fence_json, "useZip": false});
+        let obj = json!({"run_data": crate::track::wire::gz(run.to_string().as_bytes()), "fixed_point_json": crate::track::wire::gz(fixed.to_string().as_bytes())});
+        let summary = summarize_object(&obj).unwrap();
+        assert_eq!(summary.run_area_id, -1);
+        assert!(summary.is_expected());
+        assert!(summary.matches(&summary));
     }
 }

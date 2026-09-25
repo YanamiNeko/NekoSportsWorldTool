@@ -37,10 +37,10 @@ impl Default for RunAreaMeta {
     }
 }
 
-/// 只有服务端返回了可解析的非空围栏数组时才允许覆盖原始固定点协议。
-/// 未知格式会回退到旧版默认值，避免详情页丢弃整份路线对象。
+/// 保留服务端返回的有效围栏；`-1` 表示接口未提供区域 ID，不应抹掉真实围栏。
+/// 未知围栏格式仍回退到默认值，避免把无效元数据写入详情对象。
 fn payload_area(area: &RunAreaMeta) -> RunAreaMeta {
-    let valid = area.run_area_id >= 0
+    let valid = area.run_area_id >= -1
         && area.freedom_show_fence
         && serde_json::from_str::<Value>(&area.geo_fences_json)
             .ok()
@@ -197,12 +197,12 @@ mod validation_tests {
     }
 
     #[test]
-    fn fence_without_area_id_falls_back_to_route_compatible_defaults() {
+    fn server_fence_without_area_id_is_preserved() {
         let area = RunAreaMeta { run_area_id: -1, geo_fences_json: "[{\"lat\":39.4,\"lon\":116.2}]".into(), freedom_show_fence: true };
         let value: Value = serde_json::from_str(&five_point_wrapper_with_area(&[json!({"lat": 39.9, "lon": 116.4, "glat": 39.9, "glon": 116.4})], 1_700_000_000_000, &area)).unwrap();
         assert_eq!(value["runAreaId"], -1);
-        assert_eq!(value["geoFencesJson"], "[]");
-        assert_eq!(value["freedomShowFence"], false);
+        assert_eq!(value["geoFencesJson"], area.geo_fences_json);
+        assert_eq!(value["freedomShowFence"], true);
     }
     #[test]
     fn laps_are_rebuilt_from_overridden_altitude() {

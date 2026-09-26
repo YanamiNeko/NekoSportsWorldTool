@@ -43,6 +43,7 @@ impl App {
                 egui::TextEdit::singleline(&mut self.osm_page.path)
                     .hint_text("拖入 .osm 文件或填写路径"),
             );
+            #[cfg(not(target_os = "android"))]
             if ui.button("浏览…").clicked() {
                 if let Some(p) = rfd::FileDialog::new()
                     .add_filter("OSM", &["osm", "xml", "pbf"])

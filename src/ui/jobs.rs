@@ -1,7 +1,11 @@
 //! 后台任务与消息处理：IP 获取 / 登录 / 刷新 / 消息协议分发。
 
-use super::{App, AI_DETAIL, AI_RECORDS, AI_LIST, CHEAT, IP, LOGIN_DONE, RANK, RECORDS, RUN_DETAIL, SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER};
+use super::{
+    App, AI_DETAIL, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, LOGIN_DONE, POINTS_DONE, RANK,
+    RECORDS, RUN_DETAIL, SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER,
+};
 use crate::api::model;
+use crate::track::generate_road::RouteMode;
 use crate::update::ReleaseInfo;
 
 impl App {
@@ -23,7 +27,7 @@ impl App {
         self.update.checking = true;
         self.update.check_error = None;
         if manual {
-            self.tab = 7;
+            self.tab = 8;
             self.status = "正在检查更新…".into();
         }
         self.spawn_job(move |tx| {
@@ -51,7 +55,8 @@ impl App {
         self.spawn_job(move |tx| {
             let outcome: Result<serde_json::Value, String> = (|| {
                 let mut report = |done: u64, total: Option<u64>| {
-                    tx.send(format!("{UPDATE_PROG}{}/{}", done, total.unwrap_or(0))).ok();
+                    tx.send(format!("{UPDATE_PROG}{}/{}", done, total.unwrap_or(0)))
+                        .ok();
                 };
                 let bytes = crate::update::download(&rel.asset_url, &mut report)?;
                 #[cfg(target_os = "android")]
@@ -75,12 +80,68 @@ impl App {
         });
     }
 
+    /// 后台拉取电子围栏并落盘（供预览裁剪/居中复用），完成后触发预览刷新。
+    /// 仅在真实道路路由模式下才需要围栏，避免经典模式用户也进入该端点请求指纹。
+    pub(crate) fn refresh_fence(&self) {
+        if self.run_page.route_mode != RouteMode::Road {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let identity = self.identity.clone();
+        self.spawn_job(move |tx| {
+            let mut log = App::logger(tx.clone());
+            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            match crate::api::fence::fetch_geo_fence(&mut client) {
+                Ok(f) => {
+                    let _ = crate::api::model::save_fence_cache(&f);
+                    log(&format!("√ [fence] 电子围栏已缓存 {} 个", f.len()));
+                    tx.send(FENCE_DONE.to_string()).ok();
+                }
+                Err(e) => log(&format!("⚠ [fence] 电子围栏获取失败: {e}")),
+            }
+        });
+    }
+
+    /// 后台拉取实时点位并落盘（供路线预览使用），完成后触发预览刷新。
+    /// 复用 fetch_points 的 TTL 缓存，仅在 Road 模式且锚点已配置时拉取。
+    pub(crate) fn refresh_points(&self) {
+        if self.run_page.route_mode != RouteMode::Road {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let identity = self.identity.clone();
+        if identity.has_unconfigured_default_location() {
+            return;
+        }
+        let Ok(anchor) = identity.anchor_coordinate() else {
+            return;
+        };
+        self.spawn_job(move |tx| {
+            let mut log = App::logger(tx.clone());
+            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            match crate::api::points::fetch_points(&mut client, anchor, &mut log) {
+                Ok(pts) => {
+                    log(&format!("√ [points] 点位已缓存 {} 个（供路线预览）", pts.len()));
+                    tx.send(POINTS_DONE.to_string()).ok();
+                }
+                Err(e) => log(&format!("⚠ [points] 点位获取失败: {e}")),
+            }
+        });
+    }
+
     pub(crate) fn fetch_ip(&mut self) {
         self.spawn_job(|tx| {
             let agent = crate::api::client::make_agent();
             let mut log = App::logger(tx.clone());
             let mut ip = String::new();
-            for url in ["https://api.ipify.org?format=json", "https://httpbin.org/ip"] {
+            for url in [
+                "https://api.ipify.org?format=json",
+                "https://httpbin.org/ip",
+            ] {
                 if let Ok(resp) = agent.get(url).call() {
                     if let Ok(text) = resp.into_string() {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -118,7 +179,11 @@ impl App {
         let identity = self.identity.clone();
         let remember = self.remember;
         self.config.username = username.clone();
-        self.config.password = if remember { password.clone() } else { String::new() };
+        self.config.password = if remember {
+            password.clone()
+        } else {
+            String::new()
+        };
         self.config.remember = remember;
         let _ = model::save_config(&self.config);
         self.login_busy = true;
@@ -146,7 +211,10 @@ impl App {
                 }
                 Err(e) => {
                     log(&format!("× 登录失败: {e}"));
-                    format!("{LOGIN_DONE}{}", serde_json::json!({"ok": false, "message": e}))
+                    format!(
+                        "{LOGIN_DONE}{}",
+                        serde_json::json!({"ok": false, "message": e})
+                    )
                 }
             };
             tx.send(msg).ok();
@@ -238,7 +306,9 @@ impl App {
 
     /// 拉取单条跑步详情。
     pub fn fetch_run_detail(&mut self, rrid: i64) {
-        let Some(session) = self.session.clone() else { return };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
         let identity = self.identity.clone();
         self.records_page.detail_loading = true;
         self.spawn_job(move |tx| {
@@ -258,7 +328,9 @@ impl App {
 
     /// 拉取单条 AI 记录全量详情。
     pub fn fetch_ai_detail(&mut self, id: i64) {
-        let Some(session) = self.session.clone() else { return };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
         let identity = self.identity.clone();
         self.records_page.ai_detail_loading = true;
         self.spawn_job(move |tx| {
@@ -287,7 +359,8 @@ impl App {
                 Ok(l) => l,
                 Err(e) => {
                     log(&format!("× [ai] 项目列表拉取失败: {e}"));
-                    tx.send(format!("{AI_RECORDS}{{\"groups\":[],\"total\":0}}")).ok();
+                    tx.send(format!("{AI_RECORDS}{{\"groups\":[],\"total\":0}}"))
+                        .ok();
                     return;
                 }
             };
@@ -319,7 +392,9 @@ impl App {
 
     /// 学期 + 违规自查（登录 / 跑步提交成功后自动调用）。
     pub fn refresh_data_page(&mut self) {
-        let Some(session) = self.session.clone() else { return };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
         let identity = self.identity.clone();
         self.data_busy = true;
         self.spawn_job(move |tx| {
@@ -330,7 +405,9 @@ impl App {
                     if let Some(s) = r.summary {
                         log(&format!(
                             "√ [semester] {} 有效 {}/{} 次，有效里程 {:.2} km",
-                            s.sname, s.semester_valid_count, s.semester_count,
+                            s.sname,
+                            s.semester_valid_count,
+                            s.semester_count,
                             s.semester_valid_dis / 1000.0
                         ));
                         let payload = serde_json::to_string(&s).unwrap_or_default();
@@ -351,7 +428,8 @@ impl App {
                 }
                 Err(e) => {
                     log(&format!("× [cheat] 检查失败: {e}"));
-                    tx.send(format!("{CHEAT}{{\"self\":null,\"list\":[]}}")).ok();
+                    tx.send(format!("{CHEAT}{{\"self\":null,\"list\":[]}}"))
+                        .ok();
                 }
             }
         });
@@ -374,7 +452,8 @@ impl App {
                 }
                 Err(e) => {
                     log(&format!("× [cheat] 检查失败: {e}"));
-                    tx.send(format!("{CHEAT}{{\"self\":null,\"list\":[]}}")).ok();
+                    tx.send(format!("{CHEAT}{{\"self\":null,\"list\":[]}}"))
+                        .ok();
                 }
             }
         });
@@ -431,7 +510,8 @@ impl App {
             tx.send(format!(
                 "{RANK}{}",
                 serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
-            )).ok();
+            ))
+            .ok();
         });
     }
 }

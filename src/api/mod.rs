@@ -3,6 +3,7 @@
 pub mod ai;
 pub mod cheat;
 pub mod client;
+pub mod fence;
 pub mod flow;
 pub mod gt4;
 pub mod gt4image;

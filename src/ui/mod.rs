@@ -13,17 +13,20 @@ pub mod data;
 pub mod device;
 pub mod fonts;
 pub mod jobs;
-pub mod msgs;
 pub mod log;
+pub mod map;
 pub mod mobile;
+pub mod msgs;
+pub mod osm;
 pub mod records;
 pub mod run;
-pub mod user;
 pub mod theme;
+pub mod user;
 
 use crate::api::model::{self, Config, HeaderIdentity, Session};
 use eframe::egui;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 
 pub const IP: &str = "__IP_DONE__";
 pub const LOGIN_DONE: &str = "__LOGIN_DONE__";
@@ -41,6 +44,8 @@ pub const RUN_DETAIL: &str = "__RUN_DETAIL__";
 pub const UPDATE_CHK: &str = "__UPDATE_CHK__";
 pub const UPDATE_PROG: &str = "__UPDATE_PROG__";
 pub const UPDATE_DONE: &str = "__UPDATE_DONE__";
+pub const FENCE_DONE: &str = "__FENCE_DONE__";
+pub const POINTS_DONE: &str = "__POINTS_DONE__";
 
 /// 提交结果弹窗。
 pub struct PopupInfo {
@@ -82,6 +87,12 @@ pub struct App {
     pub user_page: user::UserPage,
     pub device_page: device::DevicePage,
     pub update: about::UpdateUi,
+
+    /// 已加载的 OSM 路网（真实道路路由 + 地图显示共用）。
+    pub network: Option<Arc<route_planner::RoadGraph>>,
+    pub osm_page: osm::OsmPage,
+    net_tx: Sender<Result<Arc<route_planner::RoadGraph>, String>>,
+    net_rx: Receiver<Result<Arc<route_planner::RoadGraph>, String>>,
 }
 
 impl eframe::App for App {
@@ -233,7 +244,9 @@ impl eframe::App for App {
                         .add_enabled(
                             !(self.update.checking || self.update.downloading),
                             egui::Button::new(
-                                egui::RichText::new("检查更新").small().color(theme::text_dim()),
+                                egui::RichText::new("检查更新")
+                                    .small()
+                                    .color(theme::text_dim()),
                             ),
                         )
                         .clicked()
@@ -262,6 +275,7 @@ impl eframe::App for App {
                 4 => self.draw_user(ui),
                 5 => self.draw_device(ui),
                 6 => self.log.render(ui),
+                7 => self.draw_osm_page(ui),
                 _ => self.draw_about(ui),
             }
         });
@@ -297,6 +311,7 @@ impl eframe::App for App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
+        let (net_tx, net_rx) = std::sync::mpsc::channel();
         let font_loaded = fonts::install(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
         let identity = model::load_identity();
@@ -335,7 +350,8 @@ impl App {
                 dist_max: config.dist_max,
                 pace_min: config.pace_min,
                 pace_max: config.pace_max,
-                manual_altitude: config.manual_altitude_range
+                manual_altitude: config
+                    .manual_altitude_range
                     .map(|r| format!("{}-{}", r.min_m, r.max_m))
                     .or_else(|| config.manual_altitude.map(|v| v.to_string()))
                     .unwrap_or_default(),
@@ -345,16 +361,33 @@ impl App {
                 minute: 0,
                 face_check: config.face_check,
                 plan: None,
+                route_mode: crate::track::generate_road::RouteMode::from_str(&config.route_mode),
+                map: map::MapState::default(),
+                preview: None,
+                preview_stale: true,
+                map_fitted: false,
             },
-            ai_page: ai::AiPage { days: 1, per_day: 1, ..Default::default() },
+            ai_page: ai::AiPage {
+                days: 1,
+                per_day: 1,
+                ..Default::default()
+            },
             records_page: records::RecordsPage::default(),
             data_page: data::DataPage::default(),
             user_page: user::UserPage::default(),
             device_page: device::DevicePage::default(),
             update: about::UpdateUi::default(),
+            network: None,
+            osm_page: osm::OsmPage {
+                path: config.osm_path.clone(),
+                ..Default::default()
+            },
+            net_tx,
+            net_rx,
         };
         if app.font_loaded.is_none() {
-            app.log.push("未找到中文字体（msyh/simhei/simsun），界面中文可能显示为方块");
+            app.log
+                .push("未找到中文字体（msyh/simhei/simsun），界面中文可能显示为方块");
         }
         // 上次更新残留的 .old/.new 顺手清掉
         crate::update::cleanup_residue();
@@ -374,6 +407,13 @@ impl App {
             app.refresh_records();
             app.refresh_user_page();
             app.refresh_ai_list();
+            app.refresh_fence();
+            app.refresh_points();
+        }
+        // 已配置 OSM 路网则启动时后台加载
+        if !app.config.osm_path.is_empty() {
+            let path = app.config.osm_path.clone();
+            app.load_osm_async(path);
         }
         app
     }
@@ -392,5 +432,4 @@ impl App {
             tx.send(s.to_string()).ok();
         }
     }
-
 }

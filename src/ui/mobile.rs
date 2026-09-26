@@ -27,10 +27,7 @@ pub fn row<R>(
 }
 
 #[cfg(any(target_os = "android", test))]
-pub fn parse_i64_in_range(
-    input: &str,
-    range: RangeInclusive<i64>,
-) -> Result<i64, String> {
+pub fn parse_i64_in_range(input: &str, range: RangeInclusive<i64>) -> Result<i64, String> {
     let value = input
         .trim()
         .parse::<i64>()
@@ -43,10 +40,7 @@ pub fn parse_i64_in_range(
 }
 
 #[cfg(any(target_os = "android", test))]
-pub fn parse_f32_in_range(
-    input: &str,
-    range: RangeInclusive<f32>,
-) -> Result<f32, String> {
+pub fn parse_f32_in_range(input: &str, range: RangeInclusive<f32>) -> Result<f32, String> {
     let value = input
         .trim()
         .parse::<f32>()
@@ -59,10 +53,7 @@ pub fn parse_f32_in_range(
 }
 
 #[cfg(target_os = "android")]
-fn parse_f64_in_range(
-    input: &str,
-    range: RangeInclusive<f64>,
-) -> Result<f64, String> {
+fn parse_f64_in_range(input: &str, range: RangeInclusive<f64>) -> Result<f64, String> {
     let value = input
         .trim()
         .parse::<f64>()
@@ -75,7 +66,17 @@ fn parse_f64_in_range(
 }
 
 pub fn tab_bar(ui: &mut egui::Ui, selected: &mut usize) -> Vec<egui::Response> {
-    const TABS: [&str; 8] = ["跑步", "AI运动", "运动记录", "数据", "我的", "设备信息", "运行日志", "关于"];
+    const TABS: [&str; 9] = [
+        "跑步",
+        "AI运动",
+        "运动记录",
+        "数据",
+        "我的",
+        "设备信息",
+        "运行日志",
+        "路网",
+        "关于",
+    ];
     let compact = compact_ui(ui);
     let mut responses = Vec::with_capacity(TABS.len());
     if compact {
@@ -379,11 +380,19 @@ mod tests {
                 });
             });
 
-            assert_eq!(rects.len(), 8, "width={width}");
-            assert!(rects.iter().all(|rect| rect.is_finite() && rect.width() > 0.0));
-            assert!(rects.iter().all(|rect| rect.max.x <= width + 0.5), "width={width}: {rects:?}");
+            assert_eq!(rects.len(), 9, "width={width}");
+            assert!(rects
+                .iter()
+                .all(|rect| rect.is_finite() && rect.width() > 0.0));
+            assert!(
+                rects.iter().all(|rect| rect.max.x <= width + 0.5),
+                "width={width}: {rects:?}"
+            );
             if is_compact(width) {
-                assert!(rects.iter().all(|rect| rect.height() >= 44.0), "width={width}: {rects:?}");
+                assert!(
+                    rects.iter().all(|rect| rect.height() >= 44.0),
+                    "width={width}: {rects:?}"
+                );
             }
         }
     }
@@ -403,7 +412,9 @@ mod tests {
             let _ = ctx.run(raw, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     row(ui, |ui| {
-                        for (index, control_width) in [110.0, 120.0, 90.0, 120.0].into_iter().enumerate() {
+                        for (index, control_width) in
+                            [110.0, 120.0, 90.0, 120.0].into_iter().enumerate()
+                        {
                             rects.push(
                                 ui.add_sized(
                                     [control_width, TOUCH_HEIGHT],
@@ -417,7 +428,9 @@ mod tests {
             });
 
             assert_eq!(rects.len(), 4, "width={width}");
-            assert!(rects.iter().all(|rect| rect.is_finite() && rect.is_positive()));
+            assert!(rects
+                .iter()
+                .all(|rect| rect.is_finite() && rect.is_positive()));
             assert!(
                 rects.iter().all(|rect| rect.max.x <= width + 0.5),
                 "width={width}: {rects:?}"
@@ -432,7 +445,8 @@ mod tests {
             let mut rectangles = Vec::new();
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO, egui::vec2(width, 720.0),
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 720.0),
                 )),
                 ..Default::default()
             };
@@ -441,9 +455,19 @@ mod tests {
                     row(ui, |ui| {
                         for index in 0..3 {
                             let control = numeric_control_shell(ui, 120.0, |ui| {
-                                let button = ui.add_sized([120.0, TOUCH_HEIGHT], egui::Button::new("360")).rect;
-                                let error = ui.colored_label(egui::Color32::RED,
-                                    if index == 0 { "Please enter a valid value between 10 and 200" } else { "请输入 10 到 200" }).rect;
+                                let button = ui
+                                    .add_sized([120.0, TOUCH_HEIGHT], egui::Button::new("360"))
+                                    .rect;
+                                let error = ui
+                                    .colored_label(
+                                        egui::Color32::RED,
+                                        if index == 0 {
+                                            "Please enter a valid value between 10 and 200"
+                                        } else {
+                                            "请输入 10 到 200"
+                                        },
+                                    )
+                                    .rect;
                                 (button, error)
                             });
                             assert!(control.response.rect.contains_rect(control.inner.0));
@@ -455,9 +479,15 @@ mod tests {
                 });
             });
             for (index, rectangle) in rectangles.iter().enumerate() {
-                assert!(rectangle.max.x <= width + 0.5, "width={width}: {rectangles:?}");
+                assert!(
+                    rectangle.max.x <= width + 0.5,
+                    "width={width}: {rectangles:?}"
+                );
                 for other in &rectangles[index + 1..] {
-                    assert!(!rectangle.intersects(*other), "width={width}: {rectangles:?}");
+                    assert!(
+                        !rectangle.intersects(*other),
+                        "width={width}: {rectangles:?}"
+                    );
                 }
             }
         }
@@ -492,7 +522,9 @@ mod tests {
                 });
             });
 
-            assert!(rects.iter().all(|rect| rect.is_finite() && rect.is_positive()));
+            assert!(rects
+                .iter()
+                .all(|rect| rect.is_finite() && rect.is_positive()));
             assert!(
                 rects.iter().all(|rect| rect.max.x <= width + 0.5),
                 "width={width}: {rects:?}"

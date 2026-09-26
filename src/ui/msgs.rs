@@ -1,7 +1,11 @@
 //! 消息协议分发与弹窗构建。
 
-use super::{App, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, IP, LOGIN_DONE, PopupInfo, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER};
 use super::about::FinishAction;
+use super::{
+    App, PopupInfo, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, LOGIN_DONE,
+    POINTS_DONE, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, UPDATE_CHK, UPDATE_DONE,
+    UPDATE_PROG, USER,
+};
 use crate::api::model;
 use chrono::TimeZone;
 
@@ -11,6 +15,8 @@ impl App {
         let mut done_login = None;
         let mut done_run = None;
         let mut done_ai = None;
+        let mut done_fence = false;
+        let mut done_points = false;
         let mut records_json = None;
         let mut ai_list_json = None;
         let mut semester_json = None;
@@ -26,6 +32,10 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             if let Some(v) = msg.strip_prefix(IP) {
                 done_ip = Some(v.to_string());
+            } else if msg == FENCE_DONE {
+                done_fence = true;
+            } else if msg == POINTS_DONE {
+                done_points = true;
             } else if let Some(v) = msg.strip_prefix(LOGIN_DONE) {
                 done_login = Some(v.to_string());
             } else if let Some(v) = msg.strip_prefix(RUN_DONE) {
@@ -71,19 +81,51 @@ impl App {
         let got_semester = semester_json.is_some();
         let got_cheat = cheat_json.is_some();
         let got_rank = rank_json.is_some();
+
+        // OSM 路网加载回传
+        while let Ok(res) = self.net_rx.try_recv() {
+            self.osm_page.busy = false;
+            match res {
+                Ok(net) => {
+                    let nodes = net.graph.node_count();
+                    let bld = net.buildings.len();
+                    self.osm_page.fitted = false;
+                    self.osm_page.status = format!("√ 路网加载成功：{nodes} 节点 / {bld} 建筑");
+                    self.log
+                        .push(&format!("[osm] 路网加载成功：{nodes} 节点 / {bld} 建筑"));
+                    self.network = Some(net);
+                }
+                Err(e) => {
+                    self.osm_page.status = format!("路网加载失败：{e}");
+                    self.log.push(&format!("[osm] 路网加载失败：{e}"));
+                }
+            }
+        }
         if let Some(ip) = done_ip {
             self.ip = ip;
+        }
+        if done_fence {
+            self.run_page.preview_stale = true;
+        }
+        if done_points {
+            self.run_page.preview_stale = true;
         }
         if let Some(v) = done_login {
             self.login_busy = false;
             let val: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
             if val.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
                 // 直接从消息构造会话（写盘可能被占用，不依赖回读）
-                if let Some(sess) = val.get("session").and_then(|s| serde_json::from_value::<model::Session>(s.clone()).ok()) {
+                if let Some(sess) = val
+                    .get("session")
+                    .and_then(|s| serde_json::from_value::<model::Session>(s.clone()).ok())
+                {
                     self.session = Some(sess);
                     self.status = format!(
                         "已登录：{}",
-                        self.session.as_ref().map(|s| s.name.clone()).unwrap_or_default()
+                        self.session
+                            .as_ref()
+                            .map(|s| s.name.clone())
+                            .unwrap_or_default()
                     );
                 } else {
                     // 兜底：从磁盘读（老版本消息格式）
@@ -92,7 +134,10 @@ impl App {
                         self.session = Some(sess);
                         self.status = format!(
                             "已登录：{}",
-                            self.session.as_ref().map(|s| s.name.clone()).unwrap_or_default()
+                            self.session
+                                .as_ref()
+                                .map(|s| s.name.clone())
+                                .unwrap_or_default()
                         );
                     } else {
                         self.status = "登录成功但本地会话缺失".into();
@@ -103,6 +148,7 @@ impl App {
                 self.refresh_records();
                 self.refresh_user_page();
                 self.refresh_ai_list();
+                self.refresh_fence();
             } else {
                 self.status = format!(
                     "登录失败：{}",
@@ -121,6 +167,10 @@ impl App {
                 );
                 self.popup = Some(run_popup(&val));
                 self.refresh_data_page();
+                // 提交末尾会随机漂移锚点并持久化，这里重载身份让 UI 锚点与磁盘一致，
+                // 并触发路线预览重算（点位缓存已在漂移后用新锚点重存）。
+                self.identity = model::load_identity();
+                self.run_page.preview_stale = true;
             } else {
                 self.status = format!("跑步提交失败：{}", val["message"].as_str().unwrap_or(""));
             }
@@ -183,14 +233,26 @@ impl App {
         if let Some(v) = user_json {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&v) {
                 self.user_page.info = Some(crate::api::user::MyInfo {
-                    profile: val.get("profile").cloned().unwrap_or(serde_json::Value::Null),
-                    home_page: val.get("home_page").cloned().unwrap_or(serde_json::Value::Null),
+                    profile: val
+                        .get("profile")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                    home_page: val
+                        .get("home_page")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
                     personal_semester: val
                         .get("personal_semester")
                         .cloned()
                         .unwrap_or(serde_json::Value::Null),
-                    summary: val.get("summary").cloned().unwrap_or(serde_json::Value::Null),
-                    completed: val.get("completed").cloned().unwrap_or(serde_json::Value::Null),
+                    summary: val
+                        .get("summary")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                    completed: val
+                        .get("completed")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
                 });
             }
         }
@@ -205,8 +267,7 @@ impl App {
                     .get("groups")
                     .and_then(|x| serde_json::from_value(x.clone()).ok())
                     .unwrap_or_default();
-                self.records_page.ai_total =
-                    val.get("total").and_then(|x| x.as_i64()).unwrap_or(0);
+                self.records_page.ai_total = val.get("total").and_then(|x| x.as_i64()).unwrap_or(0);
             }
         }
         if let Some(raw) = detail_raw {
@@ -218,11 +279,11 @@ impl App {
             let val: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
             if val.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
                 if val.get("newer").and_then(|b| b.as_bool()).unwrap_or(false) {
-                    if let Ok(rel) =
-                        serde_json::from_value::<crate::update::ReleaseInfo>(
-                            val.get("release").cloned().unwrap_or(serde_json::Value::Null),
-                        )
-                    {
+                    if let Ok(rel) = serde_json::from_value::<crate::update::ReleaseInfo>(
+                        val.get("release")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                    ) {
                         self.status = format!("发现新版本 {}", rel.tag);
                         self.update.latest = Some(rel.clone());
                         self.update.up_to_date = false;
@@ -233,7 +294,10 @@ impl App {
                     self.status = "已是最新版本".into();
                 }
             } else {
-                let msg = val.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
+                let msg = val
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("未知错误");
                 self.update.check_error = Some(msg.to_string());
                 self.status = format!("检查更新失败：{msg}");
             }
@@ -248,7 +312,11 @@ impl App {
         if let Some(v) = update_done {
             self.update.downloading = false;
             let val: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
-            let tag = val.get("tag").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let tag = val
+                .get("tag")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
             if val.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
                 self.status = format!("√ 已更新到 {tag}");
                 #[cfg(target_os = "android")]
@@ -260,7 +328,10 @@ impl App {
                     self.update.finish = Some(FinishAction::Restart { tag });
                 }
             } else {
-                let msg = val.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
+                let msg = val
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("未知错误");
                 self.update.check_error = Some(msg.to_string());
                 self.status = format!("× 更新失败：{msg}");
                 self.popup = Some(PopupInfo {
@@ -290,7 +361,11 @@ fn fmt_dur(sec: i64) -> String {
 fn run_popup(v: &serde_json::Value) -> PopupInfo {
     let dist = v["dist"].as_f64().unwrap_or(0.0);
     let dur = v["dur"].as_i64().unwrap_or(0);
-    let pace = if dist > 0.0 { dur as f64 / (dist / 1000.0) } else { 0.0 };
+    let pace = if dist > 0.0 {
+        dur as f64 / (dist / 1000.0)
+    } else {
+        0.0
+    };
     let mut lines = vec![
         format!("记录号：{}", v["rrid"].as_i64().unwrap_or(0)),
         format!("UUID：{}", v["uuid"].as_str().unwrap_or("")),
@@ -319,7 +394,11 @@ fn run_popup(v: &serde_json::Value) -> PopupInfo {
         format!(
             "OBS 上传：{}/2 · 详情验证：{}",
             v["obs_ok"].as_i64().unwrap_or(0),
-            if v["verify"].as_bool().unwrap_or(false) { "通过" } else { "未通过" }
+            if v["verify"].as_bool().unwrap_or(false) {
+                "通过"
+            } else {
+                "未通过"
+            }
         ),
     ];
     // 达标判定明细（详情接口 reasonList）
@@ -349,7 +428,11 @@ fn ai_popup(v: &serde_json::Value) -> PopupInfo {
         return PopupInfo {
             title: "AI 批量补签结果".into(),
             lines: vec![
-                format!("成功：{}/{}", v["success"].as_i64().unwrap_or(0), v["total"].as_i64().unwrap_or(0)),
+                format!(
+                    "成功：{}/{}",
+                    v["success"].as_i64().unwrap_or(0),
+                    v["total"].as_i64().unwrap_or(0)
+                ),
                 format!(
                     "覆盖：{} 天 × 每天 {} 次 × {} 个项目",
                     v["days"].as_i64().unwrap_or(0),

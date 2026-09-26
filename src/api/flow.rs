@@ -103,6 +103,14 @@ pub fn run_full_flow(
             pol.must_points.len(),
             route_pts.len()
         ));
+        // 防御性日志：must_points 的「首个=起点」语义未经证实（提交时 skip(1) 依赖此假设），
+        // 逐点打印便于抓真实响应核对，避免首个必经点被静默丢弃。
+        for (i, &(mlat, mlon)) in pol.must_points.iter().enumerate() {
+            log(&format!(
+                "  [policy] must_points[{i}] BD=({mlat:.6},{mlon:.6}){}",
+                if i == 0 { "（假设为起点）" } else { "（必经点）" }
+            ));
+        }
     } else {
         log(&format!(
             "[policy] 响应未含必经点列表，仅用打卡点 {} 个",

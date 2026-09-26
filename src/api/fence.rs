@@ -26,7 +26,7 @@ pub fn fetch_geo_fence(client: &mut ApiClient) -> Result<Vec<Vec<(f64, f64)>>, S
         };
         let ring: Vec<(f64, f64)> = pts
             .iter()
-            .filter_map(|p| point_xy(p))
+            .filter_map(point_xy)
             .filter(|(lat, lon)| !(*lat == 0.0 && *lon == 0.0))
             .collect();
         if ring.len() >= 3 {
@@ -36,8 +36,9 @@ pub fn fetch_geo_fence(client: &mut ApiClient) -> Result<Vec<Vec<(f64, f64)>>, S
     Ok(out)
 }
 
-/// 取一个围栏点的 (lat, lon)（BD-09）。优先 lat/lon，缺失或全 0 时回退 glat/glon（GCJ→BD）。
-fn point_xy(p: &Value) -> Option<(f64, f64)> {
+/// 取一个点的 (lat, lon)（BD-09）。优先 lat/lon，缺失或全 0 时回退 glat/glon（GCJ→BD）。
+/// 供围栏与 policy 必经点共用（两端点均实测存在「只填 GCJ、BD 置 0」的情况）。
+pub(crate) fn point_xy(p: &Value) -> Option<(f64, f64)> {
     let lat = field_num(p, &["lat", "latitude"]);
     let lon = field_num(p, &["lon", "lng", "longitude"]);
     match (lat, lon) {

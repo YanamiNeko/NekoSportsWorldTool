@@ -254,6 +254,20 @@ pub fn plan_loop(
         .map(|far| bearing(g.to_m(g.node_coord(start)), g.to_m(g.node_coord(*far))).to_degrees())
         .unwrap_or(0.0);
 
+    // 预检查：必经点必须依次可达（围栏裁剪可能把路网切成多个连通分量，落在被裁掉
+    // 分量上的必经点会静默丢失，破坏「必达」承诺）。不可达直接报错，而非静默跳过。
+    let mut cur = start;
+    for &t in must_pass {
+        if shortest_path(g, cur, t).is_none() {
+            return Err(format!(
+                "必经点 ({:.6},{:.6}) 不可达：可能落在围栏外或路网不连通",
+                g.node_coord(t).lat,
+                g.node_coord(t).lon
+            ));
+        }
+        cur = t;
+    }
+
     let mut best: Option<Vec<NodeIndex>> = None;
     let mut best_key: Option<(f64, u32)> = None;
     for i in 0..RETRIES {

@@ -2,6 +2,7 @@
 //! 返回 data.runRuleModel.minDistance（提交时 selDistance 用它）与 data.policy。
 
 use super::client::{get_field, ApiClient};
+use super::fence::point_xy;
 use serde_json::{json, Value};
 
 pub const POLICY_PATH: &str = "/api/v70103/runModePolicy";
@@ -33,21 +34,8 @@ fn extract_must_points(v: &serde_json::Value) -> Vec<(f64, f64)> {
         let Some(arr) = data.get(name).and_then(|x| x.as_array()) else {
             continue;
         };
-        let pts: Vec<(f64, f64)> = arr
-            .iter()
-            .filter_map(|p| {
-                let lat = p
-                    .get("lat")
-                    .and_then(|v| v.as_f64())
-                    .or_else(|| p.get("latitude").and_then(|v| v.as_f64()))?;
-                let lon = p
-                    .get("lon")
-                    .and_then(|v| v.as_f64())
-                    .or_else(|| p.get("lng").and_then(|v| v.as_f64()))
-                    .or_else(|| p.get("longitude").and_then(|v| v.as_f64()))?;
-                Some((lat, lon))
-            })
-            .collect();
+        // 复用 fence 的坐标系解析：BD 优先，缺失/全 0 回退 glat/glon（GCJ→BD）并过滤 (0,0)。
+        let pts: Vec<(f64, f64)> = arr.iter().filter_map(point_xy).collect();
         if !pts.is_empty() {
             return pts;
         }

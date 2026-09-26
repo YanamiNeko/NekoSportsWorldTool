@@ -267,6 +267,7 @@ impl App {
     }
 
     fn draw_run_content(&mut self, ui: &mut egui::Ui) {
+        let prev_route = self.run_page.route_mode;
         {
             let page = &mut self.run_page;
             let compact = mobile::compact_ui(ui);
@@ -397,6 +398,11 @@ impl App {
                     ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
                 }
             });
+        }
+
+        // 切换到真实道路路由时按需拉取电子围栏（经典模式不触发该端点）。
+        if self.run_page.route_mode == RouteMode::Road && prev_route != RouteMode::Road {
+            self.refresh_fence();
         }
 
         ui.add_space(8.0);

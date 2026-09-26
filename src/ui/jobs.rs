@@ -5,6 +5,7 @@ use super::{
     RUN_DETAIL, SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER,
 };
 use crate::api::model;
+use crate::track::generate_road::RouteMode;
 use crate::update::ReleaseInfo;
 
 impl App {
@@ -80,7 +81,11 @@ impl App {
     }
 
     /// 后台拉取电子围栏并落盘（供预览裁剪/居中复用），完成后触发预览刷新。
+    /// 仅在真实道路路由模式下才需要围栏，避免经典模式用户也进入该端点请求指纹。
     pub(crate) fn refresh_fence(&self) {
+        if self.run_page.route_mode != RouteMode::Road {
+            return;
+        }
         let Some(session) = self.session.clone() else {
             return;
         };

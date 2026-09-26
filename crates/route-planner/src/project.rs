@@ -58,6 +58,7 @@ pub fn add_virtual_nodes(g: &mut RoadGraph, queries: &[Coord]) -> Result<Vec<Nod
                 ..data.clone()
             },
         );
+        g.index_insert_edge(s, v);
         g.add_edge(
             v,
             tg,
@@ -66,6 +67,7 @@ pub fn add_virtual_nodes(g: &mut RoadGraph, queries: &[Coord]) -> Result<Vec<Nod
                 ..data.clone()
             },
         );
+        g.index_insert_edge(v, tg);
 
         // 反向边（若非单向）：tg→s 切分为 tg→v、v→s。
         if !data.oneway {
@@ -82,6 +84,7 @@ pub fn add_virtual_nodes(g: &mut RoadGraph, queries: &[Coord]) -> Result<Vec<Nod
                         ..rdata.clone()
                     },
                 );
+                g.index_insert_edge(tg, v);
                 g.add_edge(
                     v,
                     s,
@@ -90,6 +93,7 @@ pub fn add_virtual_nodes(g: &mut RoadGraph, queries: &[Coord]) -> Result<Vec<Nod
                         ..rdata
                     },
                 );
+                g.index_insert_edge(v, s);
             }
         }
 

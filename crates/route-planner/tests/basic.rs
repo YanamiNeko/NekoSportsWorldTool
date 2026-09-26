@@ -80,6 +80,67 @@ fn test_virtual_node_projection_mid_edge() {
 }
 
 #[test]
+fn test_virtual_nodes_two_mid_edge_splits() {
+    // 同一条边（a→b）上的两个投影点都落在路段中间：第一次切分后旧边被删除，
+    // 若索引仍按边索引寻址（swap-remove 失效），第二个点会被锚到错误边/切错边。
+    let mut g = RoadGraph::new();
+    let a = g.add_node(Coord::new(0.0, 0.0));
+    let b = g.add_node(Coord::new(0.0, 0.001));
+    let c = g.add_node(Coord::new(0.0, 0.002));
+    let data = route_planner::graph::EdgeData {
+        way_id: 1,
+        oneway: false,
+        highway: "residential".into(),
+        maxspeed_kmh: None,
+        length_m: 111.0,
+    };
+    g.add_edge(a, b, data.clone());
+    g.add_edge(b, a, data.clone());
+    g.add_edge(b, c, data.clone());
+    g.add_edge(c, b, data);
+    g.compute_anchor();
+    g.rebuild_index();
+
+    let v = route_planner::project::add_virtual_nodes(
+        &mut g,
+        &[Coord::new(0.0, 0.0003), Coord::new(0.0, 0.0007)],
+    )
+    .unwrap();
+    assert_eq!(v.len(), 2);
+    let c1 = g.node_coord(v[0]);
+    let c2 = g.node_coord(v[1]);
+    assert!(
+        (c1.lat - 0.0003).abs() < 1e-4,
+        "第一个投影点偏移: {:?}",
+        c1
+    );
+    assert!(
+        (c2.lat - 0.0007).abs() < 1e-4,
+        "第二个投影点被锚到错误边: {:?}",
+        c2
+    );
+
+    // 拓扑断言：v[1] 必须接在 v[0] 与 b 之间（同一条路被正确切成三段），
+    // 而不能接到无关节点 c（切错边会产生脱离道路的直线段）。
+    let nb: Vec<_> = g.graph.neighbors(v[1]).collect();
+    assert!(
+        nb.contains(&v[0]),
+        "第二个虚拟节点应接在第一个虚拟节点上，实际邻居: {:?}",
+        nb
+    );
+    assert!(
+        nb.contains(&b),
+        "第二个虚拟节点应接在 b 端点，实际邻居: {:?}",
+        nb
+    );
+    assert!(
+        !nb.contains(&c),
+        "第二个虚拟节点不应接到无关节点 c（切错了边），实际邻居: {:?}",
+        nb
+    );
+}
+
+#[test]
 fn test_route_visits_checkpoints() {
     let g = grid();
     let wps = vec![

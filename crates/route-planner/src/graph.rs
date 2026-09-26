@@ -40,11 +40,14 @@ pub struct EdgeData {
 }
 
 /// rstar 空间索引条目：一条有向边在米制平面的两端点。
+/// 存端点而非边索引：切分边时 `remove_edge` 的 swap-remove 会让边索引失效，
+/// 端点索引（节点不随切分删除）则可经 `find_edge` 重新定位当前有效边。
 #[derive(Clone, Copy)]
 struct Seg {
     a: [f64; 2],
     b: [f64; 2],
-    edge: usize,
+    from: NodeIndex,
+    to: NodeIndex,
 }
 
 impl RTreeObject for Seg {
@@ -145,7 +148,8 @@ impl RoadGraph {
             items.push(Seg {
                 a: pa,
                 b: pb,
-                edge: e.index(),
+                from: a,
+                to: b,
             });
         }
         self.index = RTree::bulk_load(items);
@@ -158,11 +162,16 @@ impl RoadGraph {
         while best.is_none() && radius <= 20_000.0 {
             let mut best_d = f64::INFINITY;
             for seg in self.index.locate_within_distance(p, radius * radius) {
+                // 跳过已被切分删除的过期条目（端点对应边已不存在）。
+                let edge = match self.graph.find_edge(seg.from, seg.to) {
+                    Some(e) => e,
+                    None => continue,
+                };
                 let (proj, t) = project_to_segment(p, seg.a, seg.b);
                 let d = dist(p, proj);
                 if d < best_d {
                     best_d = d;
-                    best = Some((EdgeIndex::new(seg.edge), t, proj, d));
+                    best = Some((edge, t, proj, d));
                 }
             }
             if best.is_some() {
@@ -171,6 +180,13 @@ impl RoadGraph {
             radius *= 4.0;
         }
         best
+    }
+
+    /// 增量插入一条有向边到空间索引（切分边新增子段时调用，避免全量重建）。
+    pub fn index_insert_edge(&mut self, from: NodeIndex, to: NodeIndex) {
+        let a = self.to_m(self.graph[from].coord);
+        let b = self.to_m(self.graph[to].coord);
+        self.index.insert(Seg { a, b, from, to });
     }
 
     /// 整体平移（对齐 WGS84 → BD 工作系，常数偏移）。

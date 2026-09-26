@@ -12,6 +12,14 @@ use serde_json::{json, Value};
 
 pub const POINTS_PATH: &str = "/api/v560/get/1/distance/1";
 
+fn has_reusable_area(area: &crate::track::wire::RunAreaMeta) -> bool {
+    area.run_area_id >= -1
+        && area.freedom_show_fence
+        && serde_json::from_str::<Value>(&area.geo_fences_json)
+            .ok()
+            .is_some_and(|value| matches!(value, Value::Array(ref fences) if !fences.is_empty()))
+}
+
 #[derive(Clone, Debug)]
 pub struct PointsContext {
     pub points: Vec<Value>,
@@ -60,9 +68,7 @@ pub fn fetch_points_context_ext(
     // ① TTL 内命中缓存直接返回
     if let Some((ts, pts, area)) = model::load_points_cache_context_for(anchor) {
         if !pts.is_empty()
-            && area.run_area_id >= 0
-            && area.freedom_show_fence
-            && area.geo_fences_json.trim() != "[]"
+            && has_reusable_area(&area)
             && crate::crypto::envelope::now_ms() - ts < model::POINTS_TTL_MS
         {
             log(&format!("[points] 缓存命中（{} 秒前，{} 点）", (crate::crypto::envelope::now_ms() - ts) / 1000, pts.len()));
@@ -375,6 +381,35 @@ pub fn points_bd(points: &[Value]) -> Vec<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valid_server_fence_without_area_id_is_reusable_from_cache() {
+        let area = crate::track::wire::RunAreaMeta {
+            run_area_id: -1,
+            geo_fences_json: "[{\"lat\":39.4,\"lon\":116.2}]".into(),
+            freedom_show_fence: true,
+        };
+        assert!(has_reusable_area(&area));
+    }
+
+    #[test]
+    fn invalid_or_hidden_fence_is_not_reusable_from_cache() {
+        for area in [
+            crate::track::wire::RunAreaMeta::default(),
+            crate::track::wire::RunAreaMeta {
+                run_area_id: 42,
+                geo_fences_json: "not-json".into(),
+                freedom_show_fence: true,
+            },
+            crate::track::wire::RunAreaMeta {
+                run_area_id: 42,
+                geo_fences_json: "[{\"lat\":39.4,\"lon\":116.2}]".into(),
+                freedom_show_fence: false,
+            },
+        ] {
+            assert!(!has_reusable_area(&area));
+        }
+    }
 
     #[test]
     fn area_metadata_accepts_top_level_and_string_values() {

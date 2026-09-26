@@ -135,6 +135,10 @@ pub fn run_full_flow(
         if let Err(e) = super::model::save_identity(&client.identity) {
             log(&format!("⚠ 锚点持久化失败: {e}"));
         }
+        // 用漂移后的新锚点重存点位缓存，使缓存锚点与持久化锚点一致，避免预览锚点失配。
+        if let Ok(new_anchor) = client.identity.anchor_coordinate() {
+            let _ = super::model::save_points_cache(new_anchor, &pts);
+        }
     }
     // 平均配速须落在有效窗口内（否则逐点速度无法全窗内），越界时修正时长
     let mut params = *params;

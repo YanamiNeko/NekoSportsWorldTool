@@ -1,8 +1,8 @@
 //! 后台任务与消息处理：IP 获取 / 登录 / 刷新 / 消息协议分发。
 
 use super::{
-    App, AI_DETAIL, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, LOGIN_DONE, RANK, RECORDS,
-    RUN_DETAIL, SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER,
+    App, AI_DETAIL, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, LOGIN_DONE, POINTS_DONE, RANK,
+    RECORDS, RUN_DETAIL, SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER,
 };
 use crate::api::model;
 use crate::track::generate_road::RouteMode;
@@ -100,6 +100,35 @@ impl App {
                     tx.send(FENCE_DONE.to_string()).ok();
                 }
                 Err(e) => log(&format!("⚠ [fence] 电子围栏获取失败: {e}")),
+            }
+        });
+    }
+
+    /// 后台拉取实时点位并落盘（供路线预览使用），完成后触发预览刷新。
+    /// 复用 fetch_points 的 TTL 缓存，仅在 Road 模式且锚点已配置时拉取。
+    pub(crate) fn refresh_points(&self) {
+        if self.run_page.route_mode != RouteMode::Road {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let identity = self.identity.clone();
+        if identity.has_unconfigured_default_location() {
+            return;
+        }
+        let Ok(anchor) = identity.anchor_coordinate() else {
+            return;
+        };
+        self.spawn_job(move |tx| {
+            let mut log = App::logger(tx.clone());
+            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            match crate::api::points::fetch_points(&mut client, anchor, &mut log) {
+                Ok(pts) => {
+                    log(&format!("√ [points] 点位已缓存 {} 个（供路线预览）", pts.len()));
+                    tx.send(POINTS_DONE.to_string()).ok();
+                }
+                Err(e) => log(&format!("⚠ [points] 点位获取失败: {e}")),
             }
         });
     }

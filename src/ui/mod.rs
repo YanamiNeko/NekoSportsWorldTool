@@ -45,6 +45,7 @@ pub const UPDATE_CHK: &str = "__UPDATE_CHK__";
 pub const UPDATE_PROG: &str = "__UPDATE_PROG__";
 pub const UPDATE_DONE: &str = "__UPDATE_DONE__";
 pub const FENCE_DONE: &str = "__FENCE_DONE__";
+pub const POINTS_DONE: &str = "__POINTS_DONE__";
 
 /// 提交结果弹窗。
 pub struct PopupInfo {
@@ -407,6 +408,7 @@ impl App {
             app.refresh_user_page();
             app.refresh_ai_list();
             app.refresh_fence();
+            app.refresh_points();
         }
         // 已配置 OSM 路网则启动时后台加载
         if !app.config.osm_path.is_empty() {

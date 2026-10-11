@@ -108,7 +108,7 @@ pub fn plan_road_view(
     let mut g = net.clone();
     align_network(&mut g);
     g = apply_fences(&g, fences);
-    let ordered = select_route_points(fixed, ordinary, seed, pick);
+    let ordered = select_route_points_reachable(&g, fixed, ordinary, seed, pick);
     let waypoints: Vec<Coord> = ordered.iter().map(|p| Coord::new(p.1, p.0)).collect();
     let must_pass: Vec<Coord> = waypoints.iter().skip(1).copied().collect();
     let opts = RouteOptions::default();
@@ -164,6 +164,41 @@ pub const DEFAULT_ORDINARY_PICK: usize = 2;
 
 /// 随机普通点数量的下限（App 判定「至少通过 N 个普通点位」；不同学校可改）。
 pub const MIN_ORDINARY_PICK: usize = 2;
+
+/// 返回 `ordinary` 中与必经点（`fixed`）主分量连通的子集。
+///
+/// 普通点一旦入选即为强制必经，必须保证在当前（已按围栏裁剪的）路网上可达；
+/// 围栏裁断或路网孤立分量上的点会在此被剔除，避免随机选中后整条路线规划失败。
+pub fn reachable_ordinary(
+    net: &RoadGraph,
+    fixed: &[(f64, f64)],
+    ordinary: &[(f64, f64)],
+) -> Vec<(f64, f64)> {
+    let to_coord = |p: &(f64, f64)| Coord::new(p.1, p.0);
+    let anchors: Vec<Coord> = fixed.iter().map(to_coord).collect();
+    let cands: Vec<Coord> = ordinary.iter().map(to_coord).collect();
+    let keep = route_planner::filter_same_component(net, &anchors, &cands);
+    let key = |lat: f64, lon: f64| ((lon * 1e6).round() as i64, (lat * 1e6).round() as i64);
+    let keep_set: std::collections::HashSet<(i64, i64)> =
+        keep.iter().map(|c| key(c.lat, c.lon)).collect();
+    ordinary
+        .iter()
+        .copied()
+        .filter(|p| keep_set.contains(&key(p.0, p.1)))
+        .collect()
+}
+
+/// 先按连通性过滤普通点，再调用 `select_route_points`（预览与真跑共用）。
+pub fn select_route_points_reachable(
+    net: &RoadGraph,
+    fixed: &[(f64, f64)],
+    ordinary: &[(f64, f64)],
+    seed: u64,
+    pick: usize,
+) -> Vec<(f64, f64)> {
+    let reachable = reachable_ordinary(net, fixed, ordinary);
+    select_route_points(fixed, &reachable, seed, pick)
+}
 
 /// 从点位挑选参与路线的硬点：必经点（`fixed`，全部）+ 随机 `pick` 个普通点
 /// （`ordinary`）。`pick` 夹到 `[MIN_ORDINARY_PICK, ordinary.len()]`。

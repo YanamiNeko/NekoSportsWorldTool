@@ -12,7 +12,8 @@ pub mod wire;
 #[cfg(test)]
 mod tests {
     use super::generate_road::{
-        build_road, select_route_points, DEFAULT_ORDINARY_PICK, MIN_ORDINARY_PICK,
+        build_road, reachable_ordinary, select_route_points, DEFAULT_ORDINARY_PICK,
+        MIN_ORDINARY_PICK,
     };
     use super::generator::build;
     use super::geom::{MET_PER_DEG_LAT, MET_PER_DEG_LNG};
@@ -132,6 +133,31 @@ mod tests {
             let sel = select_route_points(&fixed, &ordinary, 9, pick);
             assert_eq!(sel.len(), 1 + MIN_ORDINARY_PICK, "pick={pick} sel={sel:?}");
         }
+    }
+
+    /// 连通性过滤：与必经点主分量断开的普通点被剔除，连通的保留。
+    #[test]
+    fn test_reachable_ordinary_filters_disconnected() {
+        let mut g = road_grid();
+        // 约 2km 外再加一个孤立小分量。
+        let a = g.add_node(route_planner::Coord::new(121.560, 38.920));
+        let b = g.add_node(route_planner::Coord::new(121.5602, 38.920));
+        let d = route_planner::graph::EdgeData {
+            way_id: 9999,
+            oneway: false,
+            highway: "residential".into(),
+            maxspeed_kmh: None,
+            length_m: 20.0,
+        };
+        g.add_edge(a, b, d.clone());
+        g.add_edge(b, a, d);
+        g.rebuild_index();
+
+        let fixed = vec![(38.901678, 121.540241)]; // 主网格内
+        let near = (38.901678, 121.540941); // 主网格内
+        let far = (38.920, 121.560); // 孤立分量上
+        let keep = reachable_ordinary(&g, &fixed, &[near, far]);
+        assert_eq!(keep, vec![near], "孤立分量上的普通点必须被剔除");
     }
 
     /// 点位数分类：isFixed 字段决定必经/普通。

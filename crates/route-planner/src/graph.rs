@@ -293,3 +293,57 @@ pub fn point_in_polygon(poly: &[Coord], p: Coord) -> bool {
     }
     inside
 }
+
+/// 无向连通性过滤：仅保留与参考点处于同一连通分量的候选点。
+///
+/// 参考分量优先取 `anchors` 中首个可投影到路网的点；`anchors` 为空或全部投影失败时，
+/// 退回节点数最多的分量。用于随机挑选普通打卡点前剔除「围栏裁断 / 路网孤立分量」
+/// 上的点，避免把不可达点列为强制必经后整条路线规划失败。
+pub fn filter_same_component(
+    net: &RoadGraph,
+    anchors: &[Coord],
+    candidates: &[Coord],
+) -> Vec<Coord> {
+    use petgraph::unionfind::UnionFind;
+
+    let n = net.graph.node_count();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut uf: UnionFind<NodeIndex> = UnionFind::new(n);
+    for e in net.graph.edge_indices() {
+        if let Some((a, b)) = net.graph.edge_endpoints(e) {
+            uf.union(a, b);
+        }
+    }
+
+    let nearest_root = |c: Coord, uf: &mut UnionFind<NodeIndex>| -> Option<NodeIndex> {
+        let p = net.to_m(c);
+        let (edge, _t, _proj, _d) = net.nearest_edge(p)?;
+        let (a, _b) = net.graph.edge_endpoints(edge)?;
+        Some(uf.find(a))
+    };
+
+    let ref_root = anchors
+        .iter()
+        .find_map(|c| nearest_root(*c, &mut uf))
+        .or_else(|| {
+            let mut count: HashMap<NodeIndex, usize> = HashMap::new();
+            for node in net.graph.node_indices() {
+                *count.entry(uf.find(node)).or_insert(0) += 1;
+            }
+            count
+                .into_iter()
+                .max_by_key(|&(_, c)| c)
+                .map(|(r, _)| r)
+        });
+    let Some(ref_root) = ref_root else {
+        return Vec::new();
+    };
+
+    candidates
+        .iter()
+        .filter(|c| nearest_root(**c, &mut uf) == Some(ref_root))
+        .copied()
+        .collect()
+}

@@ -174,9 +174,19 @@ pub fn run_full_flow(
                         };
                         let filtered = crate::track::generate_road::apply_fences(&net, &fences);
                         // 硬点 = 必经点 + 随机普通点，全部强经过；waypoints[0] 为起点。
+                        // 普通点先按连通性过滤，避免选中围栏裁断/孤立分量上的不可达点。
+                        let reachable = crate::track::generate_road::reachable_ordinary(
+                            &filtered, &fixed, &ordinary,
+                        );
+                        if reachable.len() < ordinary.len() {
+                            log(&format!(
+                                "⚠ [track] {} 个普通点不可达（围栏裁断/路网孤立），已排除",
+                                ordinary.len() - reachable.len()
+                            ));
+                        }
                         let selected = crate::track::generate_road::select_route_points(
                             &fixed,
-                            &ordinary,
+                            &reachable,
                             params.seed,
                             params.ordinary_pick,
                         );

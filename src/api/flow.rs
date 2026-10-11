@@ -177,6 +177,8 @@ pub fn run_full_flow(
                                 ordinary.len() - reachable.len()
                             ));
                         }
+                        // 过滤后不足最少普通点数：直接报错，不静默降级（否则无法满足判定）。
+                        crate::track::generate_road::ensure_enough_ordinary(reachable.len())?;
                         let selected = crate::track::generate_road::select_route_points(
                             &fixed,
                             &reachable,

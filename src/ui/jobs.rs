@@ -126,6 +126,17 @@ impl App {
             match crate::api::points::fetch_points(&mut client, anchor, &mut log) {
                 Ok(pts) => {
                     log(&format!("√ [points] 点位已缓存 {} 个（供路线预览）", pts.len()));
+                    // 顺带刷新策略必经点缓存，使首次进入道路模式的预览也能对齐真跑。
+                    match crate::api::policy::fetch_policy(&mut client) {
+                        Ok(pol) => {
+                            let _ = crate::api::model::save_must_points_cache(anchor, &pol.must_points);
+                            log(&format!(
+                                "√ [policy] 策略必经点已缓存 {} 个（供路线预览）",
+                                pol.must_points.len()
+                            ));
+                        }
+                        Err(e) => log(&format!("⚠ [policy] 策略获取失败: {e}")),
+                    }
                     tx.send(POINTS_DONE.to_string()).ok();
                 }
                 Err(e) => log(&format!("⚠ [points] 点位获取失败: {e}")),

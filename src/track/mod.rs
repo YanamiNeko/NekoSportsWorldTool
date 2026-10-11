@@ -12,8 +12,8 @@ pub mod wire;
 #[cfg(test)]
 mod tests {
     use super::generate_road::{
-        build_road, reachable_ordinary, select_route_points, DEFAULT_ORDINARY_PICK,
-        MIN_ORDINARY_PICK,
+        build_road, ensure_enough_ordinary, reachable_ordinary, select_route_points,
+        DEFAULT_ORDINARY_PICK, MIN_ORDINARY_PICK,
     };
     use super::generator::build;
     use super::geom::{MET_PER_DEG_LAT, MET_PER_DEG_LNG};
@@ -133,6 +133,14 @@ mod tests {
             let sel = select_route_points(&fixed, &ordinary, 9, pick);
             assert_eq!(sel.len(), 1 + MIN_ORDINARY_PICK, "pick={pick} sel={sel:?}");
         }
+    }
+
+    /// 可用普通点不足 MIN_ORDINARY_PICK 时直接报错。
+    #[test]
+    fn test_ensure_enough_ordinary() {
+        assert!(ensure_enough_ordinary(MIN_ORDINARY_PICK).is_ok());
+        assert!(ensure_enough_ordinary(MIN_ORDINARY_PICK - 1).is_err());
+        assert!(ensure_enough_ordinary(0).is_err());
     }
 
     /// 连通性过滤：与必经点主分量断开的普通点被剔除，连通的保留。

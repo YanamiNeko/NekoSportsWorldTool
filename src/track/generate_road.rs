@@ -108,7 +108,7 @@ pub fn plan_road_view(
     let mut g = net.clone();
     align_network(&mut g);
     g = apply_fences(&g, fences);
-    let ordered = select_route_points_reachable(&g, fixed, ordinary, seed, pick);
+    let ordered = select_route_points_reachable(&g, fixed, ordinary, seed, pick)?;
     let waypoints: Vec<Coord> = ordered.iter().map(|p| Coord::new(p.1, p.0)).collect();
     let must_pass: Vec<Coord> = waypoints.iter().skip(1).copied().collect();
     let opts = RouteOptions::default();
@@ -188,16 +188,33 @@ pub fn reachable_ordinary(
         .collect()
 }
 
+/// 可用普通点不足 `MIN_ORDINARY_PICK` 时返回错误（预览与真跑共用）。
+///
+/// App 判定规则含「至少通过 N 个普通点位」，普通点被围栏/连通性过滤后若不足，
+/// 继续生成也无法达标，直接报错优于静默降级。
+pub fn ensure_enough_ordinary(reachable: usize) -> Result<(), String> {
+    if reachable < MIN_ORDINARY_PICK {
+        Err(format!(
+            "可用普通打卡点仅 {reachable} 个（围栏裁断/路网孤立），不足至少 {MIN_ORDINARY_PICK} 个，\
+             无法满足「至少通过 {MIN_ORDINARY_PICK} 个普通点位」；请检查围栏/路网或改用经典模式"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// 先按连通性过滤普通点，再调用 `select_route_points`（预览与真跑共用）。
+/// 过滤后不足 `MIN_ORDINARY_PICK` 个普通点时返回错误。
 pub fn select_route_points_reachable(
     net: &RoadGraph,
     fixed: &[(f64, f64)],
     ordinary: &[(f64, f64)],
     seed: u64,
     pick: usize,
-) -> Vec<(f64, f64)> {
+) -> Result<Vec<(f64, f64)>, String> {
     let reachable = reachable_ordinary(net, fixed, ordinary);
-    select_route_points(fixed, &reachable, seed, pick)
+    ensure_enough_ordinary(reachable.len())?;
+    Ok(select_route_points(fixed, &reachable, seed, pick))
 }
 
 /// 从点位挑选参与路线的硬点：必经点（`fixed`，全部）+ 随机 `pick` 个普通点
@@ -207,6 +224,9 @@ pub fn select_route_points_reachable(
 /// - 起点 = 全部硬点质心角序（`radial_order`）的首点，**不会因 fixed 而变成第一个必经点**；
 /// - 强经过顺序 = `fixed` 保持原序在前，随机普通点按质心角序在后——保证策略必经点顺序不被
 ///   打乱（`plan_route_split` 的 must 按此顺序强经过）。
+///
+/// 注意：起点从「全部硬点」里按辐射序选取，可能落在任意一个策略/fixed 点上。因此最终经过顺序
+/// 是「以起点开头、其余硬点保持上述相对顺序」的旋转——策略点的首元素不保证，顺序按此旋转理解。
 ///
 /// 随机性由 `seed` 决定，保证预览与实际运行可复现且一致。
 pub fn select_route_points(

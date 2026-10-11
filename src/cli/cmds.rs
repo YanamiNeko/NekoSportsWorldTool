@@ -129,6 +129,11 @@ fn cmd_run(rest: &[&str]) -> i32 {
     let ordinary_pick: usize = get(&flags, "pick")
         .and_then(|v| v.parse().ok())
         .unwrap_or(cfg.ordinary_pick);
+    let min_pick = crate::track::generate_road::MIN_ORDINARY_PICK;
+    if ordinary_pick < min_pick {
+        eprintln!("--pick 不能小于 {min_pick}（App 要求至少通过 {min_pick} 个普通点位）");
+        return 1;
+    }
 
     let dist = if dist_km > 0.0 {
         dist_km as f64 * 1000.0

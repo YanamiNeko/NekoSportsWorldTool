@@ -162,8 +162,17 @@ pub fn align_network(net: &mut RoadGraph) {
 /// 真实道路模式随机选中的普通打卡点数量的默认值（运行时可变，别写死）。
 pub const DEFAULT_ORDINARY_PICK: usize = 2;
 
+/// 随机普通点数量的下限（App 判定「至少通过 N 个普通点位」；不同学校可改）。
+pub const MIN_ORDINARY_PICK: usize = 2;
+
 /// 从点位挑选参与路线的硬点：必经点（`fixed`，全部）+ 随机 `pick` 个普通点
-/// （`ordinary`）。结果按质心角排序成自然环序（`radial_order`），首个即起点。
+/// （`ordinary`）。`pick` 夹到 `[MIN_ORDINARY_PICK, ordinary.len()]`。
+///
+/// 返回顺序：`[起点] ++ 强经过顺序`，其中
+/// - 起点 = 全部硬点质心角序（`radial_order`）的首点，**不会因 fixed 而变成第一个必经点**；
+/// - 强经过顺序 = `fixed` 保持原序在前，随机普通点按质心角序在后——保证策略必经点顺序不被
+///   打乱（`plan_route_split` 的 must 按此顺序强经过）。
+///
 /// 随机性由 `seed` 决定，保证预览与实际运行可复现且一致。
 pub fn select_route_points(
     fixed: &[(f64, f64)],
@@ -173,19 +182,43 @@ pub fn select_route_points(
 ) -> Vec<(f64, f64)> {
     use rand::seq::SliceRandom;
     use rand::SeedableRng;
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ 0x5EED_C0FF_EE00_1234);
-    let mut pool = ordinary.to_vec();
-    pool.shuffle(&mut rng);
     let near = |a: &(f64, f64), b: &(f64, f64)| {
         (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
     };
-    let mut selected: Vec<(f64, f64)> = fixed.to_vec();
-    for p in pool.into_iter().take(pick) {
-        if !selected.iter().any(|q| near(q, &p)) {
-            selected.push(p);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ 0x5EED_C0FF_EE00_1234);
+    let mut pool = ordinary.to_vec();
+    pool.shuffle(&mut rng);
+    let pick = pick.max(MIN_ORDINARY_PICK).min(pool.len());
+    let picked: Vec<(f64, f64)> = pool.into_iter().take(pick).collect();
+
+    // 起点候选集合（全部硬点，去重）。
+    let mut all: Vec<(f64, f64)> = fixed.to_vec();
+    for p in &picked {
+        if !all.iter().any(|q| near(q, p)) {
+            all.push(*p);
         }
     }
-    radial_order(&selected)
+    let start = radial_order(&all).first().copied();
+
+    // 强经过顺序：fixed 保序在前，随机普通点按质心角序在后。
+    let mut must: Vec<(f64, f64)> = fixed.to_vec();
+    for p in radial_order(&picked) {
+        if !must.iter().any(|q| near(q, &p)) {
+            must.push(p);
+        }
+    }
+
+    // 组装：起点在前，其余按 must 顺序（route_pts[1..] 即强经过 must 列表）。
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(must.len() + 1);
+    if let Some(s) = start {
+        out.push(s);
+    }
+    for p in must {
+        if !out.iter().any(|q| near(q, &p)) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 /// 按质心角度排序打卡点，形成自然环序。

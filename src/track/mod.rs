@@ -11,7 +11,9 @@ pub mod wire;
 
 #[cfg(test)]
 mod tests {
-    use super::generate_road::{build_road, select_route_points, DEFAULT_ORDINARY_PICK};
+    use super::generate_road::{
+        build_road, select_route_points, DEFAULT_ORDINARY_PICK, MIN_ORDINARY_PICK,
+    };
     use super::generator::build;
     use super::geom::{MET_PER_DEG_LAT, MET_PER_DEG_LNG};
 
@@ -105,6 +107,31 @@ mod tests {
         let overlap =
             select_route_points(&[(1.0, 1.0)], &[(1.0, 1.0), (2.0, 2.0)], 7, DEFAULT_ORDINARY_PICK);
         assert_eq!(overlap.len(), 2);
+    }
+
+    /// 必经点保序：去掉起点后，`fixed` 子序列必须与原序一致（起点仍是辐射序首点）。
+    #[test]
+    fn test_select_route_points_keeps_fixed_order() {
+        let fixed = vec![(1.0, 1.0), (3.0, 3.0), (5.0, 5.0)];
+        let ordinary = vec![(2.0, 2.0), (4.0, 4.0), (6.0, 6.0), (7.0, 7.0)];
+        let sel = select_route_points(&fixed, &ordinary, 3, 2);
+        assert_eq!(sel.len(), fixed.len() + 2, "{sel:?}");
+        let tail_fixed: Vec<(f64, f64)> =
+            sel.iter().skip(1).filter(|q| fixed.contains(q)).copied().collect();
+        let expect: Vec<(f64, f64)> =
+            fixed.iter().filter(|q| **q != sel[0]).copied().collect();
+        assert_eq!(tail_fixed, expect, "必经点顺序被破坏");
+    }
+
+    /// pick=0/1 会被夹到 MIN_ORDINARY_PICK（普通点足够时）。
+    #[test]
+    fn test_select_route_points_clamps_min() {
+        let fixed = vec![(1.0, 1.0)];
+        let ordinary = vec![(2.0, 2.0), (3.0, 3.0), (4.0, 4.0), (5.0, 5.0)];
+        for pick in [0usize, 1] {
+            let sel = select_route_points(&fixed, &ordinary, 9, pick);
+            assert_eq!(sel.len(), 1 + MIN_ORDINARY_PICK, "pick={pick} sel={sel:?}");
+        }
     }
 
     /// 点位数分类：isFixed 字段决定必经/普通。

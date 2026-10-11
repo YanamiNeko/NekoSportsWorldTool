@@ -408,7 +408,7 @@ impl App {
                         ui,
                         "run_ordinary_pick",
                         &mut page.ordinary_pick,
-                        0..=10,
+                        crate::track::generate_road::MIN_ORDINARY_PICK as i64..=10,
                         1.0,
                         "",
                         " 个",

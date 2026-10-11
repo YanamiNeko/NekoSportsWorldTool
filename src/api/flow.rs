@@ -96,49 +96,6 @@ pub fn run_full_flow(
         }
     }
     let ordinary = points::points_free(&pts);
-    let route_pts =
-        crate::track::generate_road::select_route_points(&fixed, &ordinary, params.seed, params.ordinary_pick);
-    let picked = route_pts.len().saturating_sub(fixed.len());
-    log(&format!(
-        "√ [track] 硬点 {} 个（必经 {} + 随机普通 {}），普通点 {} 个（未选 {}）",
-        route_pts.len(),
-        fixed.len(),
-        picked,
-        ordinary.len(),
-        ordinary.len().saturating_sub(picked),
-    ));
-    for (i, &(lat, lon)) in route_pts.iter().enumerate() {
-        log(&format!("  [track] 硬点[{i}] BD=({lat:.6},{lon:.6})"));
-    }
-    if let Some(&(slat, slon)) = route_pts.first() {
-        log(&format!("√ [track] 起点 BD=({slat:.6},{slon:.6})"));
-    }
-    // 提交/OBS 只报实际经过的硬点（Road 模式），避免地图出现不在轨迹上的普通点；
-    // Legacy 走全部点位，保持原行为。
-    let submitted_pts: Vec<Value> = if params.route_mode == RouteMode::Road {
-        let sel: Vec<Value> = pts
-            .iter()
-            .filter(|p| {
-                let (Some(lat), Some(lon)) = (
-                    p.get("lat").and_then(|v| v.as_f64()),
-                    p.get("lon").and_then(|v| v.as_f64()),
-                ) else {
-                    return false;
-                };
-                route_pts
-                    .iter()
-                    .any(|q| (q.0 - lat).abs() < 1e-6 && (q.1 - lon).abs() < 1e-6)
-            })
-            .cloned()
-            .collect();
-        if sel.is_empty() {
-            pts.clone()
-        } else {
-            sel
-        }
-    } else {
-        pts.clone()
-    };
     // 用打卡点随机偏移更新锚点并持久化：下次拉点位即学校真实坐标，摆脱写死的默认值
     if !pts_bd.is_empty() {
         let idx = (rand::random::<f64>() * pts_bd.len() as f64) as usize;
@@ -177,13 +134,15 @@ pub fn run_full_flow(
         params.dur = fixed_dur;
     }
     log(&format!(
-        "[track] 生成轨迹 {:.0}m / {}s（{} 点位）…",
+        "[track] 生成轨迹 {:.0}m / {}s（{} 个点位）…",
         params.dist,
         params.dur,
-        route_pts.len()
+        pts.len()
     ));
     // 随机 0-4 秒偏移（终端上报的 flag 与首点差 <5s），轨迹/提交/OBS/五点统一使用
     let start_ms = params.start_ms + (rand::random::<i64>() % 5) * 1000;
+    // 提交/OBS 上报的点位：默认全部；道路算法真正生效时替换为实际经过的硬点。
+    let mut submitted_pts: Vec<Value> = pts.clone();
     let mut track = match params.route_mode {
         RouteMode::Road => {
             let cfg = crate::api::model::load_config();
@@ -214,15 +173,36 @@ pub fn run_full_flow(
                             }
                         };
                         let filtered = crate::track::generate_road::apply_fences(&net, &fences);
+                        // 硬点 = 必经点 + 随机普通点，全部强经过；waypoints[0] 为起点。
+                        let selected = crate::track::generate_road::select_route_points(
+                            &fixed,
+                            &ordinary,
+                            params.seed,
+                            params.ordinary_pick,
+                        );
+                        let picked = selected.len().saturating_sub(fixed.len());
+                        log(&format!(
+                            "√ [track] 硬点 {} 个（必经 {} + 随机普通 {}），普通点 {} 个（未选 {}）",
+                            selected.len(),
+                            fixed.len(),
+                            picked,
+                            ordinary.len(),
+                            ordinary.len().saturating_sub(picked),
+                        ));
+                        for (i, &(lat, lon)) in selected.iter().enumerate() {
+                            log(&format!("  [track] 硬点[{i}] BD=({lat:.6},{lon:.6})"));
+                        }
+                        if let Some(&(slat, slon)) = selected.first() {
+                            log(&format!("√ [track] 起点 BD=({slat:.6},{slon:.6})"));
+                        }
                         // 硬点（不含起点）：必经点 + 随机普通点，全部强经过 + <40m 吸附
-                        let must_bd: Vec<(f64, f64)> =
-                            route_pts.iter().skip(1).copied().collect();
+                        let must_bd: Vec<(f64, f64)> = selected.iter().skip(1).copied().collect();
                         match crate::track::generate_road::build_road(
                             params.dist,
                             params.dur,
                             params.seed,
                             start_ms,
-                            &route_pts,
+                            &selected,
                             &must_bd,
                             &filtered,
                         ) {
@@ -233,6 +213,27 @@ pub fn run_full_flow(
                                     filtered.buildings.len(),
                                     fences.len()
                                 ));
+                                // 只上报实际经过的硬点，避免地图出现不在轨迹上的普通点。
+                                let sel: Vec<Value> = pts
+                                    .iter()
+                                    .filter(|p| {
+                                        let (Some(lat), Some(lon)) = (
+                                            p.get("lat").and_then(|v| v.as_f64()),
+                                            p.get("lon").and_then(|v| v.as_f64()),
+                                        ) else {
+                                            return false;
+                                        };
+                                        selected.iter().any(|q| {
+                                            (q.0 - lat).abs() < 1e-6 && (q.1 - lon).abs() < 1e-6
+                                        })
+                                    })
+                                    .cloned()
+                                    .collect();
+                                if sel.is_empty() {
+                                    log("⚠ [track] 实际经过点位为空，回退上报全部点位");
+                                } else {
+                                    submitted_pts = sel;
+                                }
                                 t
                             }
                             Err(e) => {

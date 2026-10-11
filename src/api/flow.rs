@@ -246,6 +246,12 @@ pub fn run_full_flow(
                                 }
                                 t
                             }
+                            Err(e) if e.contains("不可达") => {
+                                // 策略必经点走不到属真·不可达，不静默回退，直接提示改经典模式。
+                                return Err(format!(
+                                    "真实道路模式失败：{e}。请改用经典模式（--route legacy）后重试"
+                                ));
+                            }
                             Err(e) => {
                                 log(&format!("⚠ [track] 道路路由失败，回退经典算法: {e}"));
                                 gen_track(

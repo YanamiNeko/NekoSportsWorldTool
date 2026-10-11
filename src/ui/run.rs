@@ -556,6 +556,10 @@ impl App {
                         self.run_page.ordinary_pick.max(0) as usize,
                     ) {
                         Ok(p) => self.run_page.preview = Some(p),
+                        Err(e) if e.contains("不可达") => {
+                            self.status =
+                                format!("路线预览失败：{e}（必经点不可达，请改用经典模式）")
+                        }
                         Err(e) => self.status = format!("路线预览失败：{e}"),
                     }
                 } else {

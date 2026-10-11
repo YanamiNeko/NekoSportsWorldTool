@@ -126,14 +126,18 @@ fn cmd_run(rest: &[&str]) -> i32 {
     let route_mode = crate::track::generate_road::RouteMode::from_str(
         get(&flags, "route").unwrap_or(&cfg.route_mode),
     );
-    let ordinary_pick: usize = get(&flags, "pick")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(cfg.ordinary_pick);
-    let min_pick = crate::track::generate_road::MIN_ORDINARY_PICK;
-    if ordinary_pick < min_pick {
-        eprintln!("--pick 不能小于 {min_pick}（App 要求至少通过 {min_pick} 个普通点位）");
-        return 1;
-    }
+    // 只对显式 `--pick` 校验并报错；未传参时用（已规范化的）配置值，不因历史配置罢工。
+    let ordinary_pick: usize = match get(&flags, "pick") {
+        Some(v) => match v.parse::<usize>() {
+            Ok(n) if n >= crate::track::generate_road::MIN_ORDINARY_PICK => n,
+            _ => {
+                let min_pick = crate::track::generate_road::MIN_ORDINARY_PICK;
+                eprintln!("--pick 需为不小于 {min_pick} 的整数（App 要求至少通过 {min_pick} 个普通点位）");
+                return 1;
+            }
+        },
+        None => cfg.ordinary_pick,
+    };
 
     let dist = if dist_km > 0.0 {
         dist_km as f64 * 1000.0

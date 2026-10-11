@@ -297,8 +297,9 @@ fn route_ring(route: &Route, c_lat: f64, c_lng: f64) -> (Vec<(f64, f64)>, Vec<f6
 
 /// 模式 B：真实道路拓扑路由轨迹生成。
 ///
-/// `route_bd[0]` 为起点，`route_bd[1..]` 为软引导点（用于方向锚点，不必全经过）；
-/// `must_bd` 为强制必经点（按序，可为空，最终必达）；吸附在 `route_bd` 全量上做。
+/// `route_bd[0]` 为起点；`route_bd[1..]` 为硬点（必经点 + 随机普通点），全部按序强制经过；
+/// `must_bd` 为强制必经点（按序，可为空，最终必达，实际传 `route_bd[1..]`）；
+/// 吸附在 `route_bd` 全量上做。
 pub fn build_road(
     dist: f64,
     dur: i64,

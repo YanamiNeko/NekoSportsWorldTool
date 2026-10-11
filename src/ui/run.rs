@@ -536,14 +536,15 @@ impl App {
             self.run_page.map_fitted = false;
             self.run_page.preview_stale = false;
             // 点位缓存按锚点隔离（main 的串城市防护）；锚点无效时视为无缓存
-            let cached = self
-                .identity
-                .anchor_coordinate()
-                .ok()
-                .and_then(crate::api::model::load_points_cache_for);
+            let anchor = self.identity.anchor_coordinate().ok();
+            let cached = anchor.and_then(crate::api::model::load_points_cache_for);
             if let Some((_ts, pts)) = cached {
-                let fixed = crate::api::points::points_fixed(&pts);
-                let ordinary = crate::api::points::points_free(&pts);
+                // 策略必经点用缓存补齐，使预览的硬点集合与真跑一致。
+                let must_points = anchor
+                    .and_then(crate::api::model::load_must_points_cache_for)
+                    .unwrap_or_default();
+                let (fixed, ordinary) =
+                    crate::api::points::resolve_hard_points(&pts, &must_points);
                 if !fixed.is_empty() || !ordinary.is_empty() {
                     let fences = crate::api::model::load_fence_cache().unwrap_or_default();
                     match crate::track::generate_road::plan_road_view(

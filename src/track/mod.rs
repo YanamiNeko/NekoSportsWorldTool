@@ -13,7 +13,7 @@ pub mod wire;
 mod tests {
     use super::generate_road::{
         build_road, ensure_enough_ordinary, reachable_ordinary, select_route_points,
-        DEFAULT_ORDINARY_PICK, MIN_ORDINARY_PICK,
+        select_route_points_reachable, DEFAULT_ORDINARY_PICK, MIN_ORDINARY_PICK,
     };
     use super::generator::build;
     use super::geom::{MET_PER_DEG_LAT, MET_PER_DEG_LNG};
@@ -122,6 +122,42 @@ mod tests {
         let expect: Vec<(f64, f64)> =
             fixed.iter().filter(|q| **q != sel[0]).copied().collect();
         assert_eq!(tail_fixed, expect, "必经点顺序被破坏");
+    }
+
+    /// 起点旋转（辐射序首点非 fixed[0]）时：预览（`plan_road_view`）与真跑（flow）
+    /// 共用 `select_route_points_reachable`，同 seed 必须选出同一旋转起点，
+    /// 且去掉起点后 fixed 子序列仍保持原序。
+    #[test]
+    fn test_start_rotation_preview_matches_actual() {
+        let net = road_grid();
+        let fixed = sample_points(); // 该分布下辐射序首点为 fixed[4]，起点发生旋转
+        // 两个主分量内的普通点，满足 MIN_ORDINARY_PICK
+        let ordinary = vec![(38.900921, 121.541610), (38.900600, 121.541900)];
+        let seed = 20_261_012u64;
+        let pick = MIN_ORDINARY_PICK;
+        let sel = select_route_points_reachable(&net, &fixed, &ordinary, seed, pick)
+            .expect("select_route_points_reachable");
+        // 用例前提：起点确实旋转（否则测试无意义）
+        assert_ne!(sel[0], fixed[0], "用例未触发起点旋转: sel={sel:?}");
+        // 预览与真跑同 seed 可复现
+        assert_eq!(
+            sel,
+            select_route_points_reachable(&net, &fixed, &ordinary, seed, pick).unwrap(),
+            "同 seed 预览与真跑选点不一致"
+        );
+        // 与底层选点一致（plan_road_view 与 flow 均调用二者）
+        let reachable = reachable_ordinary(&net, &fixed, &ordinary);
+        assert_eq!(
+            sel,
+            select_route_points(&fixed, &reachable, seed, pick),
+            "预览/真跑共用路径与底层选点不一致"
+        );
+        // 去掉起点后 fixed 子序列保持原序（旋转不破坏相对顺序）
+        let tail: Vec<(f64, f64)> =
+            sel.iter().skip(1).filter(|q| fixed.contains(q)).copied().collect();
+        let expect: Vec<(f64, f64)> =
+            fixed.iter().filter(|q| **q != sel[0]).copied().collect();
+        assert_eq!(tail, expect, "起点旋转破坏了 fixed 相对顺序");
     }
 
     /// pick=0/1 会被夹到 MIN_ORDINARY_PICK（普通点足够时）。

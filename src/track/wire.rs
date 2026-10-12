@@ -151,6 +151,32 @@ mod validation_tests {
         assert!(laps.iter().all(|lap| lap["endAltAbs"] == 36.75));
         assert!(laps.iter().all(|lap| lap["endAltRel"] == 0.0));
     }
+
+    #[test]
+    fn lap_metrics_use_minutes_per_kilometre_and_stride_centimetres() {
+        let points = vec![(38.901678, 121.540241), (38.902564, 121.541233)];
+        let mut track = crate::track::generator::build(
+            1200.0,
+            600,
+            7,
+            (38.9, 121.54),
+            1_700_000_000_000,
+            &points,
+        );
+        let mut start = track.locations[0].clone();
+        start.totalTime = 0;
+        start.totalDis = 0.0;
+        start.steps = 0;
+        let mut finish = start.clone();
+        finish.totalTime = 600;
+        finish.totalDis = 1000.0;
+        finish.steps = 1200;
+        track.locations = vec![start, finish];
+
+        let lap = build_laps(&track, track.startTime).remove(0);
+        assert_eq!(lap["avgPace"].as_f64(), Some(10.0));
+        assert_eq!(lap["avgStride"].as_f64(), Some(83.33));
+    }
 }
 
 /// 10s 时间窗，id=(rrid%100000)*1000+窗口序秒（6 个真人样本跨 9 月记录验证一致；
@@ -201,7 +227,7 @@ fn build_laps(track: &Track, start_ms: i64) -> Vec<Value> {
         if i > 0 {
             let dd = pt.bdA - locs[i - 1].bdA;
             if dd > 0.0 {
-                gain += dd;
+                gain += super::altitude::positive_ascent_delta(dd);
             }
         }
         let d_now = pt.totalDis;

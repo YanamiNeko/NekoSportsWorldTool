@@ -13,6 +13,12 @@ use super::postfix::apply_post_fixes;
 /// 有效配速窗口（判定规则 2'21"-10'00"/km ≈ 1.667-7.092 m/s），硬边界留余量。
 pub const SPEED_FLOOR: f64 = 1.90;
 pub const SPEED_CEIL: f64 = 6.30;
+pub const MAX_EXCEPTION_GPS_SPEED_KMH: f64 = 6.0;
+/// Maximum coordinate drift for a protocol exception point.
+///
+/// These points may still carry their original type marker, but they must not
+/// create a map-scale jump that the server interprets as an invalid route.
+pub const MAX_EXCEPTION_DRIFT_M: f64 = 6.0;
 
 /// 等比缩放逐点速度至目标总距：越界点钳在窗口边界，剩余差量由未饱和点分摊（迭代收敛）。
 /// 与整体等比缩放的区别：任何一点的瞬时配速都不会越出有效窗口。
@@ -190,22 +196,10 @@ pub fn build(
                 rng.weighted(&[(1, 145), (2, 256), (3, 151)])
             };
         } else {
-            match lt {
-                4 => {
-                    if rng.random() >= 0.68 {
-                        d_step = if rng.random() < 0.95 { rng.uniform(2.0, 60.0) } else { rng.uniform(60.0, 250.0) };
-                    }
-                }
-                1 => {
-                    if rng.random() >= 0.83 {
-                        d_step = rng.uniform(0.5, 36.0);
-                    }
-                }
-                12 => {
-                    d_step = if rng.random() < 0.9 { rng.uniform(5.0, 80.0) } else { rng.uniform(80.0, 220.0) };
-                }
-                5 => d_step = rng.uniform(5.0, 60.0),
-                _ => d_step = rng.uniform(100.0, 300.0),
+            // Keep the exception marker, but bound its coordinate drift. Large
+            // random offsets produce red route segments and false fastest paces.
+            if rng.random() >= 0.20 {
+                d_step = rng.uniform(0.0, MAX_EXCEPTION_DRIFT_M);
             }
             let (bx, by) = pos(s);
             x = bx;
@@ -222,7 +216,9 @@ pub fn build(
                 px = x + jx;
                 py = y + jy;
             }
-            rad = if lt == 4 {
+            rad = if typ == -1 {
+                round_to(rng.uniform(3.0, 10.0), 2)
+            } else if lt == 4 {
                 round_to(if rng.random() < 0.75 { rng.uniform(30.0, 100.0) } else { rng.uniform(100.0, 550.0) }, 2)
             } else if lt == 1 {
                 round_to(if rng.random() < 0.75 { rng.uniform(1.6, 12.0) } else { rng.uniform(12.0, 95.0) }, 2)
@@ -250,14 +246,10 @@ pub fn build(
         let nxt = pos(s + direction * 2.0);
         let brg = ((nxt.0 - x).atan2(nxt.1 - y).to_degrees() + rng.gauss(0.0, 35.0)).rem_euclid(360.0);
         // 异常点（-1）：avgSpeed 为累计均值（真人与此一致，不为 0）；
-        // GPS 瞬时速度多为低速，偶发 15-46 km/h 漂移尖峰
+        // GPS 瞬时速度保持低速，避免尖峰污染最快配速。
         let (avg_sp, gps_speed) = if typ == -1 {
             let avg = round_to(dist_acc / t_acc.max(1.0), 4);
-            let gps = if rng.random() < 0.12 {
-                rng.uniform(15.0, 46.0)
-            } else {
-                rng.uniform(0.5, 6.0)
-            };
+            let gps = rng.uniform(0.5, MAX_EXCEPTION_GPS_SPEED_KMH);
             (avg, round_to(gps, 4))
         } else {
             let avg = round_to(d_step / dt, 4);
@@ -337,7 +329,7 @@ pub fn build(
                 totalTime: round_to(seg_t, 0) as i64,
                 distance: round_to(seg_d, 0) as i64,
                 startTime: round_to((times[i] - seg_t) * 1000.0, 0) as i64,
-                endTime: round_to(times[i] * 1000.0, 0) as i64,
+                endTime: round_to((times[i] + dts[i]) * 1000.0, 0) as i64,
                 avgSpeed: round_to(seg_v.iter().sum::<f64>() / seg_v.len() as f64, 3),
                 avgStep: round_to(steps_acc / 1.0f64.max(t_acc) * 60.0, 0) as i64,
                 state: 0,
@@ -386,5 +378,44 @@ pub fn build(
         speedPerTenSec: ten_speed,
         stepsPerTenSec: ten_steps,
         segments,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build, MAX_EXCEPTION_DRIFT_M, MAX_EXCEPTION_GPS_SPEED_KMH};
+    use crate::track::geom::{MET_PER_DEG_LAT, MET_PER_DEG_LNG};
+
+    #[test]
+    fn exception_points_cannot_create_map_scale_jumps_or_speed_spikes() {
+        let points = vec![
+            (39.9000, 116.4000),
+            (39.9000, 116.4020),
+            (39.9020, 116.4020),
+            (39.9020, 116.4000),
+        ];
+        for seed in 0..32 {
+            let track = build(2_000.0, 800, seed, points[0], 1_700_000_000_000, &points);
+            let mut exception_count = 0;
+            for (index, point) in track.locations.iter().enumerate() {
+                if point.ptype != -1 {
+                    continue;
+                }
+                exception_count += 1;
+                assert!(point.radius <= 10.0);
+                assert!(point.speed <= MAX_EXCEPTION_GPS_SPEED_KMH + 1e-9);
+                if let Some(previous) = index.checked_sub(1).and_then(|i| track.locations.get(i)) {
+                    let dx = (point.gLng - previous.gLng) * MET_PER_DEG_LNG;
+                    let dy = (point.gLat - previous.gLat) * MET_PER_DEG_LAT;
+                    assert!(
+                        (dx * dx + dy * dy).sqrt() <= 80.0,
+                        "exception jump at seed {seed}: {}m",
+                        (dx * dx + dy * dy).sqrt()
+                    );
+                }
+            }
+            assert!(exception_count > 0, "seed {seed} should exercise exception points");
+        }
+        assert!(MAX_EXCEPTION_DRIFT_M < 10.0);
     }
 }

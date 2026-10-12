@@ -1,0 +1,4 @@
+{
+  "error": 10000,
+  "data": "{\"rankList\":[{\"rank\":2,\"userName\":\"小明\",\"totalDis\":3210.5,\"gender\":1},{\"sort\":3,\"nickname\":\"小红\",\"dis\":2876}] }"
+}

@@ -16,6 +16,29 @@ pub struct PolicyInfo {
     pub must_points: Vec<(f64, f64)>,
 }
 
+/// 将已解密的业务响应解析为稳定的策略模型，供网络路径和 fixture 测试共用。
+pub(crate) fn parse_policy_response(biz: &Value) -> Result<PolicyInfo, String> {
+    let timestamp = get_field(biz, "timestamp")
+        .and_then(|t| t.as_i64())
+        .ok_or("policy 响应缺 timestamp")?;
+    let policy = get_field(biz, "policy")
+        .and_then(|t| t.as_i64())
+        .unwrap_or(0);
+    let rule = get_field(biz, "runRuleModel")
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(PolicyInfo {
+        timestamp,
+        policy,
+        min_distance: rule
+            .get("minDistance")
+            .and_then(|t| t.as_i64())
+            .unwrap_or(1000),
+        valid_time: rule.get("validTime").and_then(|t| t.as_i64()).unwrap_or(0),
+        must_points: extract_must_points(biz),
+    })
+}
+
 /// 从 policy 响应 `data` 中防御式提取必经点列表（字段名不确定，逐个尝试）。
 fn extract_must_points(v: &serde_json::Value) -> Vec<(f64, f64)> {
     let data = v.get("data").unwrap_or(v);
@@ -60,23 +83,24 @@ pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
     })
     .to_string();
     let biz = client.call("POST", POLICY_PATH, &body, &[])?;
-    let timestamp = get_field(&biz, "timestamp")
-        .and_then(|t| t.as_i64())
-        .ok_or("policy 响应缺 timestamp")?;
-    let policy = get_field(&biz, "policy")
-        .and_then(|t| t.as_i64())
-        .unwrap_or(0);
-    let rule = get_field(&biz, "runRuleModel")
-        .cloned()
-        .unwrap_or(Value::Null);
-    Ok(PolicyInfo {
-        timestamp,
-        policy,
-        min_distance: rule
-            .get("minDistance")
-            .and_then(|t| t.as_i64())
-            .unwrap_or(1000),
-        valid_time: rule.get("validTime").and_then(|t| t.as_i64()).unwrap_or(0),
-        must_points: extract_must_points(&biz),
-    })
+    parse_policy_response(&biz)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_policy_response;
+
+    #[test]
+    fn parses_nested_policy_fixture_and_gcj_fallback_point() {
+        let raw = include_str!("fixtures/policy_nested.json");
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let policy = parse_policy_response(&value).unwrap();
+        assert_eq!(policy.timestamp, 1_700_000_000_123);
+        assert_eq!(policy.policy, 1);
+        assert_eq!(policy.min_distance, 2000);
+        assert_eq!(policy.valid_time, 86400);
+        assert_eq!(policy.must_points.len(), 2);
+        assert!((policy.must_points[0].0 - 39.9001).abs() < 1e-9);
+        assert!((policy.must_points[1].0 - 39.9062).abs() < 0.01);
+    }
 }

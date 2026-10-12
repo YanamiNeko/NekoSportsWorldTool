@@ -8,7 +8,9 @@
 //!
 //! 协议字段/哨兵/断崖/吸附/10s 窗与经典模式完全一致。
 
-use super::generator::{SPEED_CEIL, SPEED_FLOOR};
+use super::generator::{
+    MAX_EXCEPTION_DRIFT_M, MAX_EXCEPTION_GPS_SPEED_KMH, SPEED_CEIL, SPEED_FLOOR,
+};
 use super::geom::{
     fmt_gain_time, ring_point_at, round_to, to_bd, wgs84_to_bd09, Rng, MET_PER_DEG_LAT,
     MET_PER_DEG_LNG,
@@ -385,30 +387,8 @@ pub fn build_road(
                 rng.weighted(&[(1, 145), (2, 256), (3, 151)])
             };
         } else {
-            match lt {
-                4 => {
-                    if rng.random() >= 0.68 {
-                        d_step = if rng.random() < 0.95 {
-                            rng.uniform(2.0, 60.0)
-                        } else {
-                            rng.uniform(60.0, 250.0)
-                        };
-                    }
-                }
-                1 => {
-                    if rng.random() >= 0.83 {
-                        d_step = rng.uniform(0.5, 36.0);
-                    }
-                }
-                12 => {
-                    d_step = if rng.random() < 0.9 {
-                        rng.uniform(5.0, 80.0)
-                    } else {
-                        rng.uniform(80.0, 220.0)
-                    };
-                }
-                5 => d_step = rng.uniform(5.0, 60.0),
-                _ => d_step = rng.uniform(100.0, 300.0),
+            if rng.random() >= 0.20 {
+                d_step = rng.uniform(0.0, MAX_EXCEPTION_DRIFT_M);
             }
             let (bx, by) = pos(s);
             x = bx;
@@ -425,7 +405,9 @@ pub fn build_road(
                 px = x + jx;
                 py = y + jy;
             }
-            rad = if lt == 4 {
+            rad = if typ == -1 {
+                round_to(rng.uniform(3.0, 10.0), 2)
+            } else if lt == 4 {
                 round_to(
                     if rng.random() < 0.75 {
                         rng.uniform(30.0, 100.0)
@@ -472,11 +454,7 @@ pub fn build_road(
             ((nxt.0 - x).atan2(nxt.1 - y).to_degrees() + rng.gauss(0.0, 35.0)).rem_euclid(360.0);
         let (avg_sp, gps_speed) = if typ == -1 {
             let avg = round_to(dist_acc / t_acc.max(1.0), 4);
-            let gps = if rng.random() < 0.12 {
-                rng.uniform(15.0, 46.0)
-            } else {
-                rng.uniform(0.5, 6.0)
-            };
+            let gps = rng.uniform(0.5, MAX_EXCEPTION_GPS_SPEED_KMH);
             (avg, round_to(gps, 4))
         } else {
             let avg = round_to(d_step / dt, 4);

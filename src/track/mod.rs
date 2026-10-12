@@ -79,6 +79,34 @@ mod tests {
         g
     }
 
+    fn assert_exception_points_are_bounded(track: &super::model::Track) {
+        let mut exception_count = 0;
+        for (index, point) in track.locations.iter().enumerate() {
+            if point.ptype != -1 {
+                continue;
+            }
+            exception_count += 1;
+            assert!(point.radius <= 10.0, "exception radius={}", point.radius);
+            assert!(point.speed <= super::generator::MAX_EXCEPTION_GPS_SPEED_KMH + 1e-9);
+            for neighbor in [
+                index.checked_sub(1),
+                (index + 1 < track.locations.len()).then_some(index + 1),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let other = &track.locations[neighbor];
+                let dx = (point.gLng - other.gLng) * MET_PER_DEG_LNG;
+                let dy = (point.gLat - other.gLat) * MET_PER_DEG_LAT;
+                assert!(
+                    (dx * dx + dy * dy).sqrt() <= 45.0,
+                    "exception neighbor jump too large"
+                );
+            }
+        }
+        assert!(exception_count > 0, "test track should exercise exception points");
+    }
+
     /// 模式 B（真实道路路由）：距离精确、哨兵/断崖语义与模式 A 一致。
     #[test]
     fn test_build_road_distribution() {
@@ -98,6 +126,7 @@ mod tests {
         assert_eq!(track.locations.last().unwrap().ptype, 6);
         // 步数为正
         assert!(track.totalSteps > 500, "steps={}", track.totalSteps);
+        assert_exception_points_are_bounded(&track);
     }
 
     /// 轨迹生成抽样断言：距离精确、采样间隔分布、哨兵/断崖/位移语义。
@@ -106,6 +135,7 @@ mod tests {
         let pts = sample_points();
         let start = 1_788_958_186_123i64;
         let track = build(3300.0, 1220, 42, (38.9, 121.54), start, &pts);
+        assert_exception_points_are_bounded(&track);
         // 总距离精确等于目标（±0.5m 舍入容差）
         assert!(
             (track.totalDistance - 3300.0).abs() < 0.5,

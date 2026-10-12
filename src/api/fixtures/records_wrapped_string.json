@@ -1,0 +1,4 @@
+{
+  "error": 10000,
+  "data": "{\"records\":[{\"rrid\":42,\"totalDis\":2500.0,\"totalTime\":1200,\"startTime\":1700000000000,\"complete\":true,\"avgStepFreq\":165,\"totalSteps\":3300,\"uuid\":\"fixture-uuid\"}]}"
+}

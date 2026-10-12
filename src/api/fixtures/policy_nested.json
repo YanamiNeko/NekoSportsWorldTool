@@ -1,0 +1,15 @@
+{
+  "error": 10000,
+  "data": {
+    "timestamp": 1700000000123,
+    "policy": 1,
+    "runRuleModel": {
+      "minDistance": 2000,
+      "validTime": 86400
+    },
+    "pointList": [
+      {"lat": 39.9001, "lon": 116.4001, "pointName": "A"},
+      {"lat": 0, "lon": 0, "glat": 39.9002, "glon": 116.4002, "pointName": "B"}
+    ]
+  }
+}

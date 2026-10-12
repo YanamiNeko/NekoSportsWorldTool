@@ -10,6 +10,7 @@ use crate::crypto::envelope::{
 use crate::crypto::header::{build_android_header, HeaderIdentity, UA_ANDROID};
 use crate::crypto::sign::{original_sign, signature};
 use crate::track::calorie::{avg_power, official_kcal};
+use crate::track::altitude;
 use crate::track::geom::round_to;
 use crate::track::model::{GenPoint, Track};
 use crate::track::wire::validate_five_point_wrapper;
@@ -66,14 +67,15 @@ fn android_tensec(track: &Track, start_ms: i64, kind: &str) -> Vec<Value> {
 
 /// bdA 正差分累计。
 pub fn total_ascent(locs: &[GenPoint]) -> f64 {
-    let mut ascent = 0.0;
-    for i in 1..locs.len() {
-        let d = locs[i].bdA - locs[i - 1].bdA;
-        if d > 0.0 {
-            ascent += d;
-        }
+    altitude::total_ascent(locs)
+}
+
+pub fn pace_speed_value(total_time_s: i64, distance_m: f64) -> i64 {
+    let distance_m = (distance_m * 100.0).ceil() / 100.0;
+    if distance_m <= 0.0 {
+        return 0;
     }
-    ascent
+    round_to(total_time_s as f64 / distance_m * 50.0 / 3.0 * 1000.0, 0) as i64
 }
 
 pub struct SubmitParams {
@@ -122,8 +124,7 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     let run_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
     let unid = p.selected_unid;
 
-    let dis_ceil = (total_dis * 100.0).ceil() / 100.0;
-    let speed = (round_to(total_time as f64 / dis_ceil * 50.0 / 3.0, 2) * 1024.0) as i64;
+    let speed = pace_speed_value(total_time, total_dis);
     let avg_step_freq = 1i64.max(round_to(total_steps as f64 / total_time as f64 * 60.0, 0) as i64);
 
     let mut body = Map::new();
@@ -238,6 +239,16 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
         avg_power: power,
         sel_distance: p.min_distance,
     })
+}
+
+#[cfg(test)]
+mod metric_tests {
+    use super::pace_speed_value;
+
+    #[test]
+    fn pace_uses_thousandths_of_minute_per_kilometre() {
+        assert_eq!(pace_speed_value(2295, 5030.0), 7604);
+    }
 }
 
 fn client_token(client: &ApiClient) -> String {

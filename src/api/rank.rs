@@ -30,9 +30,7 @@ pub fn main_rank(
     date: Option<String>,
 ) -> Result<Vec<RankRow>, String> {
     let unid = unid_of(client);
-    let date = date.unwrap_or_else(|| {
-        chrono::Local::now().format("%Y-%m-%d").to_string()
-    });
+    let date = date.unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
     let body = json!({
         "unid": unid,
         "type": rtype,
@@ -46,7 +44,11 @@ pub fn main_rank(
 }
 
 /// 历史榜：sort=1日 2月。
-pub fn history_rank(client: &mut ApiClient, sort_type: i64, gender: i64) -> Result<Vec<RankRow>, String> {
+pub fn history_rank(
+    client: &mut ApiClient,
+    sort_type: i64,
+    gender: i64,
+) -> Result<Vec<RankRow>, String> {
     let body = json!({
         "unid": unid_of(client),
         "sortType": sort_type,
@@ -60,7 +62,11 @@ pub fn history_rank(client: &mut ApiClient, sort_type: i64, gender: i64) -> Resu
 }
 
 /// 室内榜：range=1日 2周 3月。
-pub fn indoor_rank(client: &mut ApiClient, date_range: i64, gender: i64) -> Result<Vec<RankRow>, String> {
+pub fn indoor_rank(
+    client: &mut ApiClient,
+    date_range: i64,
+    gender: i64,
+) -> Result<Vec<RankRow>, String> {
     let body = json!({
         "pageNum": 1,
         "pageSize": 20,
@@ -73,7 +79,11 @@ pub fn indoor_rank(client: &mut ApiClient, date_range: i64, gender: i64) -> Resu
 }
 
 fn unid_of(client: &ApiClient) -> i64 {
-    client.login.as_ref().map(|s| s.unid.parse().unwrap_or(0)).unwrap_or(0)
+    client
+        .login
+        .as_ref()
+        .map(|s| s.unid.parse().unwrap_or(0))
+        .unwrap_or(0)
 }
 
 /// data 可能是数组或 {list:[...]} 包裹。
@@ -126,5 +136,34 @@ fn dump_unknown(biz: &Value, name: &str) {
     let path = crate::platform::data_dir().join(name);
     if !path.exists() {
         let _ = std::fs::write(&path, biz.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_data, rows_from};
+
+    #[test]
+    fn parses_wrapped_string_rank_fixture_and_field_aliases() {
+        let raw = include_str!("fixtures/rank_wrapped_string.json");
+        let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let rows = rows_from(parse_data(&value));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].sort, 2);
+        assert_eq!(rows[0].name, "小明");
+        assert_eq!(rows[0].length, 3210.5);
+        assert_eq!(rows[1].sort, 3);
+        assert_eq!(rows[1].name, "小红");
+        assert_eq!(rows[1].length, 2876.0);
+    }
+
+    #[test]
+    fn malformed_rank_rows_are_dropped_without_panicking() {
+        let value = serde_json::json!({
+            "data": [{"rank": 1, "userName": "valid", "totalDis": 1000}, {"rank": 2}]
+        });
+        let rows = rows_from(parse_data(&value));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "valid");
     }
 }

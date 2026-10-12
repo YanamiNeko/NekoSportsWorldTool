@@ -9,6 +9,25 @@
 use super::geom::round_to;
 use super::model::Track;
 
+pub const ASCENT_NOISE_THRESHOLD_M: f64 = 0.15;
+
+pub fn positive_ascent_delta(delta_m: f64) -> f64 {
+    if delta_m - ASCENT_NOISE_THRESHOLD_M > 1e-9 {
+        delta_m
+    } else {
+        0.0
+    }
+}
+
+pub fn total_ascent(locs: &[super::model::GenPoint]) -> f64 {
+    round_to(
+        locs.windows(2)
+            .map(|pair| positive_ascent_delta(pair[1].bdA - pair[0].bdA))
+            .sum(),
+        2,
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AltitudeRange {
     pub min_m: f64,
@@ -124,5 +143,12 @@ mod tests {
         let mut track = build(1200.0, 600, 7, (38.9, 121.54), 1_700_000_000_000, &points());
         override_bd_a_range(&mut track, AltitudeRange { min_m: 11.6, max_m: 22.8 }).unwrap();
         assert!(track.locations.iter().all(|p| (11.6..=22.8).contains(&p.bdA)));
+    }
+
+    #[test]
+    fn ascent_ignores_noise_at_and_below_point_fifteen_metres() {
+        assert_eq!(positive_ascent_delta(0.15), 0.0);
+        assert_eq!(positive_ascent_delta(0.1500000000000004), 0.0);
+        assert_eq!(positive_ascent_delta(0.150001), 0.150001);
     }
 }

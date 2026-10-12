@@ -86,7 +86,35 @@ impl Track {
 
     pub fn validate_consistency(&self) -> Result<Coordinate, String> {
         if self.totalTime <= 0 || self.totalDistance <= 0.0 { return Err("轨迹时长和距离必须为正数".into()); }
-        for point in &self.locations { Coordinate::new(point.gLat, point.gLng, point.accuracy)?; }
+        let (mut prev_time, mut prev_dis, mut prev_valid_time, mut prev_valid_dis, mut prev_steps) =
+            (0, 0.0, 0, 0.0, 0);
+        for point in &self.locations {
+            Coordinate::new(point.gLat, point.gLng, point.accuracy)?;
+            if point.totalTime < prev_time
+                || point.totalDis + 1e-6 < prev_dis
+                || point.steps < prev_steps
+                || point.validTime < prev_valid_time
+                || point.validDis + 1e-6 < prev_valid_dis
+            {
+                return Err("轨迹点累计时间、距离或步数回退".into());
+            }
+            (prev_time, prev_dis, prev_valid_time, prev_valid_dis, prev_steps) = (
+                point.totalTime,
+                point.totalDis,
+                point.validTime,
+                point.validDis,
+                point.steps,
+            );
+        }
+        let last = self.locations.last().ok_or("轨迹不能为空".to_string())?;
+        if last.totalTime != self.totalTime
+            || last.validTime != self.validTime
+            || (last.totalDis - self.totalDistance).abs() > 0.01
+            || (last.validDis - self.validDistance).abs() > 0.01
+            || last.steps != self.totalSteps
+        {
+            return Err("终点累计值与轨迹总计不一致".into());
+        }
         self.start_coordinate()
     }
 }

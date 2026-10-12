@@ -10,9 +10,11 @@ use super::submit::{submit_record, SubmitParams, SubmitResult};
 use crate::location::Coordinate;
 use crate::track::generate_road::RouteMode;
 use crate::track::generator::build as gen_track;
-use crate::track::wire::{build_obs_object, five_point_wrapper, obs_keys};
+use crate::track::wire::{
+    build_obs_object, five_point_wrapper, obs_keys, validate_five_point_wrapper,
+};
 use rand_distr::{Distribution, Normal};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 #[derive(Clone, Copy)]
 pub struct RunParams {
@@ -35,6 +37,148 @@ pub struct RunOutcome {
     pub result: SubmitResult,
     pub obs_ok: usize,
     pub detail_ok: bool,
+}
+
+/// 本地 dry-run 的摘要；不会读取会话、访问网络或上传任何数据。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DryRunSummary {
+    pub distance_m: f64,
+    pub duration_s: i64,
+    pub track_points: usize,
+    pub obs_keys: usize,
+    pub start_latitude: f64,
+    pub start_longitude: f64,
+    pub min_speed_mps: f64,
+    pub max_speed_mps: f64,
+}
+
+fn dry_run_points(anchor: Coordinate) -> Vec<Value> {
+    // 仅用于本地结构校验的四点小环；不会被当作实时点位或上传。
+    let lat = anchor.latitude;
+    let lon = anchor.longitude;
+    [
+        (lat - 0.0008, lon - 0.0010),
+        (lat - 0.0008, lon + 0.0010),
+        (lat + 0.0008, lon + 0.0010),
+        (lat + 0.0008, lon - 0.0010),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (point_lat, point_lon))| {
+        json!({
+            "lat": point_lat,
+            "lon": point_lon,
+            "glat": point_lat,
+            "glon": point_lon,
+            "pointName": format!("dry-run-{i}"),
+            "isFixed": 1,
+        })
+    })
+    .collect()
+}
+
+/// 构造并校验一条完整本地记录，不创建 ApiClient，也不触发任何网络请求。
+pub fn run_dry_run(params: &RunParams, anchor: Coordinate) -> Result<DryRunSummary, String> {
+    anchor.validate()?;
+    if params.dist <= 0.0 || !params.dist.is_finite() {
+        return Err("dry-run 距离必须是正数".into());
+    }
+    if params.dur <= 0 {
+        return Err("dry-run 时长必须是正数".into());
+    }
+    if params.start_ms <= 0 {
+        return Err("dry-run 开始时间无效".into());
+    }
+
+    let live_points = dry_run_points(anchor);
+    let point_coords: Vec<(f64, f64)> = live_points
+        .iter()
+        .map(|p| {
+            let lat = p["lat"].as_f64().ok_or("dry-run 点位缺纬度")?;
+            let lon = p["lon"].as_f64().ok_or("dry-run 点位缺经度")?;
+            Coordinate::new(lat, lon, 0.0)?;
+            Ok((lat, lon))
+        })
+        .collect::<Result<_, String>>()?;
+    let mut track = gen_track(
+        params.dist,
+        params.dur,
+        params.seed,
+        (anchor.latitude, anchor.longitude),
+        params.start_ms,
+        &point_coords,
+    );
+    if let Some(range) = params.manual_altitude_range {
+        crate::track::altitude::override_bd_a_range(&mut track, range)?;
+    } else if let Some(altitude_m) = params.manual_altitude {
+        crate::track::altitude::override_bd_a(&mut track, altitude_m)?;
+    }
+    track.validate_consistency()?;
+
+    let five = five_point_wrapper(&live_points, track.startTime);
+    validate_five_point_wrapper(&five)?;
+    let obj = build_obs_object(&track, 0, "dry-run", 0, &live_points);
+    let keys = obs_keys(&track, 0, "dry-run");
+    if keys.len() != 2 {
+        return Err(format!("dry-run OBS key 数量异常: {}", keys.len()));
+    }
+    for key in [
+        "rrid",
+        "uuid",
+        "uid",
+        "run_data",
+        "fixed_point_json",
+        "segment_json",
+        "speed_json",
+        "step_freq_json",
+        "laps_json",
+        "runFaceCheck",
+    ] {
+        if obj
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|value| value.is_empty())
+            .unwrap_or(true)
+        {
+            return Err(format!("dry-run OBS 字段为空: {key}"));
+        }
+    }
+
+    let speed_samples: Vec<f64> = track
+        .locations
+        .iter()
+        // avgSpeed 是轨迹生成器约束后的运动速度；speed 是协议中的 GPS
+        // 瞬时速度，允许为 0 或短时漂移尖峰，不能用它判断有效速度窗。
+        .map(|p| p.avgSpeed)
+        .filter(|speed| speed.is_finite() && *speed > 0.0)
+        .collect();
+    if speed_samples.is_empty() {
+        return Err("dry-run 没有可校验的有效速度样本".into());
+    }
+    let (min_speed_mps, max_speed_mps) = speed_samples
+        .into_iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), speed| {
+            (min.min(speed), max.max(speed))
+        });
+    if min_speed_mps < crate::track::generator::SPEED_FLOOR
+        || max_speed_mps > crate::track::generator::SPEED_CEIL
+    {
+        return Err(format!(
+            "dry-run 速度超出窗口: {:.3}..{:.3} m/s",
+            min_speed_mps, max_speed_mps
+        ));
+    }
+
+    Ok(DryRunSummary {
+        distance_m: track.totalDistance,
+        duration_s: track.totalTime,
+        track_points: track.locations.len(),
+        obs_keys: keys.len(),
+        start_latitude: track.startLatitude,
+        start_longitude: track.startLongitude,
+        min_speed_mps,
+        max_speed_mps,
+    })
 }
 
 fn sleep_secs(s: u64) {
@@ -108,7 +252,11 @@ pub fn run_full_flow(
         for (i, &(mlat, mlon)) in pol.must_points.iter().enumerate() {
             log(&format!(
                 "  [policy] must_points[{i}] BD=({mlat:.6},{mlon:.6}){}",
-                if i == 0 { "（假设为起点）" } else { "（必经点）" }
+                if i == 0 {
+                    "（假设为起点）"
+                } else {
+                    "（必经点）"
+                }
             ));
         }
     } else {
@@ -359,6 +507,42 @@ pub fn run_ai_submit(
     let biz = super::ai::upload(client, sport_id, mode, None)?;
     log("√ [ai] 提交成功");
     Ok(biz)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{run_dry_run, RouteMode, RunParams};
+    use crate::location::Coordinate;
+
+    fn params() -> RunParams {
+        RunParams {
+            dist: 2_000.0,
+            dur: 800,
+            start_ms: 1_700_000_000_000,
+            face_check: 1,
+            manual_altitude: None,
+            manual_altitude_range: None,
+            seed: 7,
+            route_mode: RouteMode::Legacy,
+        }
+    }
+
+    #[test]
+    fn dry_run_builds_and_validates_protocol_payloads() {
+        let summary = run_dry_run(&params(), Coordinate::new(39.9, 116.4, 0.0).unwrap()).unwrap();
+        assert_eq!(summary.duration_s, 800);
+        assert_eq!(summary.obs_keys, 2);
+        assert!(summary.track_points > 10);
+        assert!(summary.distance_m > 1_999.0 && summary.distance_m < 2_001.0);
+    }
+
+    #[test]
+    fn dry_run_rejects_invalid_parameters() {
+        let mut invalid = params();
+        invalid.dur = 0;
+        let error = run_dry_run(&invalid, Coordinate::new(39.9, 116.4, 0.0).unwrap()).unwrap_err();
+        assert!(error.contains("时长"));
+    }
 }
 
 /// AI 列表（UI 线程用）。

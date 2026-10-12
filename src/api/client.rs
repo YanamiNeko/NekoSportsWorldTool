@@ -46,7 +46,10 @@ impl ApiClient {
     }
 
     fn token(&self) -> String {
-        self.login.as_ref().map(|s| s.token.clone()).unwrap_or_default()
+        self.login
+            .as_ref()
+            .map(|s| s.token.clone())
+            .unwrap_or_default()
     }
 
     /// 发送信封请求（header/headerSign 用 observed 序，body 用 insert 序）。
@@ -64,8 +67,12 @@ impl ApiClient {
         let (header_plain, _) = build_header_for(&self.identity, uid, &token, None);
         let header_env = build_envelope(&mut self.session, &header_plain, OuterOrder::Observed);
         // body 时间戳 = header ts + 1（原生两次独立读取毫秒）
-        let body_env =
-            build_envelope_ts(&mut self.session, body_plain, OuterOrder::Insert, header_env.ts_ms + 1);
+        let body_env = build_envelope_ts(
+            &mut self.session,
+            body_plain,
+            OuterOrder::Insert,
+            header_env.ts_ms + 1,
+        );
 
         let mut req = self.agent.request(method, url);
         req = req.set("Content-Type", "application/json; charset=utf-8");
@@ -85,11 +92,23 @@ impl ApiClient {
             &body_env.key_data[2],
             &body_env.key_data[3],
         );
-        let (decrypted, raw_head) = match decrypt_response(raw.as_bytes(), &key, &rsa_public_key()) {
+        let (decrypted, raw_head) = match decrypt_response(raw.as_bytes(), &key, &rsa_public_key())
+        {
             Ok(d) => (Some(d), String::new()),
-            Err(e) => (None, format!("{e} | 原文: {}", crate::textlog::truncate(&raw, 160))),
+            Err(e) => (
+                None,
+                crate::textlog::redact_text(&format!(
+                    "{e} | 原文: {}",
+                    crate::textlog::truncate(&raw, 160)
+                )),
+            ),
         };
-        Ok(RequestOutcome { http_status: status, decrypted, raw_len, raw_head })
+        Ok(RequestOutcome {
+            http_status: status,
+            decrypted,
+            raw_len,
+            raw_head,
+        })
     }
 
     /// 标准业务请求（RUN 域名）：返回业务 JSON；error != 10000 时 Err。
@@ -100,7 +119,13 @@ impl ApiClient {
         body_plain: &str,
         extra_headers: &[(String, String)],
     ) -> Result<serde_json::Value, String> {
-        self.call_host(crate::api::model::HOST, method, path, body_plain, extra_headers)
+        self.call_host(
+            crate::api::model::HOST,
+            method,
+            path,
+            body_plain,
+            extra_headers,
+        )
     }
 
     /// 指定域名业务请求（排行榜/违规名单走 DISCOVERY，信封链相同）。
@@ -124,12 +149,22 @@ impl ApiClient {
         let business = match check_business(&dec.business) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[resp] {} -> Err: {}", path, e);
+                eprintln!(
+                    "[resp] {} -> Err: {}",
+                    path,
+                    crate::textlog::redact_text(&e)
+                );
                 return Err(e);
             }
         };
         let biz_str = serde_json::to_string(&business).unwrap_or_default();
-        eprintln!("[resp] {} -> {} ({}B) {}", path, out.http_status, out.raw_len, biz_str);
+        eprintln!(
+            "[resp] {} -> {} ({}B) {}",
+            path,
+            out.http_status,
+            out.raw_len,
+            crate::textlog::redact_text(&biz_str)
+        );
         Ok(business)
     }
 }
@@ -145,7 +180,9 @@ pub fn check_business(v: &serde_json::Value) -> Result<serde_json::Value, String
             .or_else(|| v.get("msg"))
             .and_then(|m| m.as_str())
             .unwrap_or("(无消息)");
-        Err(format!("业务错误 {err}: {msg}"))
+        Err(crate::textlog::redact_text(&format!(
+            "业务错误 {err}: {msg}"
+        )))
     }
 }
 
@@ -162,7 +199,9 @@ pub fn get_field<'a>(biz: &'a serde_json::Value, name: &str) -> Option<&'a serde
 /// data 字段如果是 JSON 字符串则解析（Obs 一层包裹语义）。
 pub fn parse_data_field(biz: &serde_json::Value) -> serde_json::Value {
     match biz.get("data") {
-        Some(serde_json::Value::String(s)) => serde_json::from_str(s).unwrap_or(serde_json::Value::Null),
+        Some(serde_json::Value::String(s)) => {
+            serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
+        }
         Some(v) => v.clone(),
         None => serde_json::Value::Null,
     }
@@ -172,8 +211,38 @@ pub fn ureq_err(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(code, resp) => {
             let body = resp.into_string().unwrap_or_default();
-            format!("HTTP {code}: {}", &body[..body.len().min(300)])
+            format!("HTTP {code}: {}", crate::textlog::redact_text(&crate::textlog::truncate(&body, 300)))
         }
         ureq::Error::Transport(t) => format!("网络错误: {t}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{check_business, parse_data_field};
+
+    #[test]
+    fn parse_data_field_accepts_object_array_and_json_string() {
+        let object = serde_json::json!({"data": {"ok": true}});
+        assert_eq!(parse_data_field(&object)["ok"].as_bool(), Some(true));
+
+        let array = serde_json::json!({"data": [1, 2, 3]});
+        assert_eq!(parse_data_field(&array).as_array().unwrap().len(), 3);
+
+        let wrapped = serde_json::json!({"data": "{\"records\":[{\"rrid\":7}]}"});
+        assert_eq!(
+            parse_data_field(&wrapped)["records"][0]["rrid"].as_i64(),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn business_errors_are_rejected_and_success_is_preserved() {
+        let ok = serde_json::json!({"error": 10000, "data": {"ok": true}});
+        assert!(check_business(&ok).is_ok());
+        let bad = serde_json::json!({"error": 401, "message": "token=secret"});
+        let error = check_business(&bad).unwrap_err();
+        assert!(error.contains("token=***"));
+        assert!(!error.contains("secret"));
     }
 }

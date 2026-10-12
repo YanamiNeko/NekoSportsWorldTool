@@ -218,22 +218,9 @@ pub fn run_full_flow(
                                     filtered.buildings.len(),
                                     fences.len()
                                 ));
-                                // 只上报实际经过的硬点，避免地图出现不在轨迹上的普通点。
-                                let sel: Vec<Value> = pts
-                                    .iter()
-                                    .filter(|p| {
-                                        let (Some(lat), Some(lon)) = (
-                                            p.get("lat").and_then(|v| v.as_f64()),
-                                            p.get("lon").and_then(|v| v.as_f64()),
-                                        ) else {
-                                            return false;
-                                        };
-                                        selected.iter().any(|q| {
-                                            (q.0 - lat).abs() < 1e-6 && (q.1 - lon).abs() < 1e-6
-                                        })
-                                    })
-                                    .cloned()
-                                    .collect();
+                                // 只上报实际经过的硬点，避免地图出现不在轨迹上的普通点；
+                                // 策略必经点若不在实时点位数组中则合成，保证点集与轨迹经过去重后一致。
+                                let sel = points::submitted_points_for(&selected, &pts);
                                 if sel.is_empty() {
                                     log("⚠ [track] 实际经过点位为空，回退上报全部点位");
                                 } else {

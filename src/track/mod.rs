@@ -233,6 +233,29 @@ mod tests {
         assert_eq!(ordinary, vec![(2.0, 2.0)]);
     }
 
+    /// 提交点集构造：命中实时点位的沿用原始 Value；未命中的硬点合成（isFixed=1、
+    /// BD→GCJ 得到 glat/glon），顺序与 selected 一致。
+    #[test]
+    fn test_submitted_points_for_synthesizes_missing_must() {
+        let pts = vec![
+            serde_json::json!({"lat": 1.0, "lon": 1.0, "isFixed": 1, "pointName": "A",
+                "glat": 1.006, "glon": 1.006}),
+            serde_json::json!({"lat": 2.0, "lon": 2.0, "isFixed": 0, "pointName": "B"}),
+        ];
+        // selected：命中 A、B，外加一个不在 pts 中的硬点 (9,9)
+        let selected = vec![(1.0, 1.0), (9.0, 9.0), (2.0, 2.0)];
+        let out = crate::api::points::submitted_points_for(&selected, &pts);
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert_eq!(out[0]["pointName"], "A");
+        assert_eq!(out[2]["pointName"], "B");
+        // 合成点：BD 原坐标、isFixed=1、glat/glon 非零（BD→GCJ）
+        assert_eq!(out[1]["lat"].as_f64(), Some(9.0));
+        assert_eq!(out[1]["lon"].as_f64(), Some(9.0));
+        assert_eq!(out[1]["isFixed"].as_i64(), Some(1));
+        assert!(out[1]["glat"].as_f64().unwrap() != 0.0);
+        assert!(out[1]["glon"].as_f64().unwrap() != 0.0);
+    }
+
     /// 模式 B（真实道路路由）：距离精确、哨兵/断崖语义与模式 A 一致。
     #[test]
     fn test_build_road_distribution() {

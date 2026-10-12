@@ -166,3 +166,40 @@ pub fn resolve_hard_points(
     }
     (fixed, points_free(points))
 }
+
+/// 由实际经过的硬点 `selected`（BD 系）构造提交/OBS 用的点位数组。
+///
+/// 命中 `points` 的沿用实时点位原始 `Value`；未命中的硬点合成一条：`isFixed=1`、
+/// BD 原坐标、`glat/glon` 由 BD→GCJ 得到。这样 `fivePointJson` / OBS `fixed_point_json`
+/// 与轨迹实际经过的硬点完全一致，避免「轨迹经过但点集缺失」。
+pub fn submitted_points_for(selected: &[(f64, f64)], points: &[Value]) -> Vec<Value> {
+    let near = |a: &(f64, f64), b: &(f64, f64)| (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6;
+    selected
+        .iter()
+        .map(|q| {
+            let hit = points.iter().find(|p| {
+                match (
+                    p.get("lat").and_then(|v| v.as_f64()),
+                    p.get("lon").and_then(|v| v.as_f64()),
+                ) {
+                    (Some(lat), Some(lon)) => near(&(lat, lon), q),
+                    _ => false,
+                }
+            });
+            match hit {
+                Some(p) => p.clone(),
+                None => {
+                    let (glat, glon) = crate::track::wire::bd09_to_gcj02(q.0, q.1);
+                    json!({
+                        "lat": q.0,
+                        "lon": q.1,
+                        "glat": glat,
+                        "glon": glon,
+                        "isFixed": 1,
+                        "pointName": "",
+                    })
+                }
+            }
+        })
+        .collect()
+}

@@ -43,6 +43,9 @@ fn sleep_secs(s: u64) {
     std::thread::sleep(std::time::Duration::from_secs(s));
 }
 
+/// 时长达标余量（秒）：生成时长 = min_run_time + 该余量，避免服务端取整/有效时长略低。
+const DURATION_MARGIN_SECS: i64 = 30;
+
 /// 跑步全链。
 pub fn run_full_flow(
     client: &mut ApiClient,
@@ -109,6 +112,17 @@ pub fn run_full_flow(
     }
     // 平均配速须落在有效窗口内（否则逐点速度无法全窗内），越界时修正时长
     let mut params = *params;
+    // 时长达标：App 判定 totalTime >= 策略 minRunTime，留余量防止服务端有效时长取整后不足。
+    if pol.min_run_time > 0 {
+        let need = pol.min_run_time + DURATION_MARGIN_SECS;
+        if params.dur < need {
+            log(&format!(
+                "[track] 时长 {}s 低于策略要求 {}s，提升到 {}s",
+                params.dur, pol.min_run_time, need
+            ));
+            params.dur = need;
+        }
+    }
     let avg = params.dist / params.dur as f64;
     let fixed_avg = avg.clamp(
         crate::track::generator::SPEED_FLOOR + 0.1,
@@ -123,6 +137,13 @@ pub fn run_full_flow(
             fixed_dur
         ));
         params.dur = fixed_dur;
+    }
+    // 配速修正后兜底：仍不得低于策略要求（宽配速窗口下一般不触发）。
+    if pol.min_run_time > 0 {
+        let need = pol.min_run_time + DURATION_MARGIN_SECS;
+        if params.dur < need {
+            params.dur = need;
+        }
     }
     log(&format!(
         "[track] 生成轨迹 {:.0}m / {}s（{} 个点位）…",

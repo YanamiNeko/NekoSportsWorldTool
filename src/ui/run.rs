@@ -539,12 +539,8 @@ impl App {
             let anchor = self.identity.anchor_coordinate().ok();
             let cached = anchor.and_then(crate::api::model::load_points_cache_for);
             if let Some((_ts, pts)) = cached {
-                // 策略必经点用缓存补齐，使预览的硬点集合与真跑一致。
-                let must_points = anchor
-                    .and_then(crate::api::model::load_must_points_cache_for)
-                    .unwrap_or_default();
-                let (fixed, ordinary) =
-                    crate::api::points::resolve_hard_points(&pts, &must_points);
+                // 硬点只由点位接口的 isFixed 决定，预览与真跑共用同一解析。
+                let (fixed, ordinary) = crate::api::points::resolve_hard_points(&pts);
                 if !fixed.is_empty() || !ordinary.is_empty() {
                     let fences = crate::api::model::load_fence_cache().unwrap_or_default();
                     match crate::track::generate_road::plan_road_view(

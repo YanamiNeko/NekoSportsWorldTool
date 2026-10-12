@@ -456,44 +456,6 @@ pub fn save_points_cache(
     write_json("points_cache.json", &doc)
 }
 
-/// 策略必经点缓存：{ts_ms, anchor, must_points}，供预览在无 policy 响应时对齐真跑。
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct MustPointsCache {
-    ts: i64,
-    anchor: crate::location::Coordinate,
-    must_points: Vec<(f64, f64)>,
-}
-
-/// 策略必经点缓存有效期（与点位缓存一致）。过期后预览不再使用，待 refresh 重拉。
-pub const MUST_POINTS_TTL_MS: i64 = 300_000;
-
-/// 只返回与本次锚点相同且在有效期内的缓存，避免串城市 / 复用过期策略。
-pub fn load_must_points_cache_for(
-    anchor: crate::location::Coordinate,
-) -> Option<Vec<(f64, f64)>> {
-    let v: serde_json::Value = read_json("must_points_cache.json")?;
-    let cache: MustPointsCache = serde_json::from_value(v).ok()?;
-    if !cache.anchor.is_near(anchor, 0.0001) {
-        return None;
-    }
-    if crate::crypto::envelope::now_ms() - cache.ts >= MUST_POINTS_TTL_MS {
-        return None;
-    }
-    Some(cache.must_points)
-}
-
-pub fn save_must_points_cache(
-    anchor: crate::location::Coordinate,
-    must_points: &[(f64, f64)],
-) -> Result<(), String> {
-    let doc = MustPointsCache {
-        ts: crate::crypto::envelope::now_ms(),
-        anchor,
-        must_points: must_points.to_vec(),
-    };
-    write_json("must_points_cache.json", &doc)
-}
-
 #[cfg(test)]
 mod points_cache_tests {
     use super::*;

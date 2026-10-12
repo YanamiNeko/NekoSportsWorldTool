@@ -149,22 +149,12 @@ pub fn points_free(points: &[Value]) -> Vec<(f64, f64)> {
     points_by_fixed(points, false)
 }
 
-/// 由点位与策略必经点解析硬点，返回 `(必经点, 普通点)`：
-/// 必经点 = `isFixed != 0` 的点 ∪ `must_points`（坐标去重）；普通点 = `isFixed == 0`。
+/// 由点位解析硬点，返回 `(必经点, 普通点)`：必经点 = `isFixed != 0` 的点；普通点 = `isFixed == 0`。
 ///
-/// 预览与实际运行共用此函数，保证二者的选点输入一致。
-pub fn resolve_hard_points(
-    points: &[Value],
-    must_points: &[(f64, f64)],
-) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
-    let near = |a: &(f64, f64), b: &(f64, f64)| (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6;
-    let mut fixed = points_fixed(points);
-    for &mp in must_points {
-        if !fixed.iter().any(|q| near(q, &mp)) {
-            fixed.push(mp);
-        }
-    }
-    (fixed, points_free(points))
+/// 预览与实际运行共用此函数，保证二者的选点输入一致。policy 响应不含必经点，
+/// 硬点唯一来源就是点位接口的 `isFixed`。
+pub fn resolve_hard_points(points: &[Value]) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    (points_fixed(points), points_free(points))
 }
 
 /// 由实际经过的硬点 `selected`（BD 系）构造提交/OBS 用的点位数组。

@@ -84,9 +84,9 @@ pub fn run_full_flow(
 
     // ③ 轨迹生成（真实道路模式：必经点 + 随机普通点，全部强经过）
     let pts_bd = points::points_bd(&pts);
-    // 硬点 = 必经点(isFixed!=0，含策略 must_points) + 随机 ordinary_pick 个普通点；
+    // 硬点 = 必经点(isFixed!=0) + 随机 ordinary_pick 个普通点；
     // 与预览共用 resolve_hard_points，保证选点输入一致。
-    let (fixed, ordinary) = points::resolve_hard_points(&pts, &pol.must_points);
+    let (fixed, ordinary) = points::resolve_hard_points(&pts);
     // 用打卡点随机偏移更新锚点并持久化：下次拉点位即学校真实坐标，摆脱写死的默认值
     if !pts_bd.is_empty() {
         let idx = (rand::random::<f64>() * pts_bd.len() as f64) as usize;
@@ -105,8 +105,6 @@ pub fn run_full_flow(
         // 用漂移后的新锚点重存点位缓存，使缓存锚点与持久化锚点一致，避免预览锚点失配。
         if let Ok(new_anchor) = client.identity.anchor_coordinate() {
             let _ = super::model::save_points_cache(new_anchor, &pts);
-            // 策略必经点同锚点缓存，供预览对齐真跑（无 policy 响应时预览会缺这些点）。
-            let _ = super::model::save_must_points_cache(new_anchor, &pol.must_points);
         }
     }
     // 平均配速须落在有效窗口内（否则逐点速度无法全窗内），越界时修正时长

@@ -219,18 +219,17 @@ mod tests {
         );
     }
 
-    /// 硬点解析：isFixed 与策略 must_points 合并去重，普通点不受影响。
+    /// 硬点解析：isFixed 决定必经/普通；policy 不参与（无必经点字段）。
     #[test]
-    fn test_resolve_hard_points_merges_must() {
+    fn test_resolve_hard_points_by_is_fixed() {
         let pts = vec![
             serde_json::json!({"lat": 1.0, "lon": 1.0, "isFixed": 1}),
             serde_json::json!({"lat": 2.0, "lon": 2.0, "isFixed": 0}),
+            serde_json::json!({"lat": 3.0, "lon": 3.0}),
         ];
-        // must_points 含与 isFixed 重合的点（应去重）及一个新点。
-        let (fixed, ordinary) =
-            crate::api::points::resolve_hard_points(&pts, &[(1.0, 1.0), (9.0, 9.0)]);
-        assert_eq!(fixed, vec![(1.0, 1.0), (9.0, 9.0)]);
-        assert_eq!(ordinary, vec![(2.0, 2.0)]);
+        let (fixed, ordinary) = crate::api::points::resolve_hard_points(&pts);
+        assert_eq!(fixed, vec![(1.0, 1.0)]);
+        assert_eq!(ordinary, vec![(2.0, 2.0), (3.0, 3.0)]);
     }
 
     /// 提交点集构造：命中实时点位的沿用原始 Value；未命中的硬点合成（isFixed=1、

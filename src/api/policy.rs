@@ -12,6 +12,8 @@ pub struct PolicyInfo {
     pub timestamp: i64,
     pub policy: i64,
     pub min_distance: i64,
+    /// 最少跑步时长（秒），提交时 `selRunTime` 用它（App 达成判定 totalTime >= minRunTime）。
+    pub min_run_time: i64,
     pub valid_time: i64,
 }
 
@@ -48,6 +50,10 @@ pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
             .get("minDistance")
             .and_then(|t| t.as_i64())
             .unwrap_or(1000),
+        min_run_time: rule
+            .get("minRunTime")
+            .and_then(|t| t.as_i64())
+            .unwrap_or(0),
         valid_time: rule.get("validTime").and_then(|t| t.as_i64()).unwrap_or(0),
     })
 }

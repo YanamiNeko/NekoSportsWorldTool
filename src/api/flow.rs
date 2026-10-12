@@ -55,8 +55,8 @@ pub fn run_full_flow(
     log("[policy] 拉取跑步策略…");
     let pol = fetch_policy(client)?;
     log(&format!(
-        "√ [policy] ts={} policy={} minDistance={} validTime={}",
-        pol.timestamp, pol.policy, pol.min_distance, pol.valid_time
+        "√ [policy] ts={} policy={} minDistance={} minRunTime={} validTime={}",
+        pol.timestamp, pol.policy, pol.min_distance, pol.min_run_time, pol.valid_time
     ));
     sleep_secs(2);
 
@@ -309,6 +309,7 @@ pub fn run_full_flow(
         policy: pol.policy,
         policy_ts: pol.timestamp,
         min_distance: pol.min_distance,
+        min_run_time: pol.min_run_time,
         weight: if sess.weight > 0.0 { sess.weight } else { 68.0 },
         face_check: params.face_check,
         five_point_json: five,

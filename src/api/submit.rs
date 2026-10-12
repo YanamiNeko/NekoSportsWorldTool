@@ -83,6 +83,8 @@ pub struct SubmitParams {
     pub policy: i64,
     pub policy_ts: i64,
     pub min_distance: i64,
+    /// 策略要求的最少跑步时长（秒），提交 `selRunTime` 用它。0 表示无要求。
+    pub min_run_time: i64,
     pub weight: f64,
     pub face_check: i64,
     pub five_point_json: String,
@@ -113,6 +115,9 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     let total_time = track.totalTime;
     let total_dis = track.totalDistance;
     let total_steps = track.totalSteps;
+    // selRunTime = 要求的最少时长（App 用策略 minRunTime），不是实际时长；
+    // 无要求（0）时回退实际时长。服务端「跑 N 分钟以上」按它判定。
+    let sel_run_time = if p.min_run_time > 0 { p.min_run_time } else { total_time };
     let start_ms = track.startTime;
     let stop_ms = start_ms + total_time * 1000;
     let ascent = total_ascent(&track.locations);
@@ -138,7 +143,7 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     body.insert("uuid".into(), Value::String(run_uuid.clone()));
     body.insert("uid".into(), Value::from(p.uid));
     body.insert("selectedUnid".into(), Value::from(unid));
-    body.insert("selRunTime".into(), Value::from(total_time));
+    body.insert("selRunTime".into(), Value::from(sel_run_time));
     body.insert("selDistance".into(), Value::from(p.min_distance));
     body.insert("totalDis".into(), Value::from(round_to(total_dis, 0) as i64));
     body.insert("speed".into(), Value::from(speed));

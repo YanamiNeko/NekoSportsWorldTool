@@ -153,8 +153,10 @@ pub fn run_full_flow(
     ));
     // 随机 0-4 秒偏移（终端上报的 flag 与首点差 <5s），轨迹/提交/OBS/五点统一使用
     let start_ms = params.start_ms + (rand::random::<i64>() % 5) * 1000;
-    // 提交/OBS 上报的点位：默认全部；道路算法真正生效时替换为实际经过的硬点。
+    // 提交/OBS 上报完整点位集（与 App 一致）；isPass 由实际经过与否逐点决定。
+    // passed_pts 默认全部经过（Legacy/回退经典算法时轨迹经过所有点），道路成功时收窄为实际硬点。
     let mut submitted_pts: Vec<Value> = pts.clone();
+    let mut passed_pts: Vec<(f64, f64)> = pts_bd.clone();
     let mut track = match params.route_mode {
         RouteMode::Road => {
             let cfg = crate::api::model::load_config();
@@ -237,14 +239,8 @@ pub fn run_full_flow(
                                     filtered.buildings.len(),
                                     fences.len()
                                 ));
-                                // 只上报实际经过的硬点，避免地图出现不在轨迹上的普通点；
-                                // 策略必经点若不在实时点位数组中则合成，保证点集与轨迹经过去重后一致。
-                                let sel = points::submitted_points_for(&selected, &pts);
-                                if sel.is_empty() {
-                                    log("⚠ [track] 实际经过点位为空，回退上报全部点位");
-                                } else {
-                                    submitted_pts = sel;
-                                }
+                                // App 语义：提交完整点位，isPass 标记实际经过的点。
+                                passed_pts = selected.clone();
                                 t
                             }
                             Err(e) if e.contains("不可达") => {
@@ -317,7 +313,23 @@ pub fn run_full_flow(
             .unwrap_or_default(),
     ));
 
-    // ④ 五点 wrapper（跑完态，仅报实际经过的点）
+    // 逐点标 isPass：命中实际经过集合（passed_pts）为 true，其余 false（与 App 一致）。
+    for p in submitted_pts.iter_mut() {
+        let is_pass = match (
+            p.get("lat").and_then(|v| v.as_f64()),
+            p.get("lon").and_then(|v| v.as_f64()),
+        ) {
+            (Some(lat), Some(lon)) => passed_pts
+                .iter()
+                .any(|q| (q.0 - lat).abs() < 1e-6 && (q.1 - lon).abs() < 1e-6),
+            _ => false,
+        };
+        if let Some(obj) = p.as_object_mut() {
+            obj.insert("isPass".into(), Value::Bool(is_pass));
+        }
+    }
+
+    // ④ 五点 wrapper（完整点位，isPass 逐点标记）
     let five = five_point_wrapper(&submitted_pts, track.startTime);
     let _ = &five;
 

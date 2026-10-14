@@ -10,7 +10,7 @@ use super::submit::{submit_record, SubmitParams, SubmitResult};
 use crate::location::Coordinate;
 use crate::track::generate_road::RouteMode;
 use crate::track::generator::build as gen_track;
-use crate::track::wire::{build_obs_object, five_point_wrapper, obs_keys};
+use crate::track::wire::{build_obs_object_with_area, five_point_wrapper_with_area, obs_keys};
 use rand_distr::{Distribution, Normal};
 use serde_json::Value;
 
@@ -64,11 +64,47 @@ pub fn run_full_flow(
         return Err("请先在设备信息页填写本次跑步所在城市和定位锚点，不能使用大连默认配置".into());
     }
     let anchor: Coordinate = client.identity.anchor_coordinate()?;
-    let pts = points::fetch_points(client, anchor, log)?;
+    let points_ctx = points::fetch_points_context(client, anchor, log)?;
+    let mut area = points_ctx.area.clone();
+    // 部分学校把围栏放在策略响应，另一些学校放在点位响应；优先使用
+    // 明确返回的有效围栏，两个接口都没有时保持自由跑默认值。
+    if pol.area.freedom_show_fence && pol.area.geo_fences_json.trim() != "[]" {
+        area = pol.area.clone();
+    } else if area.run_area_id < 0 && pol.area.run_area_id >= 0 {
+        area.run_area_id = pol.area.run_area_id;
+    }
+    // 某些学校不在策略/点位响应中返回围栏，而是只由独立围栏接口提供。
+    // 围栏是可选能力：接口失败或返回空数组时继续按自由跑提交。
+    let mut prefetched_fences: Option<Vec<Vec<(f64, f64)>>> = None;
+    if !area.freedom_show_fence || area.geo_fences_json.trim() == "[]" {
+        match crate::api::fence::fetch_geo_fence_with_area(client) {
+            Ok(response) => {
+                if response.area.freedom_show_fence && response.area.geo_fences_json.trim() != "[]" {
+                    area = response.area;
+                    log(&format!(
+                        "√ [fence] 独立接口返回绿色围栏 runAreaId={}（{} 字节）",
+                        area.run_area_id,
+                        area.geo_fences_json.len(),
+                    ));
+                } else {
+                    log("[fence] 独立接口未返回可用围栏，继续自由跑");
+                }
+                prefetched_fences = Some(response.polygons);
+            }
+            Err(e) => log(&format!("⚠ [fence] 独立接口获取失败，继续自由跑: {e}")),
+        }
+    }
+    let pts = points_ctx.points.clone();
     if pts.is_empty() {
         return Err("实时点位为空 —— 拒绝本地样本兜底".into());
     }
-    log(&format!("√ [points] {} 个点位", pts.len()));
+    log(&format!(
+        "√ [points] {} 个点位，runAreaId={}，绿色围栏={}（{} 字节）",
+        pts.len(),
+        area.run_area_id,
+        area.freedom_show_fence,
+        area.geo_fences_json.len(),
+    ));
     for p in pts.iter().take(5) {
         log(&format!(
             "  [points] {} BD=({:.6},{:.6}) GCJ=({},{})",
@@ -137,7 +173,7 @@ pub fn run_full_flow(
         }
         // 用漂移后的新锚点重存点位缓存，使缓存锚点与持久化锚点一致，避免预览锚点失配。
         if let Ok(new_anchor) = client.identity.anchor_coordinate() {
-            let _ = super::model::save_points_cache(new_anchor, &pts);
+            let _ = super::model::save_points_cache_context(new_anchor, &pts, &area);
         }
     }
     // 平均配速须落在有效窗口内（否则逐点速度无法全窗内），越界时修正时长
@@ -183,16 +219,23 @@ pub fn run_full_flow(
                     Ok(mut net) => {
                         crate::track::generate_road::align_network(&mut net);
                         // 电子围栏：裁剪到围栏内道路（失败/无围栏则跳过）
-                        let fences = match crate::api::fence::fetch_geo_fence(client) {
-                            Ok(f) => {
+                        let fences = match prefetched_fences.take() {
+                            Some(f) => {
                                 let _ = crate::api::model::save_fence_cache(&f);
                                 log(&format!("√ [track] 电子围栏 {} 个", f.len()));
                                 f
                             }
-                            Err(e) => {
-                                log(&format!("⚠ [track] 围栏获取失败，回退缓存: {e}"));
-                                crate::api::model::load_fence_cache().unwrap_or_default()
-                            }
+                            None => match crate::api::fence::fetch_geo_fence(client) {
+                                Ok(f) => {
+                                    let _ = crate::api::model::save_fence_cache(&f);
+                                    log(&format!("√ [track] 电子围栏 {} 个", f.len()));
+                                    f
+                                }
+                                Err(e) => {
+                                    log(&format!("⚠ [track] 围栏获取失败，回退缓存: {e}"));
+                                    crate::api::model::load_fence_cache().unwrap_or_default()
+                                }
+                            },
                         };
                         let filtered = crate::track::generate_road::apply_fences(&net, &fences);
                         // 强制必经点（不含起点）：其余打卡点仅软引导 + <40m 吸附
@@ -281,7 +324,7 @@ pub fn run_full_flow(
     ));
 
     // ④ 五点 wrapper（跑完态）
-    let five = five_point_wrapper(&pts, track.startTime);
+    let five = five_point_wrapper_with_area(&pts, track.startTime, &area);
     let _ = &five;
 
     // ⑤ 提交（sportType=1）
@@ -306,7 +349,7 @@ pub fn run_full_flow(
     // 从提交结果回填 track.startTime（含随机秒偏移），保证 body/OBS/flag 全链一致
     let mut track_for_obs = sp.track.clone();
     track_for_obs.startTime = result.start_ms;
-    let obj = build_obs_object(&track_for_obs, result.rrid, &result.uuid, sess.uid, &pts);
+    let obj = build_obs_object_with_area(&track_for_obs, result.rrid, &result.uuid, sess.uid, &pts, &area);
     let payload = obj.to_string().into_bytes();
     let keys = obs_keys(&track_for_obs, result.rrid, &result.uuid);
     let obs_ok = super::obs::upload_both_keys(client, &keys, &payload, log);

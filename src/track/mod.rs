@@ -106,6 +106,7 @@ mod tests {
         let pts = sample_points();
         let start = 1_788_958_186_123i64;
         let track = build(3300.0, 1220, 42, (38.9, 121.54), start, &pts);
+        assert!(track.locations.iter().all(|point| point.ptype != -1), "campus track must not contain invalid drift points");
         // 总距离精确等于目标（±0.5m 舍入容差）
         assert!(
             (track.totalDistance - 3300.0).abs() < 0.5,

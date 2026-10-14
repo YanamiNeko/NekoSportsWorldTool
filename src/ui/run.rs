@@ -551,6 +551,7 @@ impl App {
                     ("建筑", egui::Color32::from_rgb(224, 194, 170)),
                     ("路线", egui::Color32::from_rgb(30, 111, 216)),
                     ("打卡点", egui::Color32::from_rgb(240, 180, 0)),
+                    ("电子围栏", egui::Color32::from_rgb(34, 197, 94)),
                     ("起点", egui::Color32::from_rgb(22, 160, 90)),
                     ("终点", egui::Color32::from_rgb(220, 38, 38)),
                 ],
@@ -602,7 +603,7 @@ impl App {
                     .map
                     .draw_polygon(&painter, canvas, b, bld, 1.0);
             }
-            let fence_c = egui::Color32::from_rgb(180, 118, 0);
+            let fence_c = egui::Color32::from_rgb(34, 197, 94);
             for f in &p.fences {
                 self.run_page
                     .map

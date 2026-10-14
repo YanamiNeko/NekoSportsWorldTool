@@ -2,7 +2,7 @@
 //!
 //! 画像驱动：打卡点拟合闭合环（Catmull-Rom，每段 18 采样）→ 弧长表；
 //! 采样间隔主 5s（80%）；速度曲线 = ramp × 疲劳 × 三正弦 × 余弦凹陷 × 微噪；
-//! 正常点按速度曲线分配位移并归一到精确总距离；异常点（-1）零位移/跳变；
+//! 正常点按速度曲线分配位移并归一到精确总距离；所有采样点保持在跑步区域环线上，避免被服务端标成无效灰段；
 //! 哨兵点（首 type∈{0,7}、索引1 type=5、末 type=6）；结尾断崖；点位吸附。
 #![allow(non_snake_case)]
 
@@ -108,7 +108,6 @@ pub fn build(
     let seg_dist: Vec<f64> = (0..n).map(|i| w[i] * dts[i]).collect();
     let speeds: Vec<f64> = w.clone();
 
-    let tl_w = [((-1i64, 4i64), 54u32), ((-1, 1), 27), ((-1, 12), 13), ((-1, 5), 3), ((-1, 6), 2)];
     let mut kinds: Vec<(i64, i64)> = Vec::with_capacity(n);
     for _ in 0..n {
         let u = rng.random();
@@ -117,7 +116,10 @@ pub fn build(
         } else if u < 0.93 {
             kinds.push((0, 1));
         } else if u < 0.96 {
-            kinds.push(rng.weighted(&tl_w));
+            // Invalid (-1) drift points make the server render gray segments
+            // and are not appropriate for a campus run that must stay inside
+            // the returned green area fence.
+            kinds.push(rng.choice(&[(3, 1), (0, 1), (1, 1), (2, 1)]));
         } else {
             kinds.push((rng.choice(&[1, 1, 1, 1, 2, 2]), 1));
         }
@@ -236,7 +238,7 @@ pub fn build(
             state = rng.weighted(&[(1, 102), (2, 124), (3, 136)]);
         }
         if typ != -1 {
-            dist_acc += d_step; // 异常点漂移不计入累计距离
+            dist_acc += d_step; // 轨迹点位移计入累计距离
         }
         let (lat, lng) = to_bd(px, py, c_lat, c_lng);
         alt += 0.04 * (82.0 - alt) + rng.gauss(0.0, alt_sigma);
@@ -249,8 +251,7 @@ pub fn build(
         steps_acc += cad / 60.0 * dt;
         let nxt = pos(s + direction * 2.0);
         let brg = ((nxt.0 - x).atan2(nxt.1 - y).to_degrees() + rng.gauss(0.0, 35.0)).rem_euclid(360.0);
-        // 异常点（-1）：avgSpeed 为累计均值（真人与此一致，不为 0）；
-        // GPS 瞬时速度多为低速，偶发 15-46 km/h 漂移尖峰
+        // 保留累计均值与 GPS 瞬时速度的轻微波动，但不生成越出跑步区域的漂移点。
         let (avg_sp, gps_speed) = if typ == -1 {
             let avg = round_to(dist_acc / t_acc.max(1.0), 4);
             let gps = if rng.random() < 0.12 {

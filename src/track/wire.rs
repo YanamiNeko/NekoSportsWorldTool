@@ -15,6 +15,28 @@ use super::model::{GenPoint, Track};
 
 const X_PI: f64 = std::f64::consts::PI * 3000.0 / 180.0;
 
+/// The run-area metadata returned by the point endpoint.
+///
+/// Older callers can keep using the default value (free-run semantics), while
+/// campus runs pass through the server-provided area id and fence JSON so the
+/// record detail page can draw the same green boundary as the official app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunAreaMeta {
+    pub run_area_id: i64,
+    pub geo_fences_json: String,
+    pub freedom_show_fence: bool,
+}
+
+impl Default for RunAreaMeta {
+    fn default() -> Self {
+        Self {
+            run_area_id: -1,
+            geo_fences_json: "[]".into(),
+            freedom_show_fence: false,
+        }
+    }
+}
+
 /// 百度 BD-09 → 高德 GCJ-02。
 pub fn bd09_to_gcj02(bd_lat: f64, bd_lng: f64) -> (f64, f64) {
     let x = bd_lng - 0.0065;
@@ -85,7 +107,10 @@ pub fn five_point_payload(points: &[Value], start_ms: i64) -> Vec<Value> {
                 "glat": p["glat"].as_f64().unwrap_or(0.0),
                 "glon": p["glon"].as_f64().unwrap_or(0.0),
                 "id": i as i64 + 1,
-                "isFixed": p["isFixed"].as_i64().unwrap_or(0),
+                // 跑完态的 fivePointJson 要把本次命中的打卡点标为固定点。
+                // 点位接口有时只把起点标成 1（其余返回 0），但已验证的
+                // 成功载荷要求所有已通过点均为 isFixed=1。
+                "isFixed": 1,
                 "isPass": true,
                 "lat": p["lat"].as_f64().unwrap_or(0.0),
                 "lon": p["lon"].as_f64().unwrap_or(0.0),
@@ -99,13 +124,23 @@ pub fn five_point_payload(points: &[Value], start_ms: i64) -> Vec<Value> {
 
 /// 提交 body 的 fivePointJson 包装串。
 pub fn five_point_wrapper(points: &[Value], start_ms: i64) -> String {
+    five_point_wrapper_with_area(points, start_ms, &RunAreaMeta::default())
+}
+
+/// Build the fixed-point wrapper while preserving the server's campus area
+/// and geofence metadata.
+pub fn five_point_wrapper_with_area(
+    points: &[Value],
+    start_ms: i64,
+    area: &RunAreaMeta,
+) -> String {
     let five = five_point_payload(points, start_ms);
     json!({
         "useZip": false,
         "fivePointJson": Value::Array(five).to_string(),
-        "runAreaId": -1,
-        "geoFencesJson": "[]",
-        "freedomShowFence": false,
+        "runAreaId": area.run_area_id,
+        "geoFencesJson": area.geo_fences_json,
+        "freedomShowFence": area.freedom_show_fence,
     })
     .to_string()
 }
@@ -125,6 +160,41 @@ pub fn validate_five_point_wrapper(wrapper: &str) -> Result<(), String> {
         crate::location::Coordinate::new(lat, lon, 0.0)?;
         crate::location::Coordinate::new(glat, glon, 0.0)?;
     }
+    validate_fence_metadata(&outer)?;
+    Ok(())
+}
+
+/// 围栏是学校能力差异字段：没有围栏时允许自由跑提交；如果服务端
+/// 返回了围栏，则保持完整元数据并拒绝损坏或隐藏的围栏，避免详情页误显示。
+fn validate_fence_metadata(outer: &Value) -> Result<(), String> {
+    let Some(value) = outer.get("geoFencesJson") else {
+        return Ok(())
+    };
+    let parsed = match value {
+        Value::Null => return Ok(()),
+        Value::String(text) if text.trim().is_empty() => return Ok(()),
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .map_err(|e| format!("五点轨迹围栏 JSON 无效: {e}"))?,
+        other => other.clone(),
+    };
+    let has_fences = match parsed {
+        Value::Null => false,
+        Value::Array(items) => !items.is_empty(),
+        _ => return Err("五点轨迹围栏必须是数组".into()),
+    };
+    if !has_fences {
+        return Ok(())
+    }
+    let run_area_id = outer
+        .get("runAreaId")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+        .unwrap_or(-1);
+    if run_area_id < -1 {
+        return Err("五点轨迹 runAreaId 无效".into());
+    }
+    if outer.get("freedomShowFence").and_then(Value::as_bool) != Some(true) {
+        return Err("五点轨迹围栏元数据未启用".into());
+    }
     Ok(())
 }
 
@@ -132,6 +202,62 @@ pub fn validate_five_point_wrapper(wrapper: &str) -> Result<(), String> {
 mod validation_tests {
     use super::*;
     #[test] fn rejects_empty_or_malformed_five_point_payload() { assert!(validate_five_point_wrapper("{}").is_err()); assert!(validate_five_point_wrapper(r#"{"fivePointJson":"[]"}"#).is_err()); }
+
+    fn wrapper_without_fence() -> Value {
+        json!({"fivePointJson": r#"[{"lat":39.4,"lon":116.2,"glat":39.4,"glon":116.2}]"#})
+    }
+
+    #[test]
+    fn fence_metadata_is_optional() {
+        assert!(validate_five_point_wrapper(&wrapper_without_fence().to_string()).is_ok());
+        let mut empty = wrapper_without_fence();
+        empty["runAreaId"] = json!(-1);
+        empty["geoFencesJson"] = json!("[]");
+        empty["freedomShowFence"] = json!(false);
+        assert!(validate_five_point_wrapper(&empty.to_string()).is_ok());
+    }
+
+    #[test]
+    fn valid_fence_metadata_is_kept_but_invalid_present_metadata_is_rejected() {
+        let mut valid = wrapper_without_fence();
+        valid["geoFencesJson"] = json!(r#"[{"id":1}]"#);
+        valid["freedomShowFence"] = json!(true);
+        assert!(validate_five_point_wrapper(&valid.to_string()).is_ok());
+
+        let mut hidden = valid.clone();
+        hidden["freedomShowFence"] = json!(false);
+        assert!(validate_five_point_wrapper(&hidden.to_string()).is_err());
+
+        let mut malformed = valid;
+        malformed["geoFencesJson"] = json!("not-json");
+        assert!(validate_five_point_wrapper(&malformed.to_string()).is_err());
+    }
+
+    #[test]
+    fn area_metadata_is_written_to_fixed_point_wrapper() {
+        let area = RunAreaMeta { run_area_id: 42, geo_fences_json: "[{\"x\":1}]".into(), freedom_show_fence: true };
+        let wrapper = five_point_wrapper_with_area(&[json!({"lat": 39.9, "lon": 116.4, "glat": 39.9, "glon": 116.4})], 1_700_000_000_000, &area);
+        let value: Value = serde_json::from_str(&wrapper).unwrap();
+        assert_eq!(value["runAreaId"], 42);
+        assert_eq!(value["geoFencesJson"], "[{\"x\":1}]");
+        assert_eq!(value["freedomShowFence"], true);
+    }
+
+    #[test]
+    fn completed_fixed_points_are_marked_fixed_even_if_source_point_is_zero() {
+        let points = vec![json!({
+            "lat": 39.9,
+            "lon": 116.4,
+            "glat": 39.9,
+            "glon": 116.4,
+            "isFixed": 0,
+        })];
+        let value: Value = serde_json::from_str(&five_point_wrapper(&points, 1_700_000_000_000)).unwrap();
+        let raw = value["fivePointJson"].as_str().unwrap();
+        let fixed: Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(fixed[0]["isFixed"], 1);
+        assert_eq!(fixed[0]["isPass"], true);
+    }
 
     #[test]
     fn laps_are_rebuilt_from_overridden_altitude() {
@@ -244,6 +370,18 @@ pub fn build_obs_object(
     uid: i64,
     live_points: &[Value],
 ) -> Value {
+    build_obs_object_with_area(track, rrid, uuid, uid, live_points, &RunAreaMeta::default())
+}
+
+/// Build the OBS payload with the same area metadata used by submission.
+pub fn build_obs_object_with_area(
+    track: &Track,
+    rrid: i64,
+    uuid: &str,
+    uid: i64,
+    live_points: &[Value],
+    area: &RunAreaMeta,
+) -> Value {
     let start_ms = track.startTime;
     let pts: Vec<Value> = track.locations.iter().map(|p| conv_point(p, start_ms)).collect();
     let run_wrap = json!({ "allLocJson": Value::Array(pts).to_string(), "useZip": false });
@@ -252,9 +390,9 @@ pub fn build_obs_object(
     let five = five_point_payload(live_points, start_ms);
     let fx = json!({
         "fivePointJson": Value::Array(five).to_string(),
-        "freedomShowFence": false,
-        "geoFencesJson": "[]",
-        "runAreaId": -1,
+        "freedomShowFence": area.freedom_show_fence,
+        "geoFencesJson": area.geo_fences_json,
+        "runAreaId": area.run_area_id,
         "useZip": false,
     });
     json!({

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="org.nekosportsworld.tool" android:versionCode="20503" android:versionName="0.2.5-android.3">
+    package="org.nekosportsworld.tool" android:versionCode="30531" android:versionName="0.3.0-draw.31">
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- 自更新：把已下载的新版 APK 交给系统安装器（用户在系统弹窗确认） -->

@@ -2,9 +2,9 @@
 
 use super::about::FinishAction;
 use super::{
-    App, PopupInfo, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, LOGIN_DONE,
-    POINTS_DONE, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, UPDATE_CHK, UPDATE_DONE,
-    UPDATE_PROG, USER,
+    App, PopupInfo, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, CUSTOM_ROUTE_DONE, FENCE_DONE,
+    IP, LOGIN_DONE, POINTS_DONE, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, UPDATE_CHK,
+    UPDATE_DONE, UPDATE_PROG, USER,
 };
 use crate::api::model;
 use chrono::TimeZone;
@@ -29,6 +29,7 @@ impl App {
         let mut update_chk = None;
         let mut update_prog = None;
         let mut update_done = None;
+        let mut custom_route_json = None;
         while let Ok(msg) = self.rx.try_recv() {
             if let Some(v) = msg.strip_prefix(IP) {
                 done_ip = Some(v.to_string());
@@ -74,6 +75,8 @@ impl App {
                 update_prog = Some(v.to_string());
             } else if let Some(v) = msg.strip_prefix(UPDATE_DONE) {
                 update_done = Some(v.to_string());
+            } else if let Some(v) = msg.strip_prefix(CUSTOM_ROUTE_DONE) {
+                custom_route_json = Some(v.to_string());
             } else {
                 self.log.push(&msg);
             }
@@ -338,6 +341,31 @@ impl App {
                     title: "更新失败".into(),
                     lines: vec![msg.to_string()],
                 });
+            }
+        }
+        if let Some(v) = custom_route_json {
+            let val: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
+            if val.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+                if let Ok(ring) = serde_json::from_value::<crate::track::custom::CustomRing>(
+                    val.get("ring").cloned().unwrap_or(serde_json::Value::Null),
+                ) {
+                    self.run_page.custom_preview = Some(ring);
+                    self.run_page.map_fitted = false;
+                    self.run_page.custom_status = val
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("路线已更新")
+                        .to_string();
+                    self.status = self.run_page.custom_status.clone();
+                } else {
+                    self.run_page.custom_status = "路线数据解析失败".into();
+                }
+            } else {
+                self.run_page.custom_status = format!(
+                    "获取路线失败：{}",
+                    val["message"].as_str().unwrap_or("未知错误")
+                );
+                self.status = self.run_page.custom_status.clone();
             }
         }
         if got_semester || got_cheat || got_rank {

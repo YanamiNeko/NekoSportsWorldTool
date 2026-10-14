@@ -139,6 +139,52 @@ pub fn to_bd(x: f64, y: f64, c_lat: f64, c_lng: f64) -> (f64, f64) {
     (c_lat + y / MET_PER_DEG_LAT, c_lng + x / MET_PER_DEG_LNG)
 }
 
+/// Catmull-Rom 平滑折线：把标定点拟合成自然曲线（手绘路线用）。
+///
+/// closed=true 首尾相接成环（末点补回首点）；closed=false 开链（端点钳制）。
+/// 每段采样 `samples_per_seg` 个点，与打卡点环的平滑方式一致。
+pub fn smooth_polyline(
+    pts: &[(f64, f64)],
+    samples_per_seg: usize,
+    closed: bool,
+) -> Vec<(f64, f64)> {
+    let n = pts.len();
+    if n < 2 {
+        return pts.to_vec();
+    }
+    let samples = samples_per_seg.max(2);
+    let segs = if closed { n } else { n - 1 };
+    let mut out = Vec::with_capacity(segs * samples);
+    for i in 0..segs {
+        let (i0, i1, i2, i3) = if closed {
+            ((i + n - 1) % n, i, (i + 1) % n, (i + 2) % n)
+        } else {
+            (i.saturating_sub(1), i, i + 1, (i + 2).min(n - 1))
+        };
+        let (p0, p1, p2, p3) = (pts[i0], pts[i1], pts[i2], pts[i3]);
+        for j in 0..samples {
+            // t ∈ [0,1] 含端点：开链端点精确经过标定点
+            let t = j as f64 / (samples - 1) as f64;
+            let (t2, t3) = (t * t, t * t * t);
+            let x = 0.5
+                * ((2.0 * p1.0)
+                    + (-p0.0 + p2.0) * t
+                    + (2.0 * p0.0 - 5.0 * p1.0 + 4.0 * p2.0 - p3.0) * t2
+                    + (-p0.0 + 3.0 * p1.0 - 3.0 * p2.0 + p3.0) * t3);
+            let y = 0.5
+                * ((2.0 * p1.1)
+                    + (-p0.1 + p2.1) * t
+                    + (2.0 * p0.1 - 5.0 * p1.1 + 4.0 * p2.1 - p3.1) * t2
+                    + (-p0.1 + 3.0 * p1.1 - 3.0 * p2.1 + p3.1) * t3);
+            out.push((x, y));
+        }
+    }
+    if closed && out.len() > 1 {
+        out.push(out[0]);
+    }
+    out
+}
+
 // ── 坐标基准转换：WGS84 ↔ GCJ-02 ↔ BD-09 ─────────────────────────
 // 打卡点来自服务端为 BD-09；OSM 路网为 WGS84。真实道路路由需先把路网
 // 逐节点转成 BD-09，与经典模式（直接在 BD-09 上拟合打卡点环）保持一致。
@@ -167,6 +213,21 @@ fn transform_lng(x: f64, y: f64) -> f64 {
     ret += (20.0 * (x * pi).sin() + 40.0 * (x / 3.0 * pi).sin()) * 2.0 / 3.0;
     ret += (150.0 * (x / 12.0 * pi).sin() + 300.0 * (x / 30.0 * pi).sin()) * 2.0 / 3.0;
     ret
+}
+
+/// ECEF（地心地固直角坐标，WGS84，米）→ 大地坐标 (lat, lon)，迭代法。
+pub fn ecef_to_wgs84(x: f64, y: f64, z: f64) -> (f64, f64) {
+    let a = 6378137.0; // WGS84 长半轴
+    let e2 = 6.69437999014e-3; // 第一偏心率平方
+    let lon = y.atan2(x);
+    let p = (x * x + y * y).sqrt();
+    let mut lat = z.atan2(p * (1.0 - e2));
+    for _ in 0..8 {
+        let n = a / (1.0 - e2 * lat.sin().powi(2)).sqrt();
+        let h = p / lat.cos() - n;
+        lat = z.atan2(p * (1.0 - e2 * n / (n + h)));
+    }
+    (lat.to_degrees(), lon.to_degrees())
 }
 
 /// WGS84 → GCJ-02（火星坐标，境内偏移）。

@@ -2,6 +2,7 @@
 
 pub mod altitude;
 pub mod calorie;
+pub mod custom;
 pub mod generate_road;
 pub mod generator;
 pub mod geom;

@@ -123,7 +123,12 @@ impl App {
                 for b in &net.buildings {
                     bounds.extend(ring_to_pts(b));
                 }
-                self.osm_page.map.fit(canvas, &bounds);
+                // OSM 为 WGS84，显示层转 GCJ-02 与高德瓦片对齐
+                let display: Vec<(f64, f64)> = bounds
+                    .iter()
+                    .map(|&(la, lo)| crate::track::geom::wgs84_to_gcj02(la, lo))
+                    .collect();
+                self.osm_page.map.fit(canvas, &display);
                 self.osm_page.fitted = true;
             }
         }
@@ -131,24 +136,42 @@ impl App {
         painter.rect_filled(
             canvas,
             egui::Rounding::ZERO,
-            egui::Color32::from_rgb(250, 252, 251),
+            egui::Color32::from_rgb(236, 240, 238),
+        );
+        // 瓦片底图
+        self.tiles.request_visible(
+            self.osm_page.map.center,
+            self.osm_page.map.zoom,
+            self.osm_page.map.offset,
+            canvas,
+        );
+        self.tiles.draw(
+            &painter,
+            self.osm_page.map.center,
+            self.osm_page.map.zoom,
+            self.osm_page.map.offset,
+            canvas,
         );
         if let Some(net) = &self.network {
-            let road_color = egui::Color32::from_rgb(190, 200, 196);
+            let road_color = egui::Color32::from_rgb(110, 122, 118);
             for e in net.edges_deg() {
-                self.osm_page.map.draw_polyline(
-                    &painter,
-                    canvas,
-                    &ring_to_pts(&e),
-                    road_color,
-                    1.0,
-                );
+                let display: Vec<(f64, f64)> = e
+                    .iter()
+                    .map(|c| crate::track::geom::wgs84_to_gcj02(c.lat, c.lon))
+                    .collect();
+                self.osm_page
+                    .map
+                    .draw_polyline(&painter, canvas, &display, road_color, 1.0);
             }
             let bld_color = egui::Color32::from_rgb(214, 182, 158);
             for b in &net.buildings {
+                let display: Vec<(f64, f64)> = b
+                    .iter()
+                    .map(|c| crate::track::geom::wgs84_to_gcj02(c.lat, c.lon))
+                    .collect();
                 self.osm_page
                     .map
-                    .draw_polygon(&painter, canvas, &ring_to_pts(b), bld_color, 1.0);
+                    .draw_polygon(&painter, canvas, &display, bld_color, 1.0);
             }
         } else {
             painter.text(

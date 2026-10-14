@@ -32,24 +32,16 @@ fn fit_speeds(w: &mut [f64], dts: &[f64], target: f64) {
     }
 }
 
-/// 轨迹生成主入口。points_bd 为 BD 系打卡点。
-pub fn build(
+/// 经典速度剖面：5s 主采样时间网格 + ramp×疲劳×三正弦×余弦凹陷×微噪速度曲线，
+/// 逐点速度约束在有效配速窗口内并精确命中目标距离。返回 (times, dts, speeds)。
+/// 自定义路线（track::custom）复用同一剖面，保证协议字段与经典模式一致。
+pub(crate) fn speed_profile(
     dist: f64,
     dur: i64,
-    seed: u64,
-    _center: (f64, f64),
-    start_ms: i64,
-    points_bd: &[(f64, f64)],
-) -> Track {
-    let mut rng = Rng::new(seed);
+    rng: &mut Rng,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let dur_f = dur as f64;
-    let (dense, arcs, pc) = make_point_ring(points_bd);
-    let (c_lat, c_lng) = pc;
-    let direction: f64 = rng.choice(&[1.0, -1.0]);
-    let s0 = rng.uniform(0.0, *arcs.last().unwrap_or(&400.0));
     let phase_v = rng.uniform(0.0, std::f64::consts::TAU);
-    let phase_l = rng.uniform(0.0, std::f64::consts::TAU);
-
     let mut times = Vec::new();
     let mut t = 0.0;
     while t < dur_f {
@@ -105,8 +97,32 @@ pub fn build(
     dts.push(1.0f64.max(dur_f - times[n - 1]));
     // 逐点速度全部约束在有效配速窗口内，并精确命中目标距离
     fit_speeds(&mut w, &dts, dist);
+    (times, dts, w)
+}
+
+/// 轨迹生成主入口。points_bd 为 BD 系打卡点。
+pub fn build(
+    dist: f64,
+    dur: i64,
+    seed: u64,
+    _center: (f64, f64),
+    start_ms: i64,
+    points_bd: &[(f64, f64)],
+) -> Track {
+    let mut rng = Rng::new(seed);
+    let dur_f = dur as f64;
+    let (dense, arcs, pc) = make_point_ring(points_bd);
+    let (c_lat, c_lng) = pc;
+    let direction: f64 = rng.choice(&[1.0, -1.0]);
+    let s0 = rng.uniform(0.0, *arcs.last().unwrap_or(&400.0));
+    let phase_l = rng.uniform(0.0, std::f64::consts::TAU);
+
+    let (times, dts, w) = speed_profile(dist, dur, &mut rng);
+    let n = times.len();
     let seg_dist: Vec<f64> = (0..n).map(|i| w[i] * dts[i]).collect();
     let speeds: Vec<f64> = w.clone();
+    // 步频波动相位（速度剖面内部相位已由 speed_profile 消费）
+    let phase_v = rng.uniform(0.0, std::f64::consts::TAU);
 
     let tl_w = [((-1i64, 4i64), 54u32), ((-1, 1), 27), ((-1, 12), 13), ((-1, 5), 3), ((-1, 6), 2)];
     let mut kinds: Vec<(i64, i64)> = Vec::with_capacity(n);

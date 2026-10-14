@@ -21,8 +21,13 @@ fn usage() {
   login   --user <手机号> --pass <密码> [--remember]
                                            登录并保存会话；--remember 同时保存凭据供自动重登
   logout                                   登出并清理本地会话
-  run    [--dist km] [--pace 秒/km] [--altitude 米或min-max] [--ago 分钟] [--days-ago 0-3 --time HH:MM] [--face 0|1] [--seed n] [--route legacy|road]
-                                           跑步全链：策略-点位-轨迹-提交-OBS-验证（--route 选择路线算法）
+  run    [--dist km] [--pace 秒/km] [--altitude 米或min-max] [--ago 分钟] [--days-ago 0-3 --time HH:MM] [--face 0|1] [--seed n] [--route legacy|road|custom|drawn]
+                                           跑步全链：策略-点位-轨迹-提交-OBS-验证（--route 选择路线算法；drawn=手绘路线）
+        [--origin 起点 --destination 终点] [--loop] [--laps n] [--amap-key KEY]
+                                           自定义路线：高德步行路径生成轨迹；--loop 绕圈（去程+返程闭环），--laps 固定圈数（0=按距离自动）
+  route  --origin <地址或lng,lat> --destination <同> [--loop] [--laps n] [--amap-key KEY] [--out file.gpx]
+                                           自定义路线预览：只调高德，不登录不上传；可导出 GPX
+  route  --drawn [--out file.gpx]          手绘路线预览：读取 drawn_route.json，打印长度/点数；可导出 GPX
   template --file <GPX/JSON>                本地读取真实记录，分析海拔（不会上传）
   ai-list                                  AI 运动项目列表
   ai     --sport <id> [--mode min|count] [--score n]

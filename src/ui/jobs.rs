@@ -27,7 +27,7 @@ impl App {
         self.update.checking = true;
         self.update.check_error = None;
         if manual {
-            self.tab = 8;
+            self.tab = 9;
             self.status = "正在检查更新…".into();
         }
         self.spawn_job(move |tx| {

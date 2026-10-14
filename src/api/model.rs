@@ -77,9 +77,28 @@ pub struct Config {
     /// OSM 路网文件路径（真实道路路由用）。
     #[serde(default)]
     pub osm_path: String,
-    /// 路线算法：legacy | road。
+    /// 路线算法：legacy | road | custom。
     #[serde(default = "default_route_mode")]
     pub route_mode: String,
+    /// 高德开放平台 Web 服务 Key（自定义路线用）。
+    #[serde(default)]
+    pub amap_key: String,
+    /// 自定义路线起点（地址或坐标）。
+    #[serde(default)]
+    pub custom_origin: String,
+    /// 自定义路线终点（地址或坐标）。
+    #[serde(default)]
+    pub custom_destination: String,
+    /// 自定义路线是否绕圈（A→B→A 闭环）。
+    #[serde(default = "default_custom_loop")]
+    pub custom_loop: bool,
+    /// 自定义路线圈数（0 = 按目标距离自动）。
+    #[serde(default)]
+    pub custom_laps: i64,
+}
+
+fn default_custom_loop() -> bool {
+    true
 }
 
 fn default_route_mode() -> String {
@@ -123,6 +142,11 @@ impl Default for Config {
             update_check: default_update_check(),
             osm_path: String::new(),
             route_mode: default_route_mode(),
+            amap_key: String::new(),
+            custom_origin: String::new(),
+            custom_destination: String::new(),
+            custom_loop: default_custom_loop(),
+            custom_laps: 0,
         }
     }
 }

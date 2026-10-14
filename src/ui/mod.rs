@@ -11,6 +11,7 @@ pub mod about;
 pub mod ai;
 pub mod data;
 pub mod device;
+pub mod draw;
 pub mod fonts;
 pub mod jobs;
 pub mod log;
@@ -21,6 +22,7 @@ pub mod osm;
 pub mod records;
 pub mod run;
 pub mod theme;
+pub mod tiles;
 pub mod user;
 
 use crate::api::model::{self, Config, HeaderIdentity, Session};
@@ -46,6 +48,7 @@ pub const UPDATE_PROG: &str = "__UPDATE_PROG__";
 pub const UPDATE_DONE: &str = "__UPDATE_DONE__";
 pub const FENCE_DONE: &str = "__FENCE_DONE__";
 pub const POINTS_DONE: &str = "__POINTS_DONE__";
+pub const CUSTOM_ROUTE_DONE: &str = "__CUSTOM_ROUTE_DONE__";
 
 /// 提交结果弹窗。
 pub struct PopupInfo {
@@ -91,6 +94,10 @@ pub struct App {
     /// 已加载的 OSM 路网（真实道路路由 + 地图显示共用）。
     pub network: Option<Arc<route_planner::RoadGraph>>,
     pub osm_page: osm::OsmPage,
+    /// 地图瓦片（高德底图 + 缓存）。
+    pub tiles: tiles::TileState,
+    /// 手绘路线页。
+    pub draw_page: draw::DrawPage,
     net_tx: Sender<Result<Arc<route_planner::RoadGraph>, String>>,
     net_rx: Receiver<Result<Arc<route_planner::RoadGraph>, String>>,
 }
@@ -107,13 +114,15 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_messages();
+        self.tiles.poll(ctx);
         #[cfg(target_os = "android")]
         self.poll_device_info();
         crate::platform::set_keep_screen_on(self.run_busy || self.ai_busy || self.login_busy);
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
 
-        // ── 顶栏 ────────────────────────────────────────────────
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+        // ── 顶栏（手绘页全屏：隐藏登录顶栏，地图占满屏幕） ──────
+        if self.tab != 8 {
+            egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(6.0);
             let compact = mobile::compact_ui(ui);
             let logged = self.session.is_some();
@@ -209,9 +218,11 @@ impl eframe::App for App {
                 }
             }
             ui.add_space(4.0);
-        });
+            });
+        }
 
-        // ── 底部状态栏 ──────────────────────────────────────────
+        // ── 底部状态栏（手绘页全屏时同样隐藏） ──────────────────
+        if self.tab != 8 {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
@@ -262,6 +273,7 @@ impl eframe::App for App {
             });
             ui.add_space(2.0);
         });
+        }
 
         // ── 标签页 ──────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -276,6 +288,7 @@ impl eframe::App for App {
                 5 => self.draw_device(ui),
                 6 => self.log.render(ui),
                 7 => self.draw_osm_page(ui),
+                8 => self.draw_draw_page(ui),
                 _ => self.draw_about(ui),
             }
         });
@@ -366,6 +379,13 @@ impl App {
                 preview: None,
                 preview_stale: true,
                 map_fitted: false,
+                custom_origin: config.custom_origin.clone(),
+                custom_destination: config.custom_destination.clone(),
+                custom_loop: config.custom_loop,
+                custom_laps: config.custom_laps,
+                amap_key: config.amap_key.clone(),
+                custom_preview: None,
+                custom_status: String::new(),
             },
             ai_page: ai::AiPage {
                 days: 1,
@@ -380,6 +400,11 @@ impl App {
             network: None,
             osm_page: osm::OsmPage {
                 path: config.osm_path.clone(),
+                ..Default::default()
+            },
+            tiles: tiles::TileState::new(),
+            draw_page: draw::DrawPage {
+                auto_close: true,
                 ..Default::default()
             },
             net_tx,

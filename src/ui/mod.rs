@@ -22,6 +22,7 @@ pub mod records;
 pub mod run;
 pub mod theme;
 pub mod user;
+pub mod watermark;
 
 use crate::api::model::{self, Config, HeaderIdentity, Session};
 use eframe::egui;
@@ -262,6 +263,8 @@ impl eframe::App for App {
             });
             ui.add_space(2.0);
         });
+
+        watermark::show(ctx);
 
         // ── 标签页 ──────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {

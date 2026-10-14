@@ -15,10 +15,69 @@ pub struct RecordsPage {
     pub detail_rrid: Option<i64>,
     pub detail_raw: Option<serde_json::Value>,
     pub detail_loading: bool,
+    detail_request_id: u64,
     /// AI 详情页当前记录
     pub ai_detail_id: Option<i64>,
     pub ai_detail_raw: Option<serde_json::Value>,
     pub ai_detail_loading: bool,
+    ai_detail_request_id: u64,
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct DetailReply {
+    pub request_id: u64,
+    pub record_id: i64,
+    pub data: serde_json::Value,
+}
+
+impl RecordsPage {
+    pub(super) fn begin_run_detail(&mut self, rrid: i64) -> u64 {
+        self.detail_request_id = self.detail_request_id.wrapping_add(1);
+        self.detail_rrid = Some(rrid);
+        self.detail_raw = None;
+        self.detail_loading = true;
+        self.detail_request_id
+    }
+
+    pub(super) fn close_run_detail(&mut self) {
+        self.detail_rrid = None;
+        self.detail_raw = None;
+        self.detail_loading = false;
+    }
+
+    pub(super) fn apply_run_detail(&mut self, reply: DetailReply) {
+        if self.detail_rrid == Some(reply.record_id)
+            && self.detail_request_id == reply.request_id
+            && self.detail_loading
+        {
+            self.detail_raw = Some(reply.data);
+            self.detail_loading = false;
+        }
+    }
+
+    pub(super) fn begin_ai_detail(&mut self, id: i64) -> u64 {
+        self.ai_detail_request_id = self.ai_detail_request_id.wrapping_add(1);
+        self.ai_detail_id = Some(id);
+        self.ai_detail_raw = None;
+        self.ai_detail_loading = true;
+        self.ai_detail_request_id
+    }
+
+    pub(super) fn close_ai_detail(&mut self) {
+        self.ai_detail_id = None;
+        self.ai_detail_raw = None;
+        self.ai_detail_loading = false;
+    }
+
+    pub(super) fn apply_ai_detail(&mut self, reply: DetailReply) {
+        if self.ai_detail_id == Some(reply.record_id)
+            && self.ai_detail_request_id == reply.request_id
+            && self.ai_detail_loading
+        {
+            self.ai_detail_raw = Some(reply.data);
+            self.ai_detail_loading = false;
+        }
+    }
 }
 
 impl App {
@@ -76,9 +135,7 @@ impl App {
         ui.add_space(4.0);
         mobile::row(ui, |ui| {
             if ui.button("← 返回列表").clicked() {
-                self.records_page.ai_detail_id = None;
-                self.records_page.ai_detail_raw = None;
-                self.records_page.ai_detail_loading = false;
+                self.records_page.close_ai_detail();
             }
             ui.add_space(6.0);
             ui.label(
@@ -121,9 +178,7 @@ impl App {
         ui.add_space(4.0);
         mobile::row(ui, |ui| {
             if ui.button("← 返回列表").clicked() {
-                self.records_page.detail_rrid = None;
-                self.records_page.detail_raw = None;
-                self.records_page.detail_loading = false;
+                self.records_page.close_run_detail();
             }
             ui.add_space(6.0);
             ui.label(
@@ -203,9 +258,6 @@ impl App {
                     }
                 });
             if let Some(rrid) = toggle_target.get() {
-                self.records_page.detail_rrid = Some(rrid);
-                self.records_page.detail_raw = None;
-                self.records_page.detail_loading = true;
                 self.fetch_run_detail(rrid);
             }
             return;
@@ -278,9 +330,6 @@ impl App {
             });
 
         if let Some(rrid) = toggle_target.get() {
-            self.records_page.detail_rrid = Some(rrid);
-            self.records_page.detail_raw = None;
-            self.records_page.detail_loading = true;
             self.fetch_run_detail(rrid);
         }
     }
@@ -334,9 +383,6 @@ impl App {
                     }
                 });
             if let Some(id) = toggle_target.get() {
-                self.records_page.ai_detail_id = Some(id);
-                self.records_page.ai_detail_raw = None;
-                self.records_page.ai_detail_loading = true;
                 self.fetch_ai_detail(id);
             }
             return;
@@ -417,9 +463,6 @@ impl App {
             });
 
         if let Some(id) = toggle_target.get() {
-            self.records_page.ai_detail_id = Some(id);
-            self.records_page.ai_detail_raw = None;
-            self.records_page.ai_detail_loading = true;
             self.fetch_ai_detail(id);
         }
     }

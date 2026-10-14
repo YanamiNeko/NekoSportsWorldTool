@@ -1,6 +1,7 @@
 //! 消息协议分发与弹窗构建。
 
 use super::about::FinishAction;
+use super::records::DetailReply;
 use super::{
     App, PopupInfo, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, LOGIN_DONE,
     POINTS_DONE, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, UPDATE_CHK, UPDATE_DONE,
@@ -24,8 +25,6 @@ impl App {
         let mut rank_json = None;
         let mut user_json = None;
         let mut ai_records_json = None;
-        let mut ai_detail_raw = None;
-        let mut detail_raw = None;
         let mut update_chk = None;
         let mut update_prog = None;
         let mut update_done = None;
@@ -61,12 +60,12 @@ impl App {
             } else if let Some(v) = msg.strip_prefix(AI_RECORDS) {
                 ai_records_json = Some(v.to_string());
             } else if let Some(v) = msg.strip_prefix(RUN_DETAIL) {
-                if let Ok(raw) = serde_json::from_str::<serde_json::Value>(v) {
-                    detail_raw = Some(raw);
+                if let Ok(reply) = serde_json::from_str::<DetailReply>(v) {
+                    self.records_page.apply_run_detail(reply);
                 }
             } else if let Some(v) = msg.strip_prefix(AI_DETAIL) {
-                if let Ok(raw) = serde_json::from_str::<serde_json::Value>(v) {
-                    ai_detail_raw = Some(raw);
+                if let Ok(reply) = serde_json::from_str::<DetailReply>(v) {
+                    self.records_page.apply_ai_detail(reply);
                 }
             } else if let Some(v) = msg.strip_prefix(UPDATE_CHK) {
                 update_chk = Some(v.to_string());
@@ -256,10 +255,6 @@ impl App {
                 });
             }
         }
-        if let Some(raw) = ai_detail_raw {
-            self.records_page.ai_detail_raw = Some(raw);
-            self.records_page.ai_detail_loading = false;
-        }
         if let Some(v) = ai_records_json {
             self.records_busy = false;
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&v) {
@@ -269,10 +264,6 @@ impl App {
                     .unwrap_or_default();
                 self.records_page.ai_total = val.get("total").and_then(|x| x.as_i64()).unwrap_or(0);
             }
-        }
-        if let Some(raw) = detail_raw {
-            self.records_page.detail_raw = Some(raw);
-            self.records_page.detail_loading = false;
         }
         if let Some(v) = update_chk {
             self.update.checking = false;
@@ -460,5 +451,143 @@ fn ai_popup(v: &serde_json::Value) -> PopupInfo {
                 v["resp_msg"].as_str().unwrap_or("")
             ),
         ],
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn begin(app: &mut App, prefix: &str, record_id: i64) -> u64 {
+        if prefix == RUN_DETAIL {
+            app.records_page.begin_run_detail(record_id)
+        } else {
+            app.records_page.begin_ai_detail(record_id)
+        }
+    }
+
+    fn close(app: &mut App, prefix: &str) {
+        if prefix == RUN_DETAIL {
+            app.records_page.close_run_detail();
+        } else {
+            app.records_page.close_ai_detail();
+        }
+    }
+
+    fn queue(app: &App, prefix: &str, request_id: u64, record_id: i64, data: Value) {
+        let payload = json!({ "request_id": request_id, "record_id": record_id, "data": data });
+        app.tx.send(format!("{prefix}{payload}")).unwrap();
+    }
+
+    fn state<'app>(app: &'app App, prefix: &str) -> (Option<&'app Value>, bool) {
+        if prefix == RUN_DETAIL {
+            (
+                app.records_page.detail_raw.as_ref(),
+                app.records_page.detail_loading,
+            )
+        } else {
+            (
+                app.records_page.ai_detail_raw.as_ref(),
+                app.records_page.ai_detail_loading,
+            )
+        }
+    }
+
+    #[test]
+    fn detail_old_then_current_response_keeps_current_record() {
+        for prefix in [RUN_DETAIL, AI_DETAIL] {
+            let mut app = App::test_fixture();
+            let old_request = begin(&mut app, prefix, 11);
+            let current_request = begin(&mut app, prefix, 22);
+            queue(&app, prefix, old_request, 11, json!({ "name": "old" }));
+            app.poll_messages();
+            assert_eq!(state(&app, prefix), (None, true));
+
+            let current = json!({ "name": "current" });
+            queue(&app, prefix, current_request, 22, current.clone());
+            app.poll_messages();
+            assert_eq!(state(&app, prefix), (Some(&current), false));
+        }
+    }
+
+    #[test]
+    fn detail_current_then_old_response_in_one_poll_keeps_current_record() {
+        for prefix in [RUN_DETAIL, AI_DETAIL] {
+            let mut app = App::test_fixture();
+            let old_request = begin(&mut app, prefix, 11);
+            let current_request = begin(&mut app, prefix, 22);
+            let current = json!({ "name": "current" });
+            queue(&app, prefix, current_request, 22, current.clone());
+            queue(&app, prefix, old_request, 11, json!({ "name": "old" }));
+            app.poll_messages();
+            assert_eq!(state(&app, prefix), (Some(&current), false));
+        }
+    }
+
+    #[test]
+    fn detail_reopening_same_record_rejects_previous_request() {
+        for prefix in [RUN_DETAIL, AI_DETAIL] {
+            let mut app = App::test_fixture();
+            let old_request = begin(&mut app, prefix, 11);
+            close(&mut app, prefix);
+            let current_request = begin(&mut app, prefix, 11);
+            assert_ne!(old_request, current_request);
+            queue(&app, prefix, old_request, 11, json!({ "name": "old" }));
+            app.poll_messages();
+            assert_eq!(state(&app, prefix), (None, true));
+
+            let current = json!({ "name": "current" });
+            queue(&app, prefix, current_request, 11, current.clone());
+            app.poll_messages();
+            assert_eq!(state(&app, prefix), (Some(&current), false));
+        }
+    }
+
+    #[test]
+    fn detail_response_after_returning_to_list_is_ignored() {
+        for prefix in [RUN_DETAIL, AI_DETAIL] {
+            let mut app = App::test_fixture();
+            let request_id = begin(&mut app, prefix, 11);
+            close(&mut app, prefix);
+            queue(&app, prefix, request_id, 11, json!({ "name": "late" }));
+            app.poll_messages();
+            assert_eq!(state(&app, prefix), (None, false));
+            assert!(app.records_page.detail_rrid.is_none());
+            assert!(app.records_page.ai_detail_id.is_none());
+        }
+    }
+
+    #[test]
+    fn detail_only_current_error_completes_loading() {
+        for prefix in [RUN_DETAIL, AI_DETAIL] {
+            let mut app = App::test_fixture();
+            let old_request = begin(&mut app, prefix, 11);
+            let current_request = begin(&mut app, prefix, 22);
+            let error = if prefix == RUN_DETAIL {
+                json!({ "statusInfo": "详情拉取失败：timeout" })
+            } else {
+                json!({ "fetchError": "timeout" })
+            };
+            queue(&app, prefix, old_request, 11, error.clone());
+            app.poll_messages();
+            assert_eq!(state(&app, prefix), (None, true));
+
+            queue(&app, prefix, current_request, 22, error.clone());
+            queue(&app, prefix, old_request, 11, json!({ "name": "old" }));
+            app.poll_messages();
+            assert_eq!(state(&app, prefix), (Some(&error), false));
+        }
+    }
+
+    #[test]
+    fn detail_matching_request_with_wrong_record_is_ignored() {
+        for prefix in [RUN_DETAIL, AI_DETAIL] {
+            let mut app = App::test_fixture();
+            let request_id = begin(&mut app, prefix, 22);
+            queue(&app, prefix, request_id, 11, json!({ "name": "wrong" }));
+            app.poll_messages();
+            assert_eq!(state(&app, prefix), (None, true));
+        }
     }
 }

@@ -2,7 +2,7 @@
 //! 数据来源：登录 profile / HomePageInfo / getPersonalSemesterInfo(runMode) /
 //! recordssummary / personalSemesterCompleted(最近 rrid)。
 
-use super::{mobile, theme, App};
+use super::{components, mobile, theme, App};
 use eframe::egui;
 use egui::RichText;
 use chrono::TimeZone;
@@ -75,9 +75,7 @@ impl App {
 }
 
 fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    egui::CollapsingHeader::new(RichText::new(title).strong().color(theme::text()))
-        .default_open(true)
-        .show(ui, add);
+    components::card_titled(ui, title, add);
 }
 
 fn grid(ui: &mut egui::Ui, id: &str, rows: &[(String, String)]) {

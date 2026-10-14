@@ -1,7 +1,7 @@
 //! 运行日志：彩色等宽滚动，自动滚底，上限 2000 行。
 //! 入站行的 √/×/⚠ 前缀仅用于着色，落盘展示时剥离。
 
-use super::theme;
+use super::{components, theme};
 use crate::textlog::{classify, LogKind};
 use egui::{Color32, RichText, ScrollArea};
 use std::collections::VecDeque;
@@ -55,13 +55,28 @@ impl LogStore {
     }
 
     pub fn render(&mut self, ui: &mut egui::Ui) {
-        ScrollArea::vertical()
-            .stick_to_bottom(true)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for line in &self.lines {
-                    ui.label(RichText::new(&line.text).monospace().size(12.5).color(line.color()));
+        let count = self.lines.len();
+        components::card_titled(ui, "运行日志", |ui| {
+            ui.horizontal(|ui| {
+                components::chip(ui, &format!("{count} 行"), components::Tone::Neutral);
+                if count >= MAX_LINES {
+                    components::chip(ui, "已达上限", components::Tone::Warn);
                 }
             });
+            ui.add_space(theme::space::SM);
+            ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for line in &self.lines {
+                        ui.label(
+                            RichText::new(&line.text)
+                                .monospace()
+                                .size(theme::FONT_MONO)
+                                .color(line.color()),
+                        );
+                    }
+                });
+        });
     }
 }

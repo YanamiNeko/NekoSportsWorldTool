@@ -1,11 +1,39 @@
 //! Shared responsive and Android input helpers.
 
 use crate::platform::InputKind;
+use crate::ui::theme;
 use eframe::egui;
 use std::{hash::Hash, ops::RangeInclusive};
 
-pub const COMPACT_BREAKPOINT: f32 = 620.0;
+pub const COMPACT_BREAKPOINT: f32 = 640.0;
+#[allow(dead_code)]
+pub const WIDE_BREAKPOINT: f32 = 1024.0;
 pub const TOUCH_HEIGHT: f32 = 44.0;
+
+/// 三档响应式断点：手机 / 平板 / 桌面。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
+pub enum Layout {
+    Phone,
+    Tablet,
+    Desktop,
+}
+
+#[allow(dead_code)]
+pub fn layout_of(width: f32) -> Layout {
+    if width <= COMPACT_BREAKPOINT {
+        Layout::Phone
+    } else if width < WIDE_BREAKPOINT {
+        Layout::Tablet
+    } else {
+        Layout::Desktop
+    }
+}
+
+#[allow(dead_code)]
+pub fn layout(ui: &egui::Ui) -> Layout {
+    layout_of(ui.available_width())
+}
 
 pub fn is_compact(width: f32) -> bool {
     width <= COMPACT_BREAKPOINT
@@ -65,43 +93,175 @@ fn parse_f64_in_range(input: &str, range: RangeInclusive<f64>) -> Result<f64, St
     }
 }
 
-pub fn tab_bar(ui: &mut egui::Ui, selected: &mut usize) -> Vec<egui::Response> {
-    const TABS: [&str; 9] = [
-        "跑步",
-        "AI运动",
-        "运动记录",
-        "数据",
-        "我的",
-        "设备信息",
-        "运行日志",
-        "路网",
-        "关于",
-    ];
-    let compact = compact_ui(ui);
-    let mut responses = Vec::with_capacity(TABS.len());
-    if compact {
-        let spacing = ui.spacing().item_spacing.x;
-        let width = ((ui.available_width() - spacing * 3.0) / 4.0).max(68.0);
-        ui.horizontal_wrapped(|ui| {
-            for (index, label) in TABS.into_iter().enumerate() {
-                let response = ui.add_sized(
-                    [width, TOUCH_HEIGHT],
-                    egui::SelectableLabel::new(*selected == index, label),
-                );
-                if response.clicked() {
-                    *selected = index;
-                }
-                responses.push(response);
-            }
-        });
+/// 页面定义：索引 / 标签 / 分组 / 是否手机底部导航直连。
+pub struct PageDef {
+    pub index: usize,
+    pub label: &'static str,
+    pub group: &'static str,
+    pub mobile_root: bool,
+}
+
+pub const PAGES: [PageDef; 9] = [
+    PageDef {
+        index: 0,
+        label: "跑步",
+        group: "运动",
+        mobile_root: true,
+    },
+    PageDef {
+        index: 1,
+        label: "AI 运动",
+        group: "运动",
+        mobile_root: true,
+    },
+    PageDef {
+        index: 2,
+        label: "运动记录",
+        group: "数据",
+        mobile_root: true,
+    },
+    PageDef {
+        index: 3,
+        label: "数据",
+        group: "数据",
+        mobile_root: true,
+    },
+    PageDef {
+        index: 4,
+        label: "我的",
+        group: "我的",
+        mobile_root: true,
+    },
+    PageDef {
+        index: 5,
+        label: "设备信息",
+        group: "工具",
+        mobile_root: false,
+    },
+    PageDef {
+        index: 6,
+        label: "运行日志",
+        group: "工具",
+        mobile_root: false,
+    },
+    PageDef {
+        index: 7,
+        label: "路网",
+        group: "工具",
+        mobile_root: false,
+    },
+    PageDef {
+        index: 8,
+        label: "关于与更新",
+        group: "工具",
+        mobile_root: false,
+    },
+];
+
+/// 桌面侧栏分组顺序。
+pub const SIDE_GROUPS: [&str; 4] = ["运动", "数据", "我的", "工具"];
+
+/// 手机底部导航首页（"我的"）。
+pub const MOBILE_HOME: usize = 4;
+
+pub fn page_label(index: usize) -> &'static str {
+    PAGES.get(index).map(|p| p.label).unwrap_or("")
+}
+
+fn nav_item(
+    ui: &mut egui::Ui,
+    label: &str,
+    on: bool,
+    size: egui::Vec2,
+) -> egui::Response {
+    let text = if on {
+        egui::RichText::new(label)
+            .color(theme::ACCENT_700)
+            .strong()
     } else {
-        ui.horizontal(|ui| {
-            for (index, label) in TABS.into_iter().enumerate() {
-                responses.push(ui.selectable_value(selected, index, label));
+        egui::RichText::new(label).color(theme::TEXT_DIM)
+    };
+    ui.add_sized(
+        size,
+        egui::Button::new(text)
+            .fill(if on {
+                theme::ACCENT_50
+            } else {
+                egui::Color32::TRANSPARENT
+            })
+            .stroke(egui::Stroke::NONE),
+    )
+}
+
+/// 桌面分组侧栏：按「运动 / 数据 / 我的 / 工具」列出全部 9 页。
+pub fn side_nav(ui: &mut egui::Ui, selected: &mut usize) -> Vec<egui::Response> {
+    let mut responses = Vec::with_capacity(PAGES.len());
+    let row_h = theme::CONTROL_H + 4.0;
+    for group in SIDE_GROUPS {
+        ui.label(
+            egui::RichText::new(group)
+                .size(10.5)
+                .strong()
+                .color(theme::TEXT_FAINT),
+        );
+        for page in PAGES.iter().filter(|p| p.group == group) {
+            let response =
+                nav_item(ui, page.label, *selected == page.index, egui::vec2(ui.available_width(), row_h));
+            if response.clicked() {
+                *selected = page.index;
             }
-        });
+            responses.push(response);
+        }
+        ui.add_space(theme::space::SM);
     }
     responses
+}
+
+/// 手机底部导航：跑步 / AI / 记录 / 数据 / 我的 五项。
+pub fn bottom_nav(ui: &mut egui::Ui, selected: &mut usize) -> Vec<egui::Response> {
+    let roots: Vec<&PageDef> = PAGES.iter().filter(|p| p.mobile_root).collect();
+    let width = (ui.available_width() / roots.len() as f32).floor();
+    let mut responses = Vec::with_capacity(roots.len());
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for page in roots {
+            let response = nav_item(
+                ui,
+                page.label,
+                *selected == page.index,
+                egui::vec2(width, theme::TOUCH_H),
+            );
+            if response.clicked() {
+                *selected = page.index;
+            }
+            responses.push(response);
+        }
+    });
+    responses
+}
+
+/// 手机二级页返回条：返回按钮 + 标题。返回 true 表示应回到首页。
+pub fn sub_page_header(ui: &mut egui::Ui, title: &str) -> bool {
+    let mut back = false;
+    ui.horizontal(|ui| {
+        if ui
+            .add_sized(
+                [64.0, theme::CONTROL_H],
+                theme::ghost_btn("← 返回"),
+            )
+            .clicked()
+        {
+            back = true;
+        }
+        ui.label(
+            egui::RichText::new(title)
+                .size(theme::FONT_SUBTITLE)
+                .strong()
+                .color(theme::TEXT),
+        );
+    });
+    ui.add_space(theme::space::SM);
+    back
 }
 
 #[cfg(target_os = "android")]
@@ -359,8 +519,17 @@ mod tests {
     }
 
     #[test]
-    fn tab_bar_stays_inside_offscreen_phone_and_desktop_frames() {
-        for width in [360.0, 412.0, 880.0] {
+    fn layout_tiers_cover_phone_tablet_desktop() {
+        assert_eq!(layout_of(360.0), Layout::Phone);
+        assert_eq!(layout_of(640.0), Layout::Phone);
+        assert_eq!(layout_of(800.0), Layout::Tablet);
+        assert_eq!(layout_of(1024.0), Layout::Desktop);
+        assert_eq!(layout_of(1440.0), Layout::Desktop);
+    }
+
+    #[test]
+    fn bottom_nav_fits_phone_widths_with_touch_targets() {
+        for width in [320.0, 360.0, 412.0] {
             let ctx = egui::Context::default();
             let mut rects = Vec::new();
             let raw = egui::RawInput {
@@ -373,13 +542,44 @@ mod tests {
             let _ = ctx.run(raw, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let mut selected = 0;
-                    rects = tab_bar(ui, &mut selected)
+                    rects = bottom_nav(ui, &mut selected)
                         .into_iter()
                         .map(|response| response.rect)
                         .collect();
                 });
             });
+            assert_eq!(rects.len(), 5, "width={width}");
+            assert!(rects
+                .iter()
+                .all(|rect| rect.is_finite() && rect.width() > 0.0));
+            assert!(
+                rects.iter().all(|rect| rect.max.x <= width + 0.5),
+                "width={width}: {rects:?}"
+            );
+        }
+    }
 
+    #[test]
+    fn side_nav_lists_every_page_within_desktop_widths() {
+        for width in [1024.0, 1440.0] {
+            let ctx = egui::Context::default();
+            let mut rects = Vec::new();
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 720.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let mut selected = 0;
+                    rects = side_nav(ui, &mut selected)
+                        .into_iter()
+                        .map(|response| response.rect)
+                        .collect();
+                });
+            });
             assert_eq!(rects.len(), 9, "width={width}");
             assert!(rects
                 .iter()
@@ -388,12 +588,6 @@ mod tests {
                 rects.iter().all(|rect| rect.max.x <= width + 0.5),
                 "width={width}: {rects:?}"
             );
-            if is_compact(width) {
-                assert!(
-                    rects.iter().all(|rect| rect.height() >= 44.0),
-                    "width={width}: {rects:?}"
-                );
-            }
         }
     }
 

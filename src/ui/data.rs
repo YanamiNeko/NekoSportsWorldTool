@@ -1,6 +1,6 @@
 //! 数据页：学期完成度 / 违规自查 / 排行榜。
 
-use super::{mobile, theme, App};
+use super::{components, mobile, theme, App};
 use chrono::TimeZone;
 use crate::api::cheat::CheatReport;
 use crate::api::rank::RankRow;
@@ -49,170 +49,181 @@ impl App {
     }
 
     fn draw_data_content(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-
         // ── 学期完成度 ──────────────────────────────────────────
-        egui::CollapsingHeader::new("学期完成度")
-            .default_open(true)
-            .show(ui, |ui| {
-                mobile::row(ui, |ui| {
-                    match &self.data_page.semester {
-                        Some(s) => {
-                            let km = |m: f64| format!("{:.2}", m / 1000.0);
-                            ui.label(format!("学期：{}", s.sname));
-                            ui.separator();
-                            ui.label(format!(
-                                "有效次数：{}/{}",
-                                s.semester_valid_count, s.semester_count
-                            ));
-                            ui.separator();
-                            ui.label(format!(
-                                "有效里程：{}/{} km（总 {} km）",
-                                km(s.semester_valid_dis),
-                                km(s.semester_dis),
-                                km(s.semester_dis)
-                            ));
-                        }
-                        None => {
-                            ui.label("未拉取");
-                        }
+        components::card_titled(ui, "学期完成度", |ui| {
+            mobile::row(ui, |ui| {
+                match &self.data_page.semester {
+                    Some(s) => {
+                        let km = |m: f64| format!("{:.2}", m / 1000.0);
+                        ui.label(format!("学期：{}", s.sname));
+                        ui.separator();
+                        ui.label(format!(
+                            "有效次数：{}/{}",
+                            s.semester_valid_count, s.semester_count
+                        ));
+                        ui.separator();
+                        ui.label(format!(
+                            "有效里程：{}/{} km（总 {} km）",
+                            km(s.semester_valid_dis),
+                            km(s.semester_dis),
+                            km(s.semester_dis)
+                        ));
                     }
-                    if ui.add_enabled(!self.data_busy, theme::primary_btn("刷新")).clicked() {
-                        self.refresh_data_page();
+                    None => {
+                        ui.label("未拉取");
                     }
-                });
+                }
+                if ui
+                    .add_enabled(!self.data_busy, theme::primary_btn("刷新"))
+                    .clicked()
+                {
+                    self.refresh_data_page();
+                }
             });
+        });
 
         // ── 违规自查 ────────────────────────────────────────────
-        egui::CollapsingHeader::new("违规自查")
-            .default_open(true)
-            .show(ui, |ui| {
-                mobile::row(ui, |ui| {
-                    match &self.data_page.cheat {
-                        Some(c) => {
-                            if c.is_clean() {
-                                ui.colored_label(
-                                    theme::ok(),
-                                    "自查：正常（self=null）",
-                                );
-                            } else {
-                                ui.colored_label(
-                                    theme::err(),
-                                    format!("已被标记：{}", c.self_brief()),
-                                );
+        components::card_titled(ui, "违规自查", |ui| {
+            mobile::row(ui, |ui| {
+                match &self.data_page.cheat {
+                    Some(c) => {
+                        if c.is_clean() {
+                            ui.colored_label(theme::ok(), "自查：正常（self=null）");
+                        } else {
+                            ui.colored_label(theme::err(), format!("已被标记：{}", c.self_brief()));
+                        }
+                        ui.separator();
+                        ui.label(format!("全校违规：{} 条", c.list.len()));
+                        ui.toggle_value(&mut self.data_page.show_cheat_list, "查看列表");
+                    }
+                    None => {
+                        ui.label("未检查");
+                    }
+                }
+                if ui
+                    .add_enabled(!self.data_busy, theme::primary_btn("立即检查"))
+                    .clicked()
+                {
+                    self.refresh_cheat_only();
+                }
+            });
+            if self.data_page.show_cheat_list {
+                if let Some(c) = &self.data_page.cheat {
+                    egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                        if mobile::compact_ui(ui) {
+                            for r in &c.list {
+                                egui::Frame::group(ui.style()).show(ui, |ui| {
+                                    ui.label(format!(
+                                        "姓名：{}",
+                                        str_of(r, &["name", "userName", "studentName"])
+                                    ));
+                                    ui.label(format!(
+                                        "原因：{}",
+                                        str_of(r, &["reason", "punishReason", "cause", "type"])
+                                    ));
+                                    ui.label(format!(
+                                        "时间：{}",
+                                        time_of(r, &["createTime", "time", "date"])
+                                    ));
+                                    ui.label(format!("unid：{}", str_of(r, &["unid", "sid"])));
+                                });
+                                ui.add_space(4.0);
                             }
-                            ui.separator();
-                            ui.label(format!("全校违规：{} 条", c.list.len()));
-                            ui.toggle_value(&mut self.data_page.show_cheat_list, "查看列表");
-                        }
-                        None => {
-                            ui.label("未检查");
-                        }
-                    }
-                    if ui.add_enabled(!self.data_busy, theme::primary_btn("立即检查")).clicked() {
-                        self.refresh_cheat_only();
-                    }
-                });
-                if self.data_page.show_cheat_list {
-                    if let Some(c) = &self.data_page.cheat {
-                        egui::ScrollArea::vertical()
-                            .max_height(160.0)
-                            .show(ui, |ui| {
-                                if mobile::compact_ui(ui) {
+                        } else {
+                            egui::Grid::new("cheat_grid")
+                                .num_columns(4)
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.strong("姓名");
+                                    ui.strong("原因");
+                                    ui.strong("时间");
+                                    ui.strong("unid");
+                                    ui.end_row();
                                     for r in &c.list {
-                                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                                            ui.label(format!("姓名：{}", str_of(r, &["name", "userName", "studentName"])));
-                                            ui.label(format!("原因：{}", str_of(r, &["reason", "punishReason", "cause", "type"])));
-                                            ui.label(format!("时间：{}", time_of(r, &["createTime", "time", "date"])));
-                                            ui.label(format!("unid：{}", str_of(r, &["unid", "sid"])));
-                                        });
-                                        ui.add_space(4.0);
+                                        ui.label(str_of(r, &["name", "userName", "studentName"]));
+                                        ui.label(str_of(
+                                            r,
+                                            &["reason", "punishReason", "cause", "type"],
+                                        ));
+                                        ui.label(time_of(r, &["createTime", "time", "date"]));
+                                        ui.label(str_of(r, &["unid", "sid"]));
+                                        ui.end_row();
                                     }
-                                } else {
-                                    egui::Grid::new("cheat_grid")
-                                        .num_columns(4)
-                                        .striped(true)
-                                        .show(ui, |ui| {
-                                            ui.strong("姓名");
-                                            ui.strong("原因");
-                                            ui.strong("时间");
-                                            ui.strong("unid");
-                                            ui.end_row();
-                                            for r in &c.list {
-                                                ui.label(str_of(r, &["name", "userName", "studentName"]));
-                                                ui.label(str_of(r, &["reason", "punishReason", "cause", "type"]));
-                                                ui.label(time_of(r, &["createTime", "time", "date"]));
-                                                ui.label(str_of(r, &["unid", "sid"]));
-                                                ui.end_row();
-                                            }
-                                        });
+                                });
+                        }
+                    });
+                }
+            }
+        });
+
+        // ── 排行榜 ──────────────────────────────────────────────
+        components::card_titled(ui, "排行榜", |ui| {
+            mobile::row(ui, |ui| {
+                egui::ComboBox::from_id_salt("rank_combo")
+                    .selected_text(RANK_OPTIONS[self.data_page.rank_sel])
+                    .show_ui(ui, |ui| {
+                        for (i, opt) in RANK_OPTIONS.iter().enumerate() {
+                            ui.selectable_value(&mut self.data_page.rank_sel, i, *opt);
+                        }
+                    });
+                if ui
+                    .add_enabled(!self.data_busy, theme::primary_btn("查询"))
+                    .clicked()
+                {
+                    let (kind, subtype) = self.data_page.selection();
+                    self.refresh_rank(kind, subtype);
+                }
+                if self.data_busy {
+                    ui.label("拉取中…");
+                }
+            });
+            ui.add_space(4.0);
+            if self.data_page.rank_rows.is_empty() {
+                ui.label("（无数据）");
+            } else {
+                egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                    if mobile::compact_ui(ui) {
+                        for r in &self.data_page.rank_rows {
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.strong(format!("#{}  {}", r.sort, r.name));
+                                ui.label(format!(
+                                    "{:.2} km · {}",
+                                    r.length / 1000.0,
+                                    match r.gender {
+                                        1 => "男",
+                                        0 => "女",
+                                        _ => "-",
+                                    },
+                                ));
+                            });
+                            ui.add_space(4.0);
+                        }
+                    } else {
+                        egui::Grid::new("rank_grid")
+                            .num_columns(4)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.strong("名次");
+                                ui.strong("姓名");
+                                ui.strong("里程");
+                                ui.strong("性别");
+                                ui.end_row();
+                                for r in &self.data_page.rank_rows {
+                                    ui.monospace(r.sort.to_string());
+                                    ui.label(&r.name);
+                                    ui.monospace(format!("{:.2} km", r.length / 1000.0));
+                                    ui.label(match r.gender {
+                                        1 => "男",
+                                        0 => "女",
+                                        _ => "-",
+                                    });
+                                    ui.end_row();
                                 }
                             });
                     }
-                }
-            });
-
-        // ── 排行榜 ──────────────────────────────────────────────
-        egui::CollapsingHeader::new("排行榜")
-            .default_open(true)
-            .show(ui, |ui| {
-                mobile::row(ui, |ui| {
-                    egui::ComboBox::from_id_salt("rank_combo")
-                        .selected_text(RANK_OPTIONS[self.data_page.rank_sel])
-                        .show_ui(ui, |ui| {
-                            for (i, opt) in RANK_OPTIONS.iter().enumerate() {
-                                ui.selectable_value(&mut self.data_page.rank_sel, i, *opt);
-                            }
-                        });
-                    if ui.add_enabled(!self.data_busy, theme::primary_btn("查询")).clicked() {
-                        let (kind, subtype) = self.data_page.selection();
-                        self.refresh_rank(kind, subtype);
-                    }
-                    if self.data_busy {
-                        ui.label("拉取中…");
-                    }
                 });
-                ui.add_space(4.0);
-                if self.data_page.rank_rows.is_empty() {
-                    ui.label("（无数据）");
-                } else {
-                    egui::ScrollArea::vertical()
-                        .max_height(240.0)
-                        .show(ui, |ui| {
-                            if mobile::compact_ui(ui) {
-                                for r in &self.data_page.rank_rows {
-                                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                                        ui.strong(format!("#{}  {}", r.sort, r.name));
-                                        ui.label(format!(
-                                            "{:.2} km · {}",
-                                            r.length / 1000.0,
-                                            match r.gender { 1 => "男", 0 => "女", _ => "-" },
-                                        ));
-                                    });
-                                    ui.add_space(4.0);
-                                }
-                            } else {
-                                egui::Grid::new("rank_grid")
-                                    .num_columns(4)
-                                    .striped(true)
-                                    .show(ui, |ui| {
-                                        ui.strong("名次");
-                                        ui.strong("姓名");
-                                        ui.strong("里程");
-                                        ui.strong("性别");
-                                        ui.end_row();
-                                        for r in &self.data_page.rank_rows {
-                                            ui.monospace(r.sort.to_string());
-                                            ui.label(&r.name);
-                                            ui.monospace(format!("{:.2} km", r.length / 1000.0));
-                                            ui.label(match r.gender { 1 => "男", 0 => "女", _ => "-" });
-                                            ui.end_row();
-                                        }
-                                    });
-                            }
-                        });
-                }
-            });
+            }
+        });
     }
 }
 

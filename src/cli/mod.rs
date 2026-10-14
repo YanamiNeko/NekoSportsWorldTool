@@ -1,8 +1,7 @@
 //! 命令行入口：子命令分发 + 共享助手。
 //! 子命令实现见 ；数据文件与 GUI 共用（exe 同目录）。
 //!
-//! 青龙定时任务：首次 `login --user .. --pass .. --remember`，之后定时 `run`
-//! 即可（会话失效且已记住凭据时自动重登）。
+//! `run` 默认仅做本地参数预览，不自动登录或上传生成记录。
 
 mod cmds;
 
@@ -21,8 +20,9 @@ fn usage() {
   login   --user <手机号> --pass <密码> [--remember]
                                            登录并保存会话；--remember 同时保存凭据供自动重登
   logout                                   登出并清理本地会话
-  run    [--dist km] [--pace 秒/km] [--altitude 米或min-max] [--ago 分钟] [--days-ago 0-3 --time HH:MM] [--face 0|1] [--seed n] [--route legacy|road]
-                                           跑步全链：策略-点位-轨迹-提交-OBS-验证（--route 选择路线算法）
+  run    [--dry-run] [--dist km] [--pace 秒/km] [--altitude 米或min-max] [--ago 分钟] [--days-ago 0-3 --time HH:MM] [--face 0|1] [--seed n] [--route legacy|road]
+                                           仅本地参数预览，不登录、不联网、不上传，不生成完整轨迹
+         --upload --confirm-upload UPLOAD   显式表达上传意图；当前合成轨迹仍禁止上传
   template --file <GPX/JSON>                本地读取真实记录，分析海拔（不会上传）
   ai-list                                  AI 运动项目列表
   ai     --sport <id> [--mode min|count] [--score n]
@@ -38,7 +38,7 @@ fn usage() {
   rank   history --sort 1|2 [--gender 0|1] 历史榜
   update [--check]                        检查更新；默认下载并自替换（--check 仅检查）
 
-当天榜单通常在有效里程产生后才有数据；run 默认随机 1.0~1.5 km / 6~8 分配速 / 30-300 分钟前。"#
+当天榜单通常在有效里程产生后才有数据；run 的随机参数仅供本地预览，不代表真实运动记录。"#
     );
 }
 

@@ -82,13 +82,10 @@ fn cmd_logout() -> i32 {
 
 fn cmd_run(rest: &[&str]) -> i32 {
     let flags = parse_flags(rest);
-    let mut client = match make_client() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{e}");
-            return 1;
-        }
-    };
+    if let Err(error) = check_run_mode(&flags) {
+        eprintln!("{error}");
+        return 1;
+    }
     let dist_km: f32 = get(&flags, "dist")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.0);
@@ -167,7 +164,6 @@ fn cmd_run(rest: &[&str]) -> i32 {
         fmt_hms(start_ms)
     );
 
-    let mut log = logger();
     let params = crate::api::flow::RunParams {
         dist,
         dur,
@@ -178,20 +174,77 @@ fn cmd_run(rest: &[&str]) -> i32 {
         seed,
         route_mode,
     };
-    match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
-        Ok(out) => {
-            println!(
-                "跑步提交成功 rrid={} uuid={} obs={}/2 verify={}",
-                out.result.rrid,
-                out.result.uuid,
-                out.obs_ok,
-                if out.detail_ok { "通过" } else { "未通过" }
-            );
+    match crate::api::flow::preview_run_params(&params) {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
             0
         }
-        Err(e) => {
-            eprintln!("跑步提交失败: {e}");
+        Err(error) => {
+            eprintln!("参数预览失败: {error}");
             1
+        }
+    }
+}
+
+fn check_run_mode(flags: &[(String, String)]) -> Result<(), String> {
+    let upload = get(flags, "upload").is_some();
+    let dry_run = get(flags, "dry-run").is_some();
+    let confirmation = get(flags, "confirm-upload");
+    if upload && dry_run {
+        return Err("--upload 与 --dry-run 不能同时使用".into());
+    }
+    if confirmation.is_some() && !upload {
+        return Err("--confirm-upload 必须与 --upload 一起使用".into());
+    }
+    if upload {
+        if confirmation != Some("UPLOAD") {
+            return Err("上传意图需 --confirm-upload UPLOAD 明确确认；确认不能证明数据真实或学校允许".into());
+        }
+        return crate::api::submit::ensure_run_upload_allowed();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+
+    #[test]
+    fn default_and_explicit_dry_run_work_without_login() {
+        for mode in [Vec::new(), vec!["--dry-run"]] {
+            let mut args = vec!["--dist", "1.5", "--pace", "6:00", "--seed", "1"];
+            args.extend(mode);
+            assert_eq!(cmd_run(&args), 0);
+        }
+    }
+
+    #[test]
+    fn upload_requires_confirmation_and_still_rejects_generated_data() {
+        for confirmation in [None, Some("WRONG"), Some("UPLOAD")] {
+            let mut args = vec!["--upload"];
+            if let Some(value) = confirmation {
+                args.extend(["--confirm-upload", value]);
+            }
+            let error = check_run_mode(&parse_flags(&args)).unwrap_err();
+            if confirmation == Some("UPLOAD") {
+                assert_eq!(error, crate::api::submit::GENERATED_UPLOAD_BLOCKED);
+            } else {
+                assert!(error.contains("明确确认"));
+            }
+            assert_eq!(cmd_run(&args), 1);
+        }
+    }
+
+    #[test]
+    fn conflicting_or_unpaired_upload_flags_fail() {
+        for args in [
+            vec!["--dry-run", "--upload"],
+            vec!["--confirm-upload", "UPLOAD"],
+        ] {
+            assert!(check_run_mode(&parse_flags(&args)).is_err());
+            assert_eq!(cmd_run(&args), 1);
         }
     }
 }

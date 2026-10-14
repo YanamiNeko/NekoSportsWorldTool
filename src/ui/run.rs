@@ -1,4 +1,4 @@
-//! 跑步页：恒 sportType=1；距离/配速范围 + 开始时间（随机或指定，最多前 3 天）。
+//! 跑步页：本地参数预览；距离/配速范围 + 开始时间（随机或指定，最多前 3 天）。
 //!
 //! 开始时间：「日期」下拉（今天 / 1-3 天前）两种模式共用；随机模式在该日 7:00-20:00
 //! 内抽样，并保证「开始 + 用时」不越过当前时刻；指定模式完全按用户填写的时/分
@@ -13,7 +13,7 @@ use eframe::egui;
 /// 随机时刻窗口（含端点）：7:00-20:00。
 const RAND_HOUR_LO: u32 = 7;
 const RAND_HOUR_HI: u32 = 20;
-/// flow.rs 提交时会给开始时间加 0-4s 抖动，随机模式抽样时预留，避免「开始 + 用时」越过当前时刻。
+/// 预览参数保留 0-4s 时间余量，避免「开始 + 用时」越过当前时刻。
 const JITTER_MARGIN_MS: i64 = 5_000;
 
 /// 指定日期（days_ago 天前）的 7:00-20:00 内均匀抽样一个时刻，且不晚于 latest_ms。
@@ -75,7 +75,7 @@ pub struct RunPage {
     pub hour: i64,
     pub minute: i64,
     pub face_check: bool,
-    /// 预计算方案：参数变更时重抽样，提交直接使用
+    /// 预计算方案：参数变更时重抽样，预览直接使用
     pub plan: Option<RunPlan>,
     /// 路线算法模式
     pub route_mode: RouteMode,
@@ -89,7 +89,7 @@ pub struct RunPage {
     pub map_fitted: bool,
 }
 
-/// 一次提交的确定方案（进入页面/参数变更时抽样生成）。
+/// 一次预览的确定方案（进入页面/参数变更时抽样生成）。
 #[derive(Debug, Clone)]
 pub struct RunPlan {
     pub dist_min: f32,
@@ -130,7 +130,7 @@ impl RunPage {
         self.start_mode == 0 || (p.hour == self.hour && p.minute == self.minute)
     }
 
-    /// 开跑时刻上限：当前时刻 - 用时 - 抖动余量（flow.rs 提交时还会再加 0-4s）。
+    /// 开始时刻上限：当前时刻 - 用时 - 抖动余量。
     fn latest_start_ms(dur: i64) -> i64 {
         crate::crypto::envelope::now_ms() - dur * 1000 - JITTER_MARGIN_MS
     }
@@ -381,7 +381,7 @@ impl App {
                     if t.timestamp_millis() > crate::crypto::envelope::now_ms() {
                         ui.colored_label(
                             theme::warn(),
-                            "指定时刻在今天且尚未到达，将按当前时间提交",
+                            "指定时刻在今天且尚未到达，预览按当前时间计算",
                         );
                     }
                 }
@@ -415,7 +415,7 @@ impl App {
                 format!("{}:{:02}", s / 60, s % 60)
             }
         };
-        // 参数变更时补方案；显示本次提交的确定方案
+        // 参数变更时补方案；显示本次预览的确定方案
         self.run_page.ensure_plan();
         self.draw_run_warnings(ui);
         let plan_label = match &self.run_page.plan {
@@ -444,23 +444,16 @@ impl App {
         self.draw_run_map(ui);
 
         ui.add_space(8.0);
-        let enabled = !self.run_busy && self.session.is_some();
-        let btn = if self.run_busy {
-            theme::primary_btn("提交中…")
-        } else {
-            theme::primary_btn("开始跑步")
-        };
+        let enabled = !self.run_busy;
+        let btn = theme::primary_btn("本地参数预览（不上传）");
         mobile::row(ui, |ui| {
             if ui.add_enabled(enabled, btn).clicked() {
-                self.start_run();
-            }
-            if self.session.is_none() {
-                ui.label("（请先登录）");
+                self.preview_run();
             }
         });
     }
 
-    /// 开始时间相关的提示。须在 `ensure_plan()` 之后调用，才对得上本次提交时刻。
+    /// 开始时间相关的提示。须在 `ensure_plan()` 之后调用，才对得上本次预览时刻。
     fn draw_run_warnings(&self, ui: &mut egui::Ui) {
         let page = &self.run_page;
         if page.start_mode == 0 {
@@ -491,7 +484,7 @@ impl App {
             .single()
         {
             if t.timestamp_millis() > crate::crypto::envelope::now_ms() {
-                ui.colored_label(theme::warn(), "指定时刻在今天且尚未到达，将按当前时间提交");
+                ui.colored_label(theme::warn(), "指定时刻在今天且尚未到达，预览按当前时间计算");
             }
         }
     }
@@ -536,10 +529,10 @@ impl App {
                         Err(e) => self.status = format!("路线预览失败：{e}"),
                     }
                 } else {
-                    self.status = "无打卡点缓存，提交后可回显轨迹".into();
+                    self.status = "无打卡点缓存，暂时无法预览路线".into();
                 }
             } else {
-                self.status = "无打卡点缓存，提交后可回显轨迹".into();
+                self.status = "无打卡点缓存，暂时无法预览路线".into();
             }
         }
 
@@ -683,8 +676,7 @@ impl App {
         self.run_page.map.interact(ui, canvas);
     }
 
-    fn start_run(&mut self) {
-        // 参数变更时补齐方案；提交直接使用预计算值
+    fn preview_run(&mut self) {
         self.run_page.ensure_plan();
         let page = &mut self.run_page;
         let plan = match page.plan.clone() {
@@ -719,55 +711,27 @@ impl App {
         } else {
             "legacy".into()
         };
-        let _ = crate::api::model::save_config(&self.config);
-
-        let identity = self.identity.clone();
-        let session = match self.session.clone() {
-            Some(s) => s,
-            None => {
-                self.status = "请先登录".into();
-                return;
-            }
+        let params = crate::api::flow::RunParams {
+            dist,
+            dur,
+            start_ms,
+            face_check,
+            manual_altitude,
+            manual_altitude_range,
+            seed: plan.seed,
+            route_mode,
         };
-        self.run_busy = true;
-        self.status = "跑步提交中…".into();
-        let seed = plan.seed;
-        self.spawn_job(move |tx| {
-            let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
-            let params = crate::api::flow::RunParams {
-                dist,
-                dur,
-                start_ms,
-                face_check,
-                manual_altitude,
-                manual_altitude_range,
-                seed,
-                route_mode,
-            };
-            let payload = match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
-                Ok(out) => {
-                    log(&format!(
-                        "全链完成 rrid={} obs={}/2 verify={} uuid={}",
-                        out.result.rrid, out.obs_ok, out.detail_ok, out.result.uuid
-                    ));
-                    serde_json::json!({
-                        "ok": true, "rrid": out.result.rrid,
-                        "obs_ok": out.obs_ok, "verify": out.detail_ok,
-                        "uuid": out.result.uuid,
-                        "dist": out.result.total_dis, "dur": out.result.total_time,
-                        "steps": out.result.total_steps, "avg_step_freq": out.result.avg_step_freq,
-                        "calorie": out.result.calorie, "avg_power": out.result.avg_power,
-                        "sel_distance": out.result.sel_distance, "start": out.result.start_ms,
-                    })
-                }
-                Err(e) => {
-                    log(&format!("跑步提交失败: {e}"));
-                    serde_json::json!({ "ok": false, "message": e })
-                }
-            };
-            tx.send(format!("__RUN_DONE__{payload}")).ok();
-        });
+        match crate::api::flow::preview_run_params(&params) {
+            Ok(lines) => {
+                let _ = crate::api::model::save_config(&self.config);
+                self.status = "参数预览完成，未上传".into();
+                self.popup = Some(super::PopupInfo {
+                    title: "本地参数预览".into(),
+                    lines,
+                });
+            }
+            Err(error) => self.status = error,
+        }
     }
 }
 
@@ -801,7 +765,7 @@ mod tests {
 
     /// 随机模式：整段跑步（含 flow.rs 的 0-4s 抖动）都不得越过当前时刻。
     ///
-    /// 指定模式不适用：用户指定今天 12:00 而此刻已 12:05 时，原行为就是照常提交。
+    /// 指定模式不适用：用户指定今天 12:00 而此刻已 12:05 时，预览沿用原时刻。
     fn assert_random_not_future(p: &RunPlan) {
         let now = crate::crypto::envelope::now_ms();
         assert!(
@@ -899,7 +863,7 @@ mod tests {
         }
     }
 
-    /// 今天 + 已过去的指定时刻：按原时刻提交，不动它。
+    /// 今天 + 已过去的指定时刻：按原时刻预览，不动它。
     #[test]
     fn specified_today_past_hour_is_kept() {
         let mut p = page(1, 0);
@@ -1070,7 +1034,7 @@ mod tests {
         assert_start_not_future(&plan);
     }
 
-    /// 今天 + 指定时刻且该时刻已过：照常提交，不再回退（用户指定的时刻说了算）。
+    /// 今天 + 指定时刻且该时刻已过：照常预览，不再回退（用户指定的时刻说了算）。
     #[test]
     fn specified_past_time_is_committed_as_is() {
         let now = Local::now();

@@ -17,6 +17,14 @@ use serde_json::{json, Map, Value};
 
 pub const RECORD_PATH: &str = "/api/v70260/runnings/save/record";
 
+pub const GENERATED_UPLOAD_BLOCKED: &str =
+    "当前跑步功能仅生成合成轨迹，已禁止上传；真实成绩请使用学校认可的官方采集与提交流程";
+
+/// 当前没有真实采集记录入口，任何调用方都不能将生成记录上传。
+pub fn ensure_run_upload_allowed() -> Result<(), String> {
+    Err(GENERATED_UPLOAD_BLOCKED.into())
+}
+
 /// Android 10s 窗（id 种子 60000）。
 fn android_tensec(track: &Track, start_ms: i64, kind: &str) -> Vec<Value> {
     let locs = &track.locations;
@@ -104,8 +112,9 @@ pub struct SubmitResult {
     pub sel_distance: i64,
 }
 
-/// 提交跑步记录（sportType=1 自由跑 + 实时五点）。
+/// 提交跑步记录（当前由安全闸门拒绝生成轨迹上传）。
 pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnMut(&str)) -> Result<SubmitResult, String> {
+    ensure_run_upload_allowed()?;
     let track = &p.track;
     let start_coordinate = track.validate_consistency()?;
     if p.five_point_json.is_empty() { return Err("五点轨迹不能为空".into()); }
@@ -247,4 +256,42 @@ fn client_token(client: &ApiClient) -> String {
 fn truncate_json(v: &Value) -> String {
     let s = v.to_string();
     s.chars().take(240).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_is_blocked_before_track_validation_or_network() {
+        let mut client = ApiClient::new(HeaderIdentity::default(), None);
+        let params = SubmitParams {
+            track: Track {
+                totalTime: 0,
+                totalDistance: 0.0,
+                validDistance: 0.0,
+                validTime: 0,
+                startTime: 0,
+                startLatitude: 0.0,
+                startLongitude: 0.0,
+                locations: Vec::new(),
+                totalSteps: 0,
+                speedPerTenSec: Vec::new(),
+                stepsPerTenSec: Vec::new(),
+                segments: Vec::new(),
+            },
+            uid: 0,
+            selected_unid: 0,
+            policy: 0,
+            policy_ts: 0,
+            min_distance: 0,
+            weight: 0.0,
+            face_check: 0,
+            five_point_json: String::new(),
+            address: String::new(),
+        };
+        let mut log = |_: &str| panic!("被阻止的上传不应产生网络日志");
+        let error = submit_record(&mut client, &params, &mut log).err().unwrap();
+        assert_eq!(error, GENERATED_UPLOAD_BLOCKED);
+    }
 }

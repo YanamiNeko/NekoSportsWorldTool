@@ -1,5 +1,5 @@
-//! 全链编排：policy → 实时点位 → 轨迹生成 → 提交 → OBS → 详情验证。
-//! 由 UI 后台线程调用，log 闭包回传日志。
+//! 跑步参数预览与历史提交编排。
+//! 生成轨迹的提交链保留为受保护兼容代码，不允许当前调用方上传。
 
 use super::client::ApiClient;
 use super::model::Session;
@@ -16,10 +16,10 @@ use serde_json::Value;
 
 #[derive(Clone, Copy)]
 pub struct RunParams {
-    /// 距离（米）与时长（秒）已由 UI 参数解析。
+    /// 距离（米）与时长（秒）已由 CLI/UI 参数解析。
     pub dist: f64,
     pub dur: i64,
-    /// 开始时间（毫秒）。
+    /// 开始时间（毫秒），仅用于本地预览或受保护兼容链。
     pub start_ms: i64,
     pub face_check: i64,
     /// 用户手动填写的绝对海拔（米）；None 使用生成器海拔。
@@ -29,6 +29,41 @@ pub struct RunParams {
     pub seed: u64,
     /// 路线算法模式。
     pub route_mode: RouteMode,
+}
+
+/// 仅校验并展示参数，不读取会话、不生成上传载荷、不访问网络。
+pub fn preview_run_params(params: &RunParams) -> Result<Vec<String>, String> {
+    if !params.dist.is_finite() || params.dist <= 0.0 || params.dur <= 0 {
+        return Err("预览距离和时长必须为正数".into());
+    }
+    let start = chrono::Local
+        .timestamp_millis_opt(params.start_ms)
+        .single()
+        .ok_or("预览开始时间无效")?
+        .format("%Y-%m-%d %H:%M:%S");
+    let altitude = if let Some(range) = params.manual_altitude_range {
+        if !(-500.0..=9000.0).contains(&range.min_m)
+            || !(-500.0..=9000.0).contains(&range.max_m)
+            || range.min_m > range.max_m
+        {
+            return Err("预览海拔范围无效".into());
+        }
+        format!("手动海拔范围：{}–{} m", range.min_m, range.max_m)
+    } else if let Some(value) = params.manual_altitude {
+        if !value.is_finite() || !(-500.0..=9000.0).contains(&value) {
+            return Err("预览海拔必须是有限数值".into());
+        }
+        format!("手动海拔：{value} m")
+    } else {
+        "海拔来源：生成器（非实测）".into()
+    };
+    Ok(vec![
+        "仅参数预览：不登录、不联网、不上传，也不验证运动是否真实发生。".into(),
+        format!("距离：{:.2} km · 时长：{} s · 开始：{start}", params.dist / 1000.0, params.dur),
+        format!("路线来源：程序生成（{:?}）", params.route_mode),
+        altitude,
+        super::submit::GENERATED_UPLOAD_BLOCKED.into(),
+    ])
 }
 
 pub struct RunOutcome {
@@ -47,6 +82,7 @@ pub fn run_full_flow(
     params: &RunParams,
     log: &mut dyn FnMut(&str),
 ) -> Result<RunOutcome, String> {
+    super::submit::ensure_run_upload_allowed()?;
     let sess: Session = client.login.clone().ok_or("未登录")?;
 
     // ① policy
@@ -387,3 +423,42 @@ use chrono::TimeZone as _;
 
 /// 最近一次详情验证的完整响应（达标判定明细在 reasonList）。
 pub static VERIFY_DETAIL: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> RunParams {
+        RunParams {
+            dist: 1500.0,
+            dur: 600,
+            start_ms: 1_700_000_000_000,
+            face_check: 1,
+            manual_altitude: None,
+            manual_altitude_range: None,
+            seed: 1,
+            route_mode: RouteMode::Legacy,
+        }
+    }
+
+    #[test]
+    fn preview_describes_generated_data_and_rejects_invalid_values() {
+        let lines = preview_run_params(&params()).unwrap();
+        assert!(lines.iter().any(|line| line.contains("不上传")));
+        assert!(lines.iter().any(|line| line.contains("程序生成")));
+        let mut invalid = params();
+        invalid.dist = f64::NAN;
+        assert!(preview_run_params(&invalid).is_err());
+        invalid = params();
+        invalid.manual_altitude = Some(f64::INFINITY);
+        assert!(preview_run_params(&invalid).is_err());
+    }
+
+    #[test]
+    fn generated_flow_is_blocked_before_login_or_network() {
+        let mut client = ApiClient::new(super::super::model::HeaderIdentity::default(), None);
+        let mut log = |_: &str| panic!("被阻止的流程不应开始请求");
+        let error = run_full_flow(&mut client, &params(), &mut log).err().unwrap();
+        assert_eq!(error, super::super::submit::GENERATED_UPLOAD_BLOCKED);
+    }
+}

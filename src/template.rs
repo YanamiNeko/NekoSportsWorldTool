@@ -74,6 +74,10 @@ fn parse_gpx(text: &str) -> Result<Vec<ElevationSample>, String> {
         let lat = attr(head, "lat");
         let lon = attr(head, "lon");
         let body = &rest[end + 1..];
+        if head.trim_end().ends_with('/') {
+            rest = body;
+            continue;
+        }
         let Some(close) = body.find("</trkpt>") else { break };
         let point = &body[..close];
         if let Some(ele) = tag_number(point, "ele") {
@@ -147,6 +151,56 @@ mod tests {
         assert_eq!(points.len(), 2);
         assert_eq!(points[0].elevation_m, 3.3);
         assert_eq!(points[1].latitude, Some(39.91));
+    }
+
+    #[test]
+    fn skips_self_closing_point_before_elevation() {
+        let gpx = r#"<gpx><trk><trkseg><trkpt lat="39.9" lon="116.4"/><trkpt lat="39.91" lon="116.41"><ele>17.1</ele></trkpt></trkseg></trk></gpx>"#;
+        assert_eq!(
+            parse_gpx(gpx).unwrap(),
+            vec![ElevationSample {
+                latitude: Some(39.91),
+                longitude: Some(116.41),
+                elevation_m: 17.1,
+            }]
+        );
+    }
+
+    #[test]
+    fn preserves_samples_around_empty_gpx_points() {
+        for empty in [
+            "<trkpt/>",
+            r#"<trkpt lat="1" lon="2"/>"#,
+            r#"<trkpt lat="1" lon="2" />"#,
+            "<trkpt lat=\"1\" lon=\"2\"\n/>",
+            r#"<trkpt lat="1" lon="2"></trkpt>"#,
+        ] {
+            let gpx = format!(
+                r#"<gpx><trk><trkseg><trkpt lat="39.9" lon="116.4"><ele>3.3</ele></trkpt>{empty}{empty}<trkpt lat="39.91" lon="116.41"><ele>17.1</ele></trkpt>{empty}</trkseg></trk></gpx>"#
+            );
+            assert_eq!(
+                parse_gpx(&gpx).unwrap(),
+                vec![
+                    ElevationSample {
+                        latitude: Some(39.9),
+                        longitude: Some(116.4),
+                        elevation_m: 3.3,
+                    },
+                    ElevationSample {
+                        latitude: Some(39.91),
+                        longitude: Some(116.41),
+                        elevation_m: 17.1,
+                    },
+                ],
+                "空点形式: {empty}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_gpx_with_only_empty_points() {
+        let gpx = r#"<gpx><trk><trkseg><trkpt/><trkpt lat="1" lon="2" /><trkpt lat="3" lon="4"></trkpt><trkpt/></trkseg></trk></gpx>"#;
+        assert!(parse_gpx(gpx).unwrap().is_empty());
     }
 
     #[test]

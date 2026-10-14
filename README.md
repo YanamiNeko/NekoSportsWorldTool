@@ -12,7 +12,7 @@
 
 ## 功能
 
-- **跑步**：一键全链（策略 → 打卡点 → 轨迹 → 提交 → OBS → 验证），轨迹按打卡点自然生成，开始时间支持随机或指定到前 3 天
+- **跑步**：一键全链（策略 → 打卡点 → 轨迹 → 提交 → OBS → 验证），轨迹按打卡点自然生成，开始时间支持随机或指定到前 3 天；road 模式按 policy 区分有效里程和慢速段，路线颜色可选全绿色或灰绿混合
 - **AI 运动**：任务 / 自由练习双模式，批量补签（前 60 天 × 多项目）
 - **数据**：学期完成度、违规自查、排行榜（个人/班级/院系 × 日/月、室内榜、历史榜）、个人主页
 - **登录**：支持人机验证自动通过
@@ -37,6 +37,8 @@
 ```text
 NekoSportsWorldTool login --user <手机号> --pass <密码> --remember
 NekoSportsWorldTool run                                  # 一键跑步（--altitude 17.2 固定海拔，或 11.6-22.8 映射到区间）
+NekoSportsWorldTool run --track-color full-green         # 有效段绿色（默认）；也可选 half-green-gray
+NekoSportsWorldTool run --route road --invalid 0.08     # road 模式慢速段目标比例
 NekoSportsWorldTool ai --sport 2 --score 26000           # AI 运动
 NekoSportsWorldTool rank main --type 1 --sort 1          # 排行榜
 NekoSportsWorldTool update [--check]           # 自动更新（--check 仅检查不下载）

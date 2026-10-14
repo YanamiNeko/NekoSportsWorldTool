@@ -6,9 +6,9 @@
 use super::geom::{fmt_gain_time, round_to, Rng};
 use super::model::GenPoint;
 
-pub fn apply_post_fixes(locs: &mut [GenPoint], rng: &mut Rng, start_ms: i64) {
-    // 结尾断崖：最后正常点压速 + 时间自然延伸 6-14s
-    if locs.len() >= 4 {
+pub fn apply_post_fixes(locs: &mut [GenPoint], rng: &mut Rng, start_ms: i64, cliff: bool) {
+    // 结尾断崖：最后正常点压速 + 时间自然延伸 6-14s（road 模式自行管理慢速尾段，故关闭）
+    if cliff && locs.len() >= 4 {
         let mut ci = locs.len() - 1;
         while ci > 0 && locs[ci].ptype == -1 {
             ci -= 1;

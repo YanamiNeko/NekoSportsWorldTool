@@ -123,9 +123,25 @@ fn cmd_run(rest: &[&str]) -> i32 {
         seed
     };
     let cfg = model::load_config();
+    let track_color_mode = match get(&flags, "track-color") {
+        None => cfg.track_color_mode,
+        Some("mixed") | Some("gray") | Some("grey") | Some("half-green-gray") => {
+            model::TrackColorMode::HalfGreenGray
+        }
+        Some("green") | Some("full-green") | Some("full_green") => {
+            model::TrackColorMode::FullGreen
+        }
+        Some(value) => {
+            eprintln!("--track-color 必须是 full-green 或 half-green-gray（收到 {value}）");
+            return 1;
+        }
+    };
     let route_mode = crate::track::generate_road::RouteMode::from_str(
         get(&flags, "route").unwrap_or(&cfg.route_mode),
     );
+    let invalid_ratio: f64 = get(&flags, "invalid")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(cfg.invalid_ratio);
 
     let dist = if dist_km > 0.0 {
         dist_km as f64 * 1000.0
@@ -175,8 +191,10 @@ fn cmd_run(rest: &[&str]) -> i32 {
         face_check: face as i64,
         manual_altitude,
         manual_altitude_range,
+        track_color_mode,
         seed,
         route_mode,
+        invalid_ratio,
     };
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {

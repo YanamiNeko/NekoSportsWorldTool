@@ -13,7 +13,9 @@ pub mod wire;
 mod tests {
     use super::generate_road::build_road;
     use super::generator::build;
+    use super::generator::build_with_color_mode;
     use super::geom::{MET_PER_DEG_LAT, MET_PER_DEG_LNG};
+    use crate::api::model::TrackColorMode;
 
     use super::wire::*;
 
@@ -85,7 +87,10 @@ mod tests {
         let pts = sample_points();
         let net = road_grid();
         let start = 1_788_958_186_123i64;
-        let track = build_road(3300.0, 1220, 42, start, &pts, &pts[1..], &net).expect("build_road");
+        let floor = crate::track::generator::SPEED_FLOOR;
+        let ceil = crate::track::generator::SPEED_CEIL;
+        let track = build_road(3300.0, 1220, 42, start, &pts, &pts[1..], &net, floor, ceil, 0.0, 0.15)
+            .expect("build_road");
         assert!(
             (track.totalDistance - 3300.0).abs() < 0.5,
             "dist={}",
@@ -98,6 +103,49 @@ mod tests {
         assert_eq!(track.locations.last().unwrap().ptype, 6);
         // 步数为正
         assert!(track.totalSteps > 500, "steps={}", track.totalSteps);
+    }
+
+    /// Road 模式不合格路段：有效里程命中目标、总里程更大、慢速点低于窗口下限。
+    #[test]
+    fn test_build_road_valid_distance() {
+        let pts = sample_points();
+        let net = road_grid();
+        let start = 1_788_958_186_123i64;
+        let (floor, ceil) = (1.90, 6.30);
+        let track =
+            build_road(3000.0, 1200, 7, start, &pts, &pts[1..], &net, floor, ceil, 0.10, 0.15)
+                .expect("build_road");
+        // 有效里程命中目标（±1m）
+        assert!(
+            (track.validDistance - 3000.0).abs() < 1.0,
+            "valid={}",
+            track.validDistance
+        );
+        // 总里程 > 有效里程（慢速段额外叠加）
+        assert!(
+            track.totalDistance > track.validDistance + 100.0,
+            "total={} valid={}",
+            track.totalDistance,
+            track.validDistance
+        );
+        // 不合格比例 ≈ 10%
+        let ratio = 1.0 - track.validDistance / track.totalDistance;
+        assert!((ratio - 0.10).abs() < 0.03, "ratio={ratio}");
+        // 存在低于窗口下限的慢速点
+        assert!(
+            track.locations.iter().any(|p| p.avgSpeed > 0.0 && p.avgSpeed < floor),
+            "应存在低于窗口下限的慢速点"
+        );
+        assert!(
+            track.locations.iter().any(|p| p.ptype == -1 && p.locType == 4),
+            "慢速段应保留灰色无效点标记"
+        );
+        // 有效里程/时间的累计单调不减
+        let mut prev = 0.0;
+        for p in &track.locations {
+            assert!(p.validDis >= prev - 1e-6, "validDis 回退");
+            prev = p.validDis;
+        }
     }
 
     /// 轨迹生成抽样断言：距离精确、采样间隔分布、哨兵/断崖/位移语义。
@@ -157,6 +205,43 @@ mod tests {
         assert_eq!(track.locations[0].coorType, "gcj02");
         // 步数为正、步频在合理范围
         assert!(track.totalSteps > 500, "steps={}", track.totalSteps);
+    }
+
+    #[test]
+    fn full_green_mode_uses_only_green_track_points() {
+        let track = build_with_color_mode(
+            3300.0,
+            1220,
+            42,
+            (38.9, 121.54),
+            1_788_958_186_123,
+            &sample_points(),
+            TrackColorMode::FullGreen,
+        );
+        let last = track.locations.len() - 1;
+        for (i, point) in track.locations.iter().enumerate() {
+            let expected_type = if i == 1 { 5 } else if i == last { 6 } else { 0 };
+            assert_eq!(point.ptype, expected_type);
+            assert_eq!(point.locType, 1);
+            assert_eq!(point.state, 1);
+            assert_eq!(point.bdG, 1);
+        }
+    }
+
+    #[test]
+    fn mixed_mode_preserves_legacy_color_variation() {
+        let track = build_with_color_mode(
+            3300.0,
+            1220,
+            42,
+            (38.9, 121.54),
+            1_788_958_186_123,
+            &sample_points(),
+            TrackColorMode::HalfGreenGray,
+        );
+        assert!(track.locations.iter().any(|point| {
+            !matches!(point.ptype, 0 | 5 | 6) || point.state != 1 || point.bdG != 1
+        }));
     }
 
     /// 打卡点吸附：轨迹必过点位（<40m 落位）。

@@ -12,6 +12,12 @@ pub struct PolicyInfo {
     pub policy: i64,
     pub min_distance: i64,
     pub valid_time: i64,
+    /// 配速上限（分钟/公里，最快），policy 里为 speedTop（如 3 = 3'00"/km）。
+    pub speed_top: f64,
+    /// 配速下限（分钟/公里，最慢），policy 里为 speedBottom（如 10 = 10'00"/km）。
+    pub speed_bottom: f64,
+    /// 允许的配速不合格比例（0-1）；policy 里 unqualifiedRate（如 15 表示 15%）。
+    pub unqualified_rate: f64,
     /// 必经点（BD 系，与打卡点同系），policy 响应里若有则返回。
     pub must_points: Vec<(f64, f64)>,
 }
@@ -69,6 +75,10 @@ pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
     let rule = get_field(&biz, "runRuleModel")
         .cloned()
         .unwrap_or(Value::Null);
+    let unqualified = rule
+        .get("unqualifiedRate")
+        .and_then(|t| t.as_f64())
+        .unwrap_or(15.0);
     Ok(PolicyInfo {
         timestamp,
         policy,
@@ -77,6 +87,13 @@ pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
             .and_then(|t| t.as_i64())
             .unwrap_or(1000),
         valid_time: rule.get("validTime").and_then(|t| t.as_i64()).unwrap_or(0),
+        speed_top: rule.get("speedTop").and_then(|t| t.as_f64()).unwrap_or(3.0),
+        speed_bottom: rule.get("speedBottom").and_then(|t| t.as_f64()).unwrap_or(10.0),
+        unqualified_rate: if unqualified > 1.0 {
+            unqualified / 100.0
+        } else {
+            unqualified
+        },
         must_points: extract_must_points(&biz),
     })
 }

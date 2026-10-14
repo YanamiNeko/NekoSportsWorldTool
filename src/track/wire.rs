@@ -74,7 +74,8 @@ pub fn conv_point(p: &GenPoint, start_ms: i64) -> Value {
     })
 }
 
-/// 五点实体（实时点位 → 跑完态 isPass=true）。
+/// 五点实体（实时点位 → 跑完态）。提交成功后这些点都已被轨迹经过，
+/// 因此显式写入 isFixed=1，详情页才会显示打卡完成标记。
 pub fn five_point_payload(points: &[Value], start_ms: i64) -> Vec<Value> {
     points
         .iter()
@@ -85,7 +86,7 @@ pub fn five_point_payload(points: &[Value], start_ms: i64) -> Vec<Value> {
                 "glat": p["glat"].as_f64().unwrap_or(0.0),
                 "glon": p["glon"].as_f64().unwrap_or(0.0),
                 "id": i as i64 + 1,
-                "isFixed": p["isFixed"].as_i64().unwrap_or(0),
+                "isFixed": 1,
                 "isPass": true,
                 "lat": p["lat"].as_f64().unwrap_or(0.0),
                 "lon": p["lon"].as_f64().unwrap_or(0.0),
@@ -150,6 +151,22 @@ mod validation_tests {
         assert!(laps.iter().all(|lap| lap["elevationGain"] == 0.0));
         assert!(laps.iter().all(|lap| lap["endAltAbs"] == 36.75));
         assert!(laps.iter().all(|lap| lap["endAltRel"] == 0.0));
+    }
+
+    #[test]
+    fn completed_checkpoints_are_marked_fixed() {
+        let points = vec![json!({
+            "lat": 39.4,
+            "lon": 116.2,
+            "glat": 39.4,
+            "glon": 116.2,
+            "isFixed": 0,
+            "pointName": "P1"
+        })];
+        let payload = five_point_payload(&points, 1_700_000_000_000);
+        assert_eq!(payload[0]["isFixed"], 1);
+        assert_eq!(payload[0]["isPass"], true);
+        assert_eq!(payload[0]["pointName"], "P1");
     }
 }
 

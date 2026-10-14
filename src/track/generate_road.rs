@@ -8,13 +8,13 @@
 //!
 //! 协议字段/哨兵/断崖/吸附/10s 窗与经典模式完全一致。
 
-use super::generator::{SPEED_CEIL, SPEED_FLOOR};
 use super::geom::{
     fmt_gain_time, ring_point_at, round_to, to_bd, wgs84_to_bd09, Rng, MET_PER_DEG_LAT,
     MET_PER_DEG_LNG,
 };
 use super::model::{GenPoint, Segment, TenWindow, Track};
 use super::postfix::apply_post_fixes;
+use crate::api::model::TrackColorMode;
 use route_planner::{
     fatigue_from_km, gait, ou_cadence_series, pace_profile, plan_route_split, point_in_polygon,
     Coord, GpsJitter, KinParams, RoadGraph, Route, RouteOptions, Sdf,
@@ -198,17 +198,64 @@ fn route_ring(route: &Route, c_lat: f64, c_lng: f64) -> (Vec<(f64, f64)>, Vec<f6
 /// `route_bd[0]` 为起点，`route_bd[1..]` 为软引导点（用于方向锚点，不必全经过）；
 /// `must_bd` 为强制必经点（按序，可为空，最终必达）；吸附在 `route_bd` 全量上做。
 pub fn build_road(
-    dist: f64,
-    dur: i64,
+    valid_dist: f64,
+    valid_dur: i64,
     seed: u64,
     start_ms: i64,
     route_bd: &[(f64, f64)],
     must_bd: &[(f64, f64)],
     net: &RoadGraph,
+    speed_floor: f64,
+    speed_ceil: f64,
+    invalid_ratio: f64,
+    invalid_cap: f64,
+) -> Result<Track, String> {
+    build_road_with_color_mode(
+        valid_dist,
+        valid_dur,
+        seed,
+        start_ms,
+        route_bd,
+        must_bd,
+        net,
+        TrackColorMode::FullGreen,
+        speed_floor,
+        speed_ceil,
+        invalid_ratio,
+        invalid_cap,
+    )
+}
+
+pub fn build_road_with_color_mode(
+    valid_dist: f64,
+    valid_dur: i64,
+    seed: u64,
+    start_ms: i64,
+    route_bd: &[(f64, f64)],
+    must_bd: &[(f64, f64)],
+    net: &RoadGraph,
+    color_mode: TrackColorMode,
+    speed_floor: f64,
+    speed_ceil: f64,
+    invalid_ratio: f64,
+    invalid_cap: f64,
 ) -> Result<Track, String> {
     let mut rng = Rng::new(seed);
-    let dur_f = dur as f64;
-    let avg_v = dist / dur_f;
+    let valid_dur_f = valid_dur as f64;
+    let avg_v = valid_dist / valid_dur_f;
+    // 不合格（有效配速窗口外）慢速段：围绕目标比例随机采样（不会正好等于设定值），
+    // 且不超过政策 unqualifiedRate；有效部分仍精确命中 valid_dist。
+    let cap = if invalid_cap > 0.0 { invalid_cap } else { invalid_ratio };
+    let r = if invalid_ratio > 0.0 {
+        (invalid_ratio * rng.uniform(0.55, 1.45)).clamp(0.0, cap)
+    } else {
+        0.0
+    };
+    let invalid_dist = if r > 0.0 { valid_dist * r / (1.0 - r) } else { 0.0 };
+    let v_ref = rng.uniform(0.7, 1.2);
+    let invalid_time = if invalid_dist > 0.0 { invalid_dist / v_ref } else { 0.0 };
+    let time_span = valid_dur_f + invalid_time;
+    let total_dist_target = valid_dist + invalid_dist;
     let a_c_max = 2.5;
     let radius = (avg_v * avg_v / a_c_max).max(6.0);
     let opts = RouteOptions {
@@ -219,7 +266,7 @@ pub fn build_road(
 
     let waypoints: Vec<Coord> = route_bd.iter().map(|p| Coord::new(p.1, p.0)).collect();
     let must: Vec<Coord> = must_bd.iter().map(|p| Coord::new(p.1, p.0)).collect();
-    let route = plan_route_split(net, &waypoints, &must, dist, seed, &opts)?;
+    let route = plan_route_split(net, &waypoints, &must, valid_dist, seed, &opts)?;
 
     let n_pts = route_bd.len().max(1);
     let (c_lat, c_lng) = (
@@ -228,10 +275,10 @@ pub fn build_road(
     );
     let (dense, arcs) = route_ring(&route, c_lat, c_lng);
 
-    // 时间网格（同经典模式）
+    // 时间网格（覆盖总时长 = 有效时长 + 慢速段时间）
     let mut times = Vec::new();
     let mut t = 0.0;
-    while t < dur_f {
+    while t < time_span {
         times.push(t);
         t += if rng.random() < 0.80 {
             5.0
@@ -241,65 +288,150 @@ pub fn build_road(
     }
     let n = times.len();
     let mut dts: Vec<f64> = (0..n - 1).map(|i| times[i + 1] - times[i]).collect();
-    dts.push(1.0f64.max(dur_f - times[n - 1]));
+    dts.push(1.0f64.max(time_span - times[n - 1]));
 
-    // 运动学速度剖面：OU 配速 + 弯道预判刹车 + 精确命中目标距离
+    // 无效段掩码：起点哨兵不计有效；慢速段按时间预算随机分到头部/尾部，
+    // 至少保留若干有效点，避免整条路线都变慢。
+    let mut invalid = vec![false; n];
+    if n > 3 {
+        invalid[0] = true;
+        invalid[1] = true;
+    }
+    let fs = rng.uniform(0.15, 0.55);
+    let head_t = invalid_time * fs;
+    let tail_t = invalid_time - head_t;
+    let head_end;
+    let mut tail_start = n;
+    {
+        let mut cum = 0.0;
+        let mut i = 2;
+        while i < n && cum < head_t && (n - i) > 4 {
+            invalid[i] = true;
+            cum += dts[i];
+            i += 1;
+        }
+        head_end = i;
+        let mut cum2 = 0.0;
+        let mut j = n;
+        while j > 0 && cum2 < tail_t {
+            j -= 1;
+            if invalid[j] || j < 4 {
+                break;
+            }
+            invalid[j] = true;
+            cum2 += dts[j];
+            tail_start = j;
+        }
+    }
+
+    // 有效段：运动学速度剖面命中 valid_dist（钳在有效窗口内）。
+    // 无效段：模拟自然的“起步慢→提速 / 收尾减速→停”包络（始终低于窗口下限），
+    // 不再是平直常量。
+    let valid_dts: Vec<f64> = (0..n).filter(|&i| !invalid[i]).map(|i| dts[i]).collect();
     let kin = KinParams {
         a_c_max,
         ..Default::default()
     };
     let speed_seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let w = pace_profile(
-        &route,
-        avg_v,
-        &dts,
-        dist,
-        speed_seed,
-        &kin,
-        SPEED_FLOOR,
-        SPEED_CEIL,
-    );
-    let speeds: Vec<f64> = w.clone();
-    let seg_dist: Vec<f64> = (0..n).map(|i| w[i] * dts[i]).collect();
+    let valid_speeds = if valid_dts.is_empty() {
+        Vec::new()
+    } else {
+        pace_profile(
+            &route,
+            avg_v,
+            &valid_dts,
+            valid_dist,
+            speed_seed,
+            &kin,
+            speed_floor,
+            speed_ceil,
+        )
+    };
+    let v_lo = rng.uniform(0.25, 0.6);
+    let head_hi = speed_floor * rng.uniform(0.85, 0.97);
+    let tail_hi = speed_floor * rng.uniform(0.85, 0.97);
+    let v_stop = rng.uniform(0.10, 0.4);
+    let mut speeds = vec![0.0f64; n];
+    let mut vk = 0usize;
+    for i in 0..n {
+        if invalid[i] {
+            let base = if i < 2 {
+                0.0
+            } else if i < head_end {
+                let prog = (i - 2) as f64 / (head_end - 2).max(1) as f64;
+                v_lo + (head_hi - v_lo) * prog
+            } else if i >= tail_start {
+                let prog = (i - tail_start) as f64 / (n - tail_start).max(1) as f64;
+                tail_hi + (v_stop - tail_hi) * prog
+            } else {
+                v_ref
+            };
+            speeds[i] = (base * (1.0 + rng.gauss(0.0, 0.05))).max(0.0);
+        } else if vk < valid_speeds.len() {
+            speeds[i] = valid_speeds[vk];
+            vk += 1;
+        } else {
+            speeds[i] = avg_v;
+        }
+    }
+    let seg_dist: Vec<f64> = (0..n).map(|i| speeds[i] * dts[i]).collect();
 
     // 点位类型（同经典模式）
-    let tl_w = [
-        ((-1i64, 4i64), 54u32),
-        ((-1, 1), 27),
-        ((-1, 12), 13),
-        ((-1, 5), 3),
-        ((-1, 6), 2),
-    ];
-    let mut kinds: Vec<(i64, i64)> = Vec::with_capacity(n);
-    for _ in 0..n {
-        let u = rng.random();
-        if u < 0.39 {
-            kinds.push((3, 1));
-        } else if u < 0.93 {
-            kinds.push((0, 1));
-        } else if u < 0.96 {
-            kinds.push(rng.weighted(&tl_w));
-        } else {
-            kinds.push((rng.choice(&[1, 1, 1, 1, 2, 2]), 1));
+    let kinds: Vec<(i64, i64)> = match color_mode {
+        TrackColorMode::FullGreen => vec![(0, 1); n],
+        TrackColorMode::HalfGreenGray => {
+            let tl_w = [
+                ((-1i64, 4i64), 54u32),
+                ((-1, 1), 27),
+                ((-1, 12), 13),
+                ((-1, 5), 3),
+                ((-1, 6), 2),
+            ];
+            let mut kinds: Vec<(i64, i64)> = Vec::with_capacity(n);
+            for _ in 0..n {
+                let u = rng.random();
+                if u < 0.39 {
+                    kinds.push((3, 1));
+                } else if u < 0.93 {
+                    kinds.push((0, 1));
+                } else if u < 0.96 {
+                    kinds.push(rng.weighted(&tl_w));
+                } else {
+                    kinds.push((rng.choice(&[1, 1, 1, 1, 2, 2]), 1));
+                }
+            }
+            for i in 1..kinds.len() {
+                let prev_drift = (-1 == kinds[i - 1].0)
+                    || kinds[i - 1].0 == 5
+                    || kinds[i - 1].0 == 6;
+                if kinds[i].0 != -1 && prev_drift && rng.random() < 0.08 {
+                    kinds[i] = (if rng.random() < 0.75 { 7 } else { 8 }, 1);
+                }
+            }
+            for i in 1..n {
+                if kinds[i].0 == -1 && kinds[i - 1].0 == -1 {
+                    kinds[i] = (rng.choice(&[3, 0]), 1);
+                }
+            }
+            kinds
         }
-    }
-    for i in 1..kinds.len() {
-        let prev_drift = (-1 == kinds[i - 1].0) || kinds[i - 1].0 == 5 || kinds[i - 1].0 == 6;
-        if kinds[i].0 != -1 && prev_drift && rng.random() < 0.08 {
-            kinds[i] = (if rng.random() < 0.75 { 7 } else { 8 }, 1);
-        }
-    }
-    for i in 1..n {
-        if kinds[i].0 == -1 && kinds[i - 1].0 == -1 {
-            kinds[i] = (rng.choice(&[3, 0]), 1);
-        }
-    }
+    };
     let normal_idx: Vec<usize> = (0..n).filter(|&i| kinds[i].0 != -1 && i > 1).collect();
-    let share: f64 = normal_idx.iter().map(|&i| seg_dist[i]).sum();
-    let share = if share == 0.0 { 1.0 } else { share };
+    // 有效段归一化到 valid_dist（type=-1 无位移点被剔除后仍精确命中目标）；
+    // 慢速段保持自然包络原样，不强行凑数，使实际不合格比例围绕目标波动。
+    let vshare: f64 = normal_idx
+        .iter()
+        .filter(|&&i| !invalid[i])
+        .map(|&i| seg_dist[i])
+        .sum();
+    let vscale = if vshare > 0.0 { valid_dist / vshare } else { 0.0 };
     let mut disp_of = vec![0.0f64; n];
     for &i in &normal_idx {
-        disp_of[i] = seg_dist[i] * (dist / share);
+        disp_of[i] = if invalid[i] {
+            seg_dist[i]
+        } else {
+            seg_dist[i] * vscale
+        };
     }
 
     // 建筑 SDF（自适应放大漂移）
@@ -318,7 +450,7 @@ pub fn build_road(
     // 生物力学：步频在目标值附近 OU 波动，步幅反解严格满足 v=(cad/60)·stride
     let targets: Vec<f64> = (0..n)
         .map(|i| {
-            let km_done = (times[i] / dur_f) * dist / 1000.0;
+            let km_done = (times[i] / time_span) * total_dist_target / 1000.0;
             gait(speeds[i], fatigue_from_km(km_done)).cadence
         })
         .collect();
@@ -332,9 +464,11 @@ pub fn build_road(
     let mut s = 0.0f64;
     let mut t_acc = 0.0f64;
     let mut dist_acc = 0.0f64;
+    let mut vd_acc = 0.0f64;
+    let mut vt_acc = 0.0f64;
     let mut steps_acc = 0.0f64;
     let mut alt = 82.0 + rng.uniform(-1.0, 1.0);
-    let n_est = 1.max((dur_f / 5.0) as i64);
+    let n_est = 1.max((time_span / 5.0) as i64);
     let alt_sigma = rng.uniform(3.8, 6.2) / (0.40 * n_est as f64);
     let mut ten_t = 0.0f64;
     let mut ten_d = 0.0f64;
@@ -346,6 +480,9 @@ pub fn build_road(
         let dt = dts[i];
         let (typ, lt) = kinds[i];
         t_acc += dt;
+        if !invalid[i] {
+            vt_acc += dt;
+        }
         let pos = |ss: f64| ring_point_at(&dense, &arcs, ss);
         let mut d_step = 0.0f64;
         let px;
@@ -361,14 +498,18 @@ pub fn build_road(
             x = bx;
             y = by;
             // AR(1) 相关漂移 + 高斯测量噪声，SDF 自适应放大
-            let sc = sdf.sigma_scale([bx, by]);
-            let z = [
-                rng.gauss(0.0, 1.0),
-                rng.gauss(0.0, 1.0),
-                rng.gauss(0.0, 1.0),
-                rng.gauss(0.0, 1.0),
-            ];
-            let (jxd, jyd) = jitter.step(sc, z);
+            let (jxd, jyd) = if color_mode == TrackColorMode::FullGreen {
+                (0.0, 0.0)
+            } else {
+                let sc = sdf.sigma_scale([bx, by]);
+                let z = [
+                    rng.gauss(0.0, 1.0),
+                    rng.gauss(0.0, 1.0),
+                    rng.gauss(0.0, 1.0),
+                    rng.gauss(0.0, 1.0),
+                ];
+                jitter.step(sc, z)
+            };
             px = bx + jxd;
             py = by + jyd;
             rad = round_to(
@@ -379,7 +520,9 @@ pub fn build_road(
                 },
                 2,
             );
-            state = if typ == 0 {
+            state = if color_mode == TrackColorMode::FullGreen {
+                1
+            } else if typ == 0 {
                 rng.weighted(&[(1, 145), (2, 45), (3, 164)])
             } else {
                 rng.weighted(&[(1, 145), (2, 256), (3, 151)])
@@ -454,6 +597,9 @@ pub fn build_road(
         }
         if typ != -1 {
             dist_acc += d_step;
+            if !invalid[i] {
+                vd_acc += d_step;
+            }
         }
         let (lat, lng) = to_bd(px, py, c_lat, c_lng);
         alt += 0.04 * (82.0 - alt) + rng.gauss(0.0, alt_sigma);
@@ -524,8 +670,8 @@ pub fn build_road(
             hasAltitude: true,
             totalTime: round_to(t_acc, 0) as i64,
             totalDis: round_to(dist_acc, 4),
-            validDis: round_to(dist_acc, 4),
-            validTime: round_to(t_acc, 0) as i64,
+            validDis: round_to(vd_acc, 4),
+            validTime: round_to(vt_acc, 0) as i64,
             steps: steps_acc as i64,
             stepDistance: 0.0,
             gainTime: fmt_gain_time(start_ms + (t_acc * 1000.0) as i64),
@@ -535,7 +681,11 @@ pub fn build_road(
             bdA: round_to(alt, 2),
             bdD: round_to(brg, 2),
             bdS: round_to((avg_sp * rng.uniform(0.6, 0.95)).max(0.0), 3),
-            bdG: rng.choice(&[1, 1, 1, -1]),
+            bdG: if color_mode == TrackColorMode::FullGreen {
+                1
+            } else {
+                rng.choice(&[1, 1, 1, -1])
+            },
             count: rng.randint(20, 88),
             dtr: 0.0,
             state,
@@ -577,7 +727,28 @@ pub fn build_road(
         }
     }
 
-    apply_post_fixes(&mut locs, &mut rng, start_ms);
+    apply_post_fixes(&mut locs, &mut rng, start_ms, false);
+
+    let last_index = locs.len().saturating_sub(1);
+    for (i, point) in locs.iter_mut().enumerate() {
+        // The cumulative valid distance cannot identify a segment after the
+        // first invalid block, so use the same per-sample mask that drove the
+        // speed profile. Keep the start/end sentinels intact.
+        let invalid_segment = i > 1
+            && i < last_index
+            && invalid.get(i).copied().unwrap_or(false);
+        if invalid_segment {
+            point.ptype = -1;
+            point.locType = 4;
+            point.state = 2;
+            point.bdG = -1;
+        } else if color_mode == TrackColorMode::FullGreen {
+            point.ptype = if i == 1 { 5 } else if i == last_index { 6 } else { 0 };
+            point.locType = 1;
+            point.state = 1;
+            point.bdG = 1;
+        }
+    }
 
     // 点位吸附：<40m 精确落位（全量打卡点，含必经点与普通打卡点）
     for pl in route_bd {
@@ -599,12 +770,11 @@ pub fn build_road(
         }
     }
 
-    let total_dis = round_to(dist, 3);
     Ok(Track {
         totalTime: round_to(t_acc, 0) as i64,
-        totalDistance: total_dis,
-        validDistance: total_dis,
-        validTime: round_to(t_acc, 0) as i64,
+        totalDistance: round_to(dist_acc, 3),
+        validDistance: round_to(vd_acc, 3),
+        validTime: round_to(vt_acc, 0) as i64,
         startTime: start_ms,
         startLatitude: locs[0].gLat,
         startLongitude: locs[0].gLng,

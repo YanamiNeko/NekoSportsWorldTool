@@ -79,6 +79,10 @@ pub struct RunPage {
     pub plan: Option<RunPlan>,
     /// 路线算法模式
     pub route_mode: RouteMode,
+    /// 真实道路模式配速不合格路段占比（百分数，运行时可调）
+    pub invalid_pct: i64,
+    /// 详情页路线颜色模式
+    pub track_color_mode: crate::api::model::TrackColorMode,
     /// 地图视图状态
     pub map: MapState,
     /// 路网预览（真实道路路由）
@@ -398,6 +402,38 @@ impl App {
                     ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
                 }
             });
+            if page.route_mode == RouteMode::Road {
+                ui.horizontal(|ui| {
+                    ui.label("不合格路段：");
+                    let before = page.invalid_pct;
+                    mobile::drag_i64(
+                        ui,
+                        "run_invalid_pct",
+                        &mut page.invalid_pct,
+                        0..=15,
+                        1.0,
+                        "",
+                        " %",
+                    );
+                    if page.invalid_pct != before {
+                        page.preview_stale = true;
+                    }
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.label("路线颜色：");
+                ui.radio_value(
+                    &mut page.track_color_mode,
+                    crate::api::model::TrackColorMode::FullGreen,
+                    "全绿色（有效段）",
+                );
+                ui.radio_value(
+                    &mut page.track_color_mode,
+                    crate::api::model::TrackColorMode::HalfGreenGray,
+                    "灰绿混合",
+                );
+                ui.label("（road 慢速无效段仍保留灰色）");
+            });
         }
 
         // 切换到真实道路路由时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
@@ -707,6 +743,8 @@ impl App {
         let start_ms = plan.start_ms;
         let face_check = if page.face_check { 1 } else { 0 };
         let route_mode = page.route_mode;
+        let invalid_ratio = page.invalid_pct.clamp(0, 100) as f64 / 100.0;
+        let track_color_mode = page.track_color_mode;
         self.config.dist_min = page.dist_min;
         self.config.dist_max = page.dist_max;
         self.config.pace_min = page.pace_min;
@@ -714,6 +752,8 @@ impl App {
         self.config.face_check = page.face_check;
         self.config.manual_altitude = manual_altitude;
         self.config.manual_altitude_range = manual_altitude_range;
+        self.config.invalid_ratio = invalid_ratio;
+        self.config.track_color_mode = track_color_mode;
         self.config.route_mode = if route_mode == RouteMode::Road {
             "road".into()
         } else {
@@ -744,6 +784,8 @@ impl App {
                 manual_altitude_range,
                 seed,
                 route_mode,
+                invalid_ratio,
+                track_color_mode,
             };
             let payload = match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
                 Ok(out) => {

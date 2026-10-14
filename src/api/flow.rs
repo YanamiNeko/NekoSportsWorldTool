@@ -9,7 +9,7 @@ use super::records::fetch_one_record;
 use super::submit::{submit_record, SubmitParams, SubmitResult};
 use crate::location::Coordinate;
 use crate::track::generate_road::RouteMode;
-use crate::track::generator::build as gen_track;
+use crate::track::generator::build_with_color_mode as gen_track;
 use crate::track::wire::{build_obs_object, five_point_wrapper, obs_keys};
 use rand_distr::{Distribution, Normal};
 use serde_json::Value;
@@ -29,6 +29,10 @@ pub struct RunParams {
     pub seed: u64,
     /// 路线算法模式。
     pub route_mode: RouteMode,
+    /// 真实道路模式配速不合格路段占比（0-1）。
+    pub invalid_ratio: f64,
+    /// 详情页路线颜色模式。
+    pub track_color_mode: crate::api::model::TrackColorMode,
 }
 
 pub struct RunOutcome {
@@ -140,13 +144,34 @@ pub fn run_full_flow(
             let _ = super::model::save_points_cache(new_anchor, &pts);
         }
     }
+    // 有效配速窗口：以 policy 的 speedTop/speedBottom 换算（policy 缺省才用兜底值）。
+    let speed_floor = if pol.speed_bottom > 0.0 {
+        1000.0 / (pol.speed_bottom * 60.0)
+    } else {
+        crate::track::generator::SPEED_FLOOR
+    };
+    let speed_ceil = if pol.speed_top > 0.0 {
+        1000.0 / (pol.speed_top * 60.0)
+    } else {
+        crate::track::generator::SPEED_CEIL
+    };
+    let invalid_cap = pol.unqualified_rate.clamp(0.0, 0.9);
+    let invalid_target = params.invalid_ratio.max(0.0);
+    log(&format!(
+        "√ [policy] 有效配速窗口 {:.3}-{:.3} m/s（{}'{}''-{}'{}''/km），不合格上限 {:.0}%，目标占比 {:.1}%",
+        speed_floor,
+        speed_ceil,
+        (1000.0 / speed_ceil / 60.0) as i64,
+        ((1000.0 / speed_ceil) as i64) % 60,
+        (1000.0 / speed_floor / 60.0) as i64,
+        ((1000.0 / speed_floor) as i64) % 60,
+        invalid_cap * 100.0,
+        invalid_target * 100.0,
+    ));
     // 平均配速须落在有效窗口内（否则逐点速度无法全窗内），越界时修正时长
     let mut params = *params;
     let avg = params.dist / params.dur as f64;
-    let fixed_avg = avg.clamp(
-        crate::track::generator::SPEED_FLOOR + 0.1,
-        crate::track::generator::SPEED_CEIL - 0.1,
-    );
+    let fixed_avg = avg.clamp(speed_floor + 0.1, speed_ceil - 0.1);
     if (fixed_avg - avg).abs() > 1e-6 {
         let fixed_dur = (params.dist / fixed_avg).round() as i64;
         log(&format!(
@@ -177,6 +202,7 @@ pub fn run_full_flow(
                     (anchor.latitude, anchor.longitude),
                     start_ms,
                     &pts_bd,
+                    params.track_color_mode,
                 )
             } else {
                 match crate::track::generate_road::load_network_path(&cfg.osm_path) {
@@ -198,7 +224,7 @@ pub fn run_full_flow(
                         // 强制必经点（不含起点）：其余打卡点仅软引导 + <40m 吸附
                         let must_bd: Vec<(f64, f64)> =
                             pol.must_points.iter().skip(1).copied().collect();
-                        match crate::track::generate_road::build_road(
+                        match crate::track::generate_road::build_road_with_color_mode(
                             params.dist,
                             params.dur,
                             params.seed,
@@ -206,13 +232,20 @@ pub fn run_full_flow(
                             &route_pts,
                             &must_bd,
                             &filtered,
+                            params.track_color_mode,
+                            speed_floor,
+                            speed_ceil,
+                            invalid_target,
+                            invalid_cap,
                         ) {
                             Ok(t) => {
                                 log(&format!(
-                                    "√ [track] 真实道路路由 {} 点 / {} 建筑 / {} 围栏",
+                                    "√ [track] 真实道路路由 {} 点 / {} 建筑 / {} 围栏，有效 {:.0}m / 总 {:.0}m",
                                     t.locations.len(),
                                     filtered.buildings.len(),
-                                    fences.len()
+                                    fences.len(),
+                                    t.validDistance,
+                                    t.totalDistance,
                                 ));
                                 t
                             }
@@ -225,6 +258,7 @@ pub fn run_full_flow(
                                     (anchor.latitude, anchor.longitude),
                                     start_ms,
                                     &pts_bd,
+                                    params.track_color_mode,
                                 )
                             }
                         }
@@ -238,6 +272,7 @@ pub fn run_full_flow(
                             (anchor.latitude, anchor.longitude),
                             start_ms,
                             &pts_bd,
+                            params.track_color_mode,
                         )
                     }
                 }
@@ -250,6 +285,7 @@ pub fn run_full_flow(
             (anchor.latitude, anchor.longitude),
             start_ms,
             &pts_bd,
+            params.track_color_mode,
         ),
     };
     if let Some(range) = params.manual_altitude_range {

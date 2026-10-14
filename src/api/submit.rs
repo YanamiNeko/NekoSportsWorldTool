@@ -142,8 +142,8 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     body.insert("selDistance".into(), Value::from(p.min_distance));
     body.insert("totalDis".into(), Value::from(round_to(total_dis, 0) as i64));
     body.insert("speed".into(), Value::from(speed));
-    body.insert("validDis".into(), Value::from(round_to(total_dis, 0) as i64));
-    body.insert("validTime".into(), Value::from(total_time));
+    body.insert("validDis".into(), Value::from(round_to(track.validDistance, 0) as i64));
+    body.insert("validTime".into(), Value::from(track.validTime));
     body.insert("complete".into(), Value::Bool(true));
     body.insert("unCompleteReason".into(), Value::from(0));
     body.insert("calorie".into(), Value::from(kcal));

@@ -9,6 +9,7 @@
 use super::geom::{fmt_gain_time, make_point_ring, ring_point_at, round_to, to_bd, Rng, MET_PER_DEG_LAT, MET_PER_DEG_LNG};
 use super::model::{GenPoint, Segment, TenWindow, Track};
 use super::postfix::apply_post_fixes;
+use crate::api::model::TrackColorMode;
 
 /// 有效配速窗口（判定规则 2'21"-10'00"/km ≈ 1.667-7.092 m/s），硬边界留余量。
 pub const SPEED_FLOOR: f64 = 1.90;
@@ -40,6 +41,19 @@ pub fn build(
     _center: (f64, f64),
     start_ms: i64,
     points_bd: &[(f64, f64)],
+) -> Track {
+    build_with_color_mode(dist, dur, seed, _center, start_ms, points_bd, TrackColorMode::FullGreen)
+}
+
+/// 生成轨迹并选择详情页路线颜色模式。
+pub fn build_with_color_mode(
+    dist: f64,
+    dur: i64,
+    seed: u64,
+    _center: (f64, f64),
+    start_ms: i64,
+    points_bd: &[(f64, f64)],
+    color_mode: TrackColorMode,
 ) -> Track {
     let mut rng = Rng::new(seed);
     let dur_f = dur as f64;
@@ -108,31 +122,37 @@ pub fn build(
     let seg_dist: Vec<f64> = (0..n).map(|i| w[i] * dts[i]).collect();
     let speeds: Vec<f64> = w.clone();
 
-    let tl_w = [((-1i64, 4i64), 54u32), ((-1, 1), 27), ((-1, 12), 13), ((-1, 5), 3), ((-1, 6), 2)];
-    let mut kinds: Vec<(i64, i64)> = Vec::with_capacity(n);
-    for _ in 0..n {
-        let u = rng.random();
-        if u < 0.39 {
-            kinds.push((3, 1));
-        } else if u < 0.93 {
-            kinds.push((0, 1));
-        } else if u < 0.96 {
-            kinds.push(rng.weighted(&tl_w));
-        } else {
-            kinds.push((rng.choice(&[1, 1, 1, 1, 2, 2]), 1));
+    let kinds: Vec<(i64, i64)> = match color_mode {
+        TrackColorMode::FullGreen => vec![(0, 1); n],
+        TrackColorMode::HalfGreenGray => {
+            let tl_w = [((-1i64, 4i64), 54u32), ((-1, 1), 27), ((-1, 12), 13), ((-1, 5), 3), ((-1, 6), 2)];
+            let mut kinds: Vec<(i64, i64)> = Vec::with_capacity(n);
+            for _ in 0..n {
+                let u = rng.random();
+                if u < 0.39 {
+                    kinds.push((3, 1));
+                } else if u < 0.93 {
+                    kinds.push((0, 1));
+                } else if u < 0.96 {
+                    kinds.push(rng.weighted(&tl_w));
+                } else {
+                    kinds.push((rng.choice(&[1, 1, 1, 1, 2, 2]), 1));
+                }
+            }
+            for i in 1..kinds.len() {
+                let prev_drift = (-1 == kinds[i - 1].0) || kinds[i - 1].0 == 5 || kinds[i - 1].0 == 6;
+                if kinds[i].0 != -1 && prev_drift && rng.random() < 0.08 {
+                    kinds[i] = (if rng.random() < 0.75 { 7 } else { 8 }, 1);
+                }
+            }
+            for i in 1..n {
+                if kinds[i].0 == -1 && kinds[i - 1].0 == -1 {
+                    kinds[i] = (rng.choice(&[3, 0]), 1);
+                }
+            }
+            kinds
         }
-    }
-    for i in 1..kinds.len() {
-        let prev_drift = (-1 == kinds[i - 1].0) || kinds[i - 1].0 == 5 || kinds[i - 1].0 == 6;
-        if kinds[i].0 != -1 && prev_drift && rng.random() < 0.08 {
-            kinds[i] = (if rng.random() < 0.75 { 7 } else { 8 }, 1);
-        }
-    }
-    for i in 1..n {
-        if kinds[i].0 == -1 && kinds[i - 1].0 == -1 {
-            kinds[i] = (rng.choice(&[3, 0]), 1);
-        }
-    }
+    };
     let normal_idx: Vec<usize> =
         (0..n).filter(|&i| kinds[i].0 != -1 && i > 1).collect();
     let share: f64 = normal_idx.iter().map(|&i| seg_dist[i]).sum();
@@ -176,15 +196,22 @@ pub fn build(
             let (bx, by) = pos(s);
             x = bx;
             y = by;
-            jx = 0.72 * jx + rng.gauss(0.0, 0.75);
-            jy = 0.72 * jy + rng.gauss(0.0, 0.75);
+            if color_mode == TrackColorMode::FullGreen {
+                jx = 0.0;
+                jy = 0.0;
+            } else {
+                jx = 0.72 * jx + rng.gauss(0.0, 0.75);
+                jy = 0.72 * jy + rng.gauss(0.0, 0.75);
+            }
             px = bx + jx;
             py = by + jy;
             rad = round_to(
                 if typ == 3 { rng.uniform(1.4, 5.1) } else { rng.uniform(1.4, 2.4) },
                 2,
             );
-            state = if typ == 0 {
+            state = if color_mode == TrackColorMode::FullGreen {
+                1
+            } else if typ == 0 {
                 rng.weighted(&[(1, 145), (2, 45), (3, 164)])
             } else {
                 rng.weighted(&[(1, 145), (2, 256), (3, 151)])
@@ -310,7 +337,11 @@ pub fn build(
             bdA: round_to(alt, 2),
             bdD: round_to(brg, 2),
             bdS: round_to((avg_sp * rng.uniform(0.6, 0.95)).max(0.0), 3),
-            bdG: rng.choice(&[1, 1, 1, -1]),
+            bdG: if color_mode == TrackColorMode::FullGreen {
+                1
+            } else {
+                rng.choice(&[1, 1, 1, -1])
+            },
             count: rng.randint(20, 88),
             dtr: 0.0,
             state,
@@ -350,7 +381,25 @@ pub fn build(
     }
     let _ = seg_n;
 
-    apply_post_fixes(&mut locs, &mut rng, start_ms);
+    apply_post_fixes(&mut locs, &mut rng, start_ms, true);
+
+    if color_mode == TrackColorMode::FullGreen {
+        // 详情页会根据这些字段给轨迹分段着色。统一普通点协议，保留
+        // 起点/终点哨兵，避免出现灰色段。
+        let last_index = locs.len().saturating_sub(1);
+        for (i, point) in locs.iter_mut().enumerate() {
+            point.ptype = if i == 1 {
+                5
+            } else if i == last_index {
+                6
+            } else {
+                0
+            };
+            point.locType = 1;
+            point.state = 1;
+            point.bdG = 1;
+        }
+    }
 
     // 点位吸附：<40m 精确落位
     for pl in points_bd {

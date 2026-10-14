@@ -7,6 +7,7 @@ pub mod generator;
 pub mod geom;
 pub mod model;
 pub mod postfix;
+pub mod stadium;
 pub mod wire;
 
 #[cfg(test)]

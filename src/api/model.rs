@@ -10,6 +10,8 @@ pub const HOST: &str = "https://run.gxapp.iydsj.com";
 /// 排行榜 / 违规名单域名（信封链与 RUN 相同）。
 pub const DISCOVERY: &str = "https://discovery.gxapp.iydsj.com";
 
+pub use crate::track::stadium::TrackSpec;
+
 /// 登录态（session.json）。
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Session {
@@ -80,6 +82,9 @@ pub struct Config {
     /// 路线算法：legacy | road。
     #[serde(default = "default_route_mode")]
     pub route_mode: String,
+    /// Optional standard athletics-track preset; Auto preserves the legacy route.
+    #[serde(default)]
+    pub track_spec: TrackSpec,
 }
 
 fn default_route_mode() -> String {
@@ -123,6 +128,7 @@ impl Default for Config {
             update_check: default_update_check(),
             osm_path: String::new(),
             route_mode: default_route_mode(),
+            track_spec: TrackSpec::default(),
         }
     }
 }
@@ -419,6 +425,18 @@ pub fn save_points_cache(
         points: points.to_vec(),
     };
     write_json("points_cache.json", &doc)
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_config_defaults_to_auto_track_mode() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.track_spec, TrackSpec::Auto);
+        assert_eq!(Config::default().track_spec, TrackSpec::Auto);
+    }
 }
 
 #[cfg(test)]

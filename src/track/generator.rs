@@ -7,8 +7,10 @@
 #![allow(non_snake_case)]
 
 use super::geom::{fmt_gain_time, make_point_ring, ring_point_at, round_to, to_bd, Rng, MET_PER_DEG_LAT, MET_PER_DEG_LNG};
+use super::geom::PointRing;
 use super::model::{GenPoint, Segment, TenWindow, Track};
 use super::postfix::apply_post_fixes;
+use super::stadium::{make_stadium_ring, TrackSpec};
 
 /// 有效配速窗口（判定规则 2'21"-10'00"/km ≈ 1.667-7.092 m/s），硬边界留余量。
 pub const SPEED_FLOOR: f64 = 1.90;
@@ -41,9 +43,43 @@ pub fn build(
     start_ms: i64,
     points_bd: &[(f64, f64)],
 ) -> Track {
+    build_on_ring(dist, dur, seed, _center, start_ms, points_bd, None)
+}
+
+/// Generate a route along a selected standard athletics track.
+pub fn build_stadium(
+    dist: f64,
+    dur: i64,
+    seed: u64,
+    center: (f64, f64),
+    start_ms: i64,
+    points_bd: &[(f64, f64)],
+    spec: TrackSpec,
+) -> Result<Track, String> {
+    let ring = make_stadium_ring(points_bd, spec)?;
+    Ok(build_on_ring(
+        dist,
+        dur,
+        seed,
+        center,
+        start_ms,
+        points_bd,
+        Some(ring),
+    ))
+}
+
+fn build_on_ring(
+    dist: f64,
+    dur: i64,
+    seed: u64,
+    _center: (f64, f64),
+    start_ms: i64,
+    points_bd: &[(f64, f64)],
+    supplied_ring: Option<PointRing>,
+) -> Track {
     let mut rng = Rng::new(seed);
     let dur_f = dur as f64;
-    let (dense, arcs, pc) = make_point_ring(points_bd);
+    let (dense, arcs, pc) = supplied_ring.unwrap_or_else(|| make_point_ring(points_bd));
     let (c_lat, c_lng) = pc;
     let direction: f64 = rng.choice(&[1.0, -1.0]);
     let s0 = rng.uniform(0.0, *arcs.last().unwrap_or(&400.0));

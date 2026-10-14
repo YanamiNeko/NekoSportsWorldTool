@@ -74,7 +74,8 @@ pub fn conv_point(p: &GenPoint, start_ms: i64) -> Value {
     })
 }
 
-/// 五点实体（实时点位 → 跑完态 isPass=true）。
+/// 五点实体（实时点位 → 跑完态）。`isPass` 由点位自身的 `isPass` 字段决定
+/// （缺省 false），与 App 逐点标记一致。
 pub fn five_point_payload(points: &[Value], start_ms: i64) -> Vec<Value> {
     points
         .iter()
@@ -86,7 +87,7 @@ pub fn five_point_payload(points: &[Value], start_ms: i64) -> Vec<Value> {
                 "glon": p["glon"].as_f64().unwrap_or(0.0),
                 "id": i as i64 + 1,
                 "isFixed": p["isFixed"].as_i64().unwrap_or(0),
-                "isPass": true,
+                "isPass": p["isPass"].as_bool().unwrap_or(false),
                 "lat": p["lat"].as_f64().unwrap_or(0.0),
                 "lon": p["lon"].as_f64().unwrap_or(0.0),
                 "pointName": p["pointName"].as_str().unwrap_or(""),

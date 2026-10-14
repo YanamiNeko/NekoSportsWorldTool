@@ -29,6 +29,8 @@ pub struct RunParams {
     pub seed: u64,
     /// 路线算法模式。
     pub route_mode: RouteMode,
+    /// 真实道路模式随机选中的普通打卡点数量（运行时可变）。
+    pub ordinary_pick: usize,
 }
 
 pub struct RunOutcome {
@@ -40,6 +42,9 @@ pub struct RunOutcome {
 fn sleep_secs(s: u64) {
     std::thread::sleep(std::time::Duration::from_secs(s));
 }
+
+/// 时长达标余量（秒）：生成时长 = min_run_time + 该余量，避免服务端取整/有效时长略低。
+const DURATION_MARGIN_SECS: i64 = 30;
 
 /// 跑步全链。
 pub fn run_full_flow(
@@ -53,8 +58,8 @@ pub fn run_full_flow(
     log("[policy] 拉取跑步策略…");
     let pol = fetch_policy(client)?;
     log(&format!(
-        "√ [policy] ts={} policy={} minDistance={} validTime={}",
-        pol.timestamp, pol.policy, pol.min_distance, pol.valid_time
+        "√ [policy] ts={} policy={} minDistance={} minRunTime={} validTime={}",
+        pol.timestamp, pol.policy, pol.min_distance, pol.min_run_time, pol.valid_time
     ));
     sleep_secs(2);
 
@@ -80,46 +85,11 @@ pub fn run_full_flow(
         ));
     }
 
-    // ③ 轨迹生成（必经点 + 打卡点）
+    // ③ 轨迹生成（真实道路模式：必经点 + 随机普通点，全部强经过）
     let pts_bd = points::points_bd(&pts);
-    // 必经点保持策略顺序置于前端（waypoints[0] 即起点），剩余打卡点去重后按质心角
-    // 排序，使环序自然且不破坏必经点顺序。
-    let mut route_pts: Vec<(f64, f64)> = pol.must_points.clone();
-    let mut free: Vec<(f64, f64)> = Vec::new();
-    for p in &pts_bd {
-        if !route_pts
-            .iter()
-            .any(|q| (q.0 - p.0).abs() < 1e-6 && (q.1 - p.1).abs() < 1e-6)
-        {
-            free.push(*p);
-        }
-    }
-    if !free.is_empty() {
-        route_pts.extend(crate::track::generate_road::radial_order(&free));
-    }
-    if !pol.must_points.is_empty() {
-        log(&format!(
-            "√ [policy] 必经点 {} 个（保持顺序），合并后路线 waypoint 共 {} 个",
-            pol.must_points.len(),
-            route_pts.len()
-        ));
-        // 防御性日志：must_points 的「首个=起点」语义未经证实（提交时 skip(1) 依赖此假设），
-        // 逐点打印便于抓真实响应核对，避免首个必经点被静默丢弃。
-        for (i, &(mlat, mlon)) in pol.must_points.iter().enumerate() {
-            log(&format!(
-                "  [policy] must_points[{i}] BD=({mlat:.6},{mlon:.6}){}",
-                if i == 0 { "（假设为起点）" } else { "（必经点）" }
-            ));
-        }
-    } else {
-        log(&format!(
-            "[policy] 响应未含必经点列表，仅用打卡点 {} 个",
-            route_pts.len()
-        ));
-    }
-    if let Some(&(slat, slon)) = route_pts.first() {
-        log(&format!("√ [track] 起点 BD=({slat:.6},{slon:.6})"));
-    }
+    // 硬点 = 必经点(isFixed!=0) + 随机 ordinary_pick 个普通点；
+    // 与预览共用 resolve_hard_points，保证选点输入一致。
+    let (fixed, ordinary) = points::resolve_hard_points(&pts);
     // 用打卡点随机偏移更新锚点并持久化：下次拉点位即学校真实坐标，摆脱写死的默认值
     if !pts_bd.is_empty() {
         let idx = (rand::random::<f64>() * pts_bd.len() as f64) as usize;
@@ -142,6 +112,17 @@ pub fn run_full_flow(
     }
     // 平均配速须落在有效窗口内（否则逐点速度无法全窗内），越界时修正时长
     let mut params = *params;
+    // 时长达标：App 判定 totalTime >= 策略 minRunTime，留余量防止服务端有效时长取整后不足。
+    if pol.min_run_time > 0 {
+        let need = pol.min_run_time + DURATION_MARGIN_SECS;
+        if params.dur < need {
+            log(&format!(
+                "[track] 时长 {}s 低于策略要求 {}s，提升到 {}s",
+                params.dur, pol.min_run_time, need
+            ));
+            params.dur = need;
+        }
+    }
     let avg = params.dist / params.dur as f64;
     let fixed_avg = avg.clamp(
         crate::track::generator::SPEED_FLOOR + 0.1,
@@ -157,14 +138,25 @@ pub fn run_full_flow(
         ));
         params.dur = fixed_dur;
     }
+    // 配速修正后兜底：仍不得低于策略要求（宽配速窗口下一般不触发）。
+    if pol.min_run_time > 0 {
+        let need = pol.min_run_time + DURATION_MARGIN_SECS;
+        if params.dur < need {
+            params.dur = need;
+        }
+    }
     log(&format!(
-        "[track] 生成轨迹 {:.0}m / {}s（{} 点位）…",
+        "[track] 生成轨迹 {:.0}m / {}s（{} 个点位）…",
         params.dist,
         params.dur,
-        route_pts.len()
+        pts.len()
     ));
     // 随机 0-4 秒偏移（终端上报的 flag 与首点差 <5s），轨迹/提交/OBS/五点统一使用
     let start_ms = params.start_ms + (rand::random::<i64>() % 5) * 1000;
+    // 提交/OBS 上报完整点位集（与 App 一致）；isPass 由实际经过与否逐点决定。
+    // passed_pts 默认全部经过（Legacy/回退经典算法时轨迹经过所有点），道路成功时收窄为实际硬点。
+    let mut submitted_pts: Vec<Value> = pts.clone();
+    let mut passed_pts: Vec<(f64, f64)> = pts_bd.clone();
     let mut track = match params.route_mode {
         RouteMode::Road => {
             let cfg = crate::api::model::load_config();
@@ -195,15 +187,48 @@ pub fn run_full_flow(
                             }
                         };
                         let filtered = crate::track::generate_road::apply_fences(&net, &fences);
-                        // 强制必经点（不含起点）：其余打卡点仅软引导 + <40m 吸附
-                        let must_bd: Vec<(f64, f64)> =
-                            pol.must_points.iter().skip(1).copied().collect();
+                        // 硬点 = 必经点 + 随机普通点，全部强经过；waypoints[0] 为起点。
+                        // 普通点先按连通性过滤，避免选中围栏裁断/孤立分量上的不可达点。
+                        let reachable = crate::track::generate_road::reachable_ordinary(
+                            &filtered, &fixed, &ordinary,
+                        );
+                        if reachable.len() < ordinary.len() {
+                            log(&format!(
+                                "⚠ [track] {} 个普通点不可达（围栏裁断/路网孤立），已排除",
+                                ordinary.len() - reachable.len()
+                            ));
+                        }
+                        // 过滤后不足最少普通点数：直接报错，不静默降级（否则无法满足判定）。
+                        crate::track::generate_road::ensure_enough_ordinary(reachable.len())?;
+                        let selected = crate::track::generate_road::select_route_points(
+                            &fixed,
+                            &reachable,
+                            params.seed,
+                            params.ordinary_pick,
+                        );
+                        let picked = selected.len().saturating_sub(fixed.len());
+                        log(&format!(
+                            "√ [track] 硬点 {} 个（必经 {} + 随机普通 {}），普通点 {} 个（未选 {}）",
+                            selected.len(),
+                            fixed.len(),
+                            picked,
+                            ordinary.len(),
+                            ordinary.len().saturating_sub(picked),
+                        ));
+                        for (i, &(lat, lon)) in selected.iter().enumerate() {
+                            log(&format!("  [track] 硬点[{i}] BD=({lat:.6},{lon:.6})"));
+                        }
+                        if let Some(&(slat, slon)) = selected.first() {
+                            log(&format!("√ [track] 起点 BD=({slat:.6},{slon:.6})"));
+                        }
+                        // 硬点（不含起点）：必经点 + 随机普通点，全部强经过 + <40m 吸附
+                        let must_bd: Vec<(f64, f64)> = selected.iter().skip(1).copied().collect();
                         match crate::track::generate_road::build_road(
                             params.dist,
                             params.dur,
                             params.seed,
                             start_ms,
-                            &route_pts,
+                            &selected,
                             &must_bd,
                             &filtered,
                         ) {
@@ -214,7 +239,15 @@ pub fn run_full_flow(
                                     filtered.buildings.len(),
                                     fences.len()
                                 ));
+                                // App 语义：提交完整点位，isPass 标记实际经过的点。
+                                passed_pts = selected.clone();
                                 t
+                            }
+                            Err(e) if e.contains("不可达") => {
+                                // 策略必经点走不到属真·不可达，不静默回退，直接提示改经典模式。
+                                return Err(format!(
+                                    "真实道路模式失败：{e}。请改用经典模式（--route legacy）后重试"
+                                ));
                             }
                             Err(e) => {
                                 log(&format!("⚠ [track] 道路路由失败，回退经典算法: {e}"));
@@ -280,8 +313,24 @@ pub fn run_full_flow(
             .unwrap_or_default(),
     ));
 
-    // ④ 五点 wrapper（跑完态）
-    let five = five_point_wrapper(&pts, track.startTime);
+    // 逐点标 isPass：命中实际经过集合（passed_pts）为 true，其余 false（与 App 一致）。
+    for p in submitted_pts.iter_mut() {
+        let is_pass = match (
+            p.get("lat").and_then(|v| v.as_f64()),
+            p.get("lon").and_then(|v| v.as_f64()),
+        ) {
+            (Some(lat), Some(lon)) => passed_pts
+                .iter()
+                .any(|q| (q.0 - lat).abs() < 1e-6 && (q.1 - lon).abs() < 1e-6),
+            _ => false,
+        };
+        if let Some(obj) = p.as_object_mut() {
+            obj.insert("isPass".into(), Value::Bool(is_pass));
+        }
+    }
+
+    // ④ 五点 wrapper（完整点位，isPass 逐点标记）
+    let five = five_point_wrapper(&submitted_pts, track.startTime);
     let _ = &five;
 
     // ⑤ 提交（sportType=1）
@@ -293,6 +342,7 @@ pub fn run_full_flow(
         policy: pol.policy,
         policy_ts: pol.timestamp,
         min_distance: pol.min_distance,
+        min_run_time: pol.min_run_time,
         weight: if sess.weight > 0.0 { sess.weight } else { 68.0 },
         face_check: params.face_check,
         five_point_json: five,
@@ -306,7 +356,7 @@ pub fn run_full_flow(
     // 从提交结果回填 track.startTime（含随机秒偏移），保证 body/OBS/flag 全链一致
     let mut track_for_obs = sp.track.clone();
     track_for_obs.startTime = result.start_ms;
-    let obj = build_obs_object(&track_for_obs, result.rrid, &result.uuid, sess.uid, &pts);
+    let obj = build_obs_object(&track_for_obs, result.rrid, &result.uuid, sess.uid, &submitted_pts);
     let payload = obj.to_string().into_bytes();
     let keys = obs_keys(&track_for_obs, result.rrid, &result.uuid);
     let obs_ok = super::obs::upload_both_keys(client, &keys, &payload, log);

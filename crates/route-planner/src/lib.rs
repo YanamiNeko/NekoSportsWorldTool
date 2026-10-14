@@ -22,7 +22,7 @@ pub mod smooth;
 pub mod speed;
 
 pub use biomech::{cadence_for, fatigue_from_km, gait, ou_cadence_series, speed_from, stride_for};
-pub use graph::{point_in_polygon, Coord, RoadGraph};
+pub use graph::{filter_same_component, point_in_polygon, Coord, RoadGraph};
 pub use kinematics::{pace_profile, speed_limit_ahead, KinParams};
 pub use load::{load_osm, parse_osm};
 pub use noise::{ar1_xy, GpsJitter};

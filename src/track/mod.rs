@@ -11,7 +11,10 @@ pub mod wire;
 
 #[cfg(test)]
 mod tests {
-    use super::generate_road::build_road;
+    use super::generate_road::{
+        build_road, ensure_enough_ordinary, reachable_ordinary, select_route_points,
+        select_route_points_reachable, DEFAULT_ORDINARY_PICK, MIN_ORDINARY_PICK,
+    };
     use super::generator::build;
     use super::geom::{MET_PER_DEG_LAT, MET_PER_DEG_LNG};
 
@@ -77,6 +80,170 @@ mod tests {
         g.compute_anchor();
         g.rebuild_index();
         g
+    }
+
+    /// 选点：必经点全选 + 普通点恰好取 pick 个，seed 可复现，不足则全取。
+    #[test]
+    fn test_select_route_points() {
+        let fixed = vec![(1.0, 1.0)];
+        let ordinary = vec![(2.0, 2.0), (3.0, 3.0), (4.0, 4.0), (5.0, 5.0)];
+        let sel = select_route_points(&fixed, &ordinary, 42, DEFAULT_ORDINARY_PICK);
+        assert_eq!(sel.len(), 1 + DEFAULT_ORDINARY_PICK, "sel={sel:?}");
+        assert!(sel.contains(&(1.0, 1.0)), "必经点必须入选");
+        // 同 seed 可复现
+        assert_eq!(
+            sel,
+            select_route_points(&fixed, &ordinary, 42, DEFAULT_ORDINARY_PICK)
+        );
+        // pick 可变：取 3 个普通点
+        assert_eq!(
+            select_route_points(&fixed, &ordinary, 42, 3).len(),
+            4,
+            "pick=3 应含必经 + 3 普通"
+        );
+        // 普通点不足：有几个取几个
+        let few = select_route_points(&fixed, &[(9.0, 9.0)], 1, DEFAULT_ORDINARY_PICK);
+        assert_eq!(few.len(), 2);
+        // fixed 与 ordinary 重叠时去重，不重复
+        let overlap =
+            select_route_points(&[(1.0, 1.0)], &[(1.0, 1.0), (2.0, 2.0)], 7, DEFAULT_ORDINARY_PICK);
+        assert_eq!(overlap.len(), 2);
+    }
+
+    /// 必经点保序：去掉起点后，`fixed` 子序列必须与原序一致（起点仍是辐射序首点）。
+    #[test]
+    fn test_select_route_points_keeps_fixed_order() {
+        let fixed = vec![(1.0, 1.0), (3.0, 3.0), (5.0, 5.0)];
+        let ordinary = vec![(2.0, 2.0), (4.0, 4.0), (6.0, 6.0), (7.0, 7.0)];
+        let sel = select_route_points(&fixed, &ordinary, 3, 2);
+        assert_eq!(sel.len(), fixed.len() + 2, "{sel:?}");
+        let tail_fixed: Vec<(f64, f64)> =
+            sel.iter().skip(1).filter(|q| fixed.contains(q)).copied().collect();
+        let expect: Vec<(f64, f64)> =
+            fixed.iter().filter(|q| **q != sel[0]).copied().collect();
+        assert_eq!(tail_fixed, expect, "必经点顺序被破坏");
+    }
+
+    /// 起点旋转（辐射序首点非 fixed[0]）时：预览（`plan_road_view`）与真跑（flow）
+    /// 共用 `select_route_points_reachable`，同 seed 必须选出同一旋转起点，
+    /// 且去掉起点后 fixed 子序列仍保持原序。
+    #[test]
+    fn test_start_rotation_preview_matches_actual() {
+        let net = road_grid();
+        let fixed = sample_points(); // 该分布下辐射序首点为 fixed[4]，起点发生旋转
+        // 两个主分量内的普通点，满足 MIN_ORDINARY_PICK
+        let ordinary = vec![(38.900921, 121.541610), (38.900600, 121.541900)];
+        let seed = 20_261_012u64;
+        let pick = MIN_ORDINARY_PICK;
+        let sel = select_route_points_reachable(&net, &fixed, &ordinary, seed, pick)
+            .expect("select_route_points_reachable");
+        // 用例前提：起点确实旋转（否则测试无意义）
+        assert_ne!(sel[0], fixed[0], "用例未触发起点旋转: sel={sel:?}");
+        // 预览与真跑同 seed 可复现
+        assert_eq!(
+            sel,
+            select_route_points_reachable(&net, &fixed, &ordinary, seed, pick).unwrap(),
+            "同 seed 预览与真跑选点不一致"
+        );
+        // 与底层选点一致（plan_road_view 与 flow 均调用二者）
+        let reachable = reachable_ordinary(&net, &fixed, &ordinary);
+        assert_eq!(
+            sel,
+            select_route_points(&fixed, &reachable, seed, pick),
+            "预览/真跑共用路径与底层选点不一致"
+        );
+        // 去掉起点后 fixed 子序列保持原序（旋转不破坏相对顺序）
+        let tail: Vec<(f64, f64)> =
+            sel.iter().skip(1).filter(|q| fixed.contains(q)).copied().collect();
+        let expect: Vec<(f64, f64)> =
+            fixed.iter().filter(|q| **q != sel[0]).copied().collect();
+        assert_eq!(tail, expect, "起点旋转破坏了 fixed 相对顺序");
+    }
+
+    /// pick=0/1 会被夹到 MIN_ORDINARY_PICK（普通点足够时）。
+    #[test]
+    fn test_select_route_points_clamps_min() {
+        let fixed = vec![(1.0, 1.0)];
+        let ordinary = vec![(2.0, 2.0), (3.0, 3.0), (4.0, 4.0), (5.0, 5.0)];
+        for pick in [0usize, 1] {
+            let sel = select_route_points(&fixed, &ordinary, 9, pick);
+            assert_eq!(sel.len(), 1 + MIN_ORDINARY_PICK, "pick={pick} sel={sel:?}");
+        }
+    }
+
+    /// 可用普通点不足 MIN_ORDINARY_PICK 时直接报错。
+    #[test]
+    fn test_ensure_enough_ordinary() {
+        assert!(ensure_enough_ordinary(MIN_ORDINARY_PICK).is_ok());
+        assert!(ensure_enough_ordinary(MIN_ORDINARY_PICK - 1).is_err());
+        assert!(ensure_enough_ordinary(0).is_err());
+    }
+
+    /// 连通性过滤：与必经点主分量断开的普通点被剔除，连通的保留。
+    #[test]
+    fn test_reachable_ordinary_filters_disconnected() {
+        let mut g = road_grid();
+        // 约 2km 外再加一个孤立小分量。
+        let a = g.add_node(route_planner::Coord::new(121.560, 38.920));
+        let b = g.add_node(route_planner::Coord::new(121.5602, 38.920));
+        let d = route_planner::graph::EdgeData {
+            way_id: 9999,
+            oneway: false,
+            highway: "residential".into(),
+            maxspeed_kmh: None,
+            length_m: 20.0,
+        };
+        g.add_edge(a, b, d.clone());
+        g.add_edge(b, a, d);
+        g.rebuild_index();
+
+        let fixed = vec![(38.901678, 121.540241)]; // 主网格内
+        let near = (38.901678, 121.540941); // 主网格内
+        let far = (38.920, 121.560); // 孤立分量上
+        let keep = reachable_ordinary(&g, &fixed, &[near, far]);
+        assert_eq!(keep, vec![near], "孤立分量上的普通点必须被剔除");
+    }
+
+    /// 点位数分类：isFixed 字段决定必经/普通。
+    #[test]
+    fn test_points_fixed_free_split() {
+        let pts = vec![
+            serde_json::json!({"lat": 1.0, "lon": 1.0, "isFixed": 1}),
+            serde_json::json!({"lat": 2.0, "lon": 2.0, "isFixed": 0}),
+            serde_json::json!({"lat": 3.0, "lon": 3.0}),
+        ];
+        assert_eq!(crate::api::points::points_fixed(&pts), vec![(1.0, 1.0)]);
+        assert_eq!(
+            crate::api::points::points_free(&pts),
+            vec![(2.0, 2.0), (3.0, 3.0)]
+        );
+    }
+
+    /// 硬点解析：isFixed 决定必经/普通；policy 不参与（无必经点字段）。
+    #[test]
+    fn test_resolve_hard_points_by_is_fixed() {
+        let pts = vec![
+            serde_json::json!({"lat": 1.0, "lon": 1.0, "isFixed": 1}),
+            serde_json::json!({"lat": 2.0, "lon": 2.0, "isFixed": 0}),
+            serde_json::json!({"lat": 3.0, "lon": 3.0}),
+        ];
+        let (fixed, ordinary) = crate::api::points::resolve_hard_points(&pts);
+        assert_eq!(fixed, vec![(1.0, 1.0)]);
+        assert_eq!(ordinary, vec![(2.0, 2.0), (3.0, 3.0)]);
+    }
+
+    /// 五点实体：`isPass` 逐点取自点位自身（App 语义），不再一律 true；缺省视为 false。
+    #[test]
+    fn test_five_point_payload_ispass_per_point() {
+        let pts = vec![
+            serde_json::json!({"lat": 1.0, "lon": 1.0, "isFixed": 1, "isPass": true}),
+            serde_json::json!({"lat": 2.0, "lon": 2.0, "isFixed": 0, "isPass": false}),
+        ];
+        let out = five_point_payload(&pts, 0);
+        assert_eq!(out[0]["isPass"], true);
+        assert_eq!(out[1]["isPass"], false);
+        let out2 = five_point_payload(&[serde_json::json!({"lat": 3.0, "lon": 3.0})], 0);
+        assert_eq!(out2[0]["isPass"], false, "缺省 isPass 应为 false");
     }
 
     /// 模式 B（真实道路路由）：距离精确、哨兵/断崖语义与模式 A 一致。

@@ -80,10 +80,17 @@ pub struct Config {
     /// 路线算法：legacy | road。
     #[serde(default = "default_route_mode")]
     pub route_mode: String,
+    /// 真实道路模式随机选中的普通打卡点数量（运行时可变）。
+    #[serde(default = "default_ordinary_pick")]
+    pub ordinary_pick: usize,
 }
 
 fn default_route_mode() -> String {
     "legacy".into()
+}
+
+fn default_ordinary_pick() -> usize {
+    crate::track::generate_road::DEFAULT_ORDINARY_PICK
 }
 
 fn default_f32() -> f32 {
@@ -105,6 +112,19 @@ fn default_update_check() -> String {
     "silent".into()
 }
 
+impl Config {
+    /// 规范化旧配置：`ordinary_pick` 低于下限时抬到默认值。
+    ///
+    /// 早期版本 GUI/CLI 允许把普通点数量存成 0/1，升级后直接判错会让用户无法运行；
+    /// 这里统一抬到合法值，避免因历史配置罢工。
+    pub fn normalized(mut self) -> Self {
+        if self.ordinary_pick < crate::track::generate_road::MIN_ORDINARY_PICK {
+            self.ordinary_pick = crate::track::generate_road::DEFAULT_ORDINARY_PICK;
+        }
+        self
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -123,6 +143,7 @@ impl Default for Config {
             update_check: default_update_check(),
             osm_path: String::new(),
             route_mode: default_route_mode(),
+            ordinary_pick: default_ordinary_pick(),
         }
     }
 }
@@ -237,7 +258,7 @@ pub fn clear_session() {
 }
 
 pub fn load_config() -> Config {
-    read_json("config.json").unwrap_or_default()
+    read_json::<Config>("config.json").unwrap_or_default().normalized()
 }
 
 pub fn save_config(c: &Config) -> Result<(), String> {
@@ -337,6 +358,20 @@ mod storage_tests {
             header.get("manufacturer").is_none() && header.get("brand").is_none(),
             "persisting local brand metadata must not invent new protocol fields"
         );
+    }
+
+    #[test]
+    fn config_normalized_bumps_legacy_ordinary_pick() {
+        let mut legacy = Config::default();
+        legacy.ordinary_pick = 0;
+        assert_eq!(
+            legacy.normalized().ordinary_pick,
+            crate::track::generate_road::DEFAULT_ORDINARY_PICK,
+            "低于下限的旧配置必须被抬到默认值，而不是报错"
+        );
+        let mut ok = Config::default();
+        ok.ordinary_pick = 5;
+        assert_eq!(ok.normalized().ordinary_pick, 5, "合法值不应被改动");
     }
 
     #[test]

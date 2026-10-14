@@ -93,21 +93,26 @@ fn edge_inside(polys: &[Vec<Coord>], a: Coord, b: Coord) -> bool {
 
 /// 生成路网预览（对齐 + 围栏裁剪 + 闭环路由），不产生协议字段。
 ///
-/// 预览阶段拿不到 policy 必经点，故仅做「软引导 + 吸附」，不强制经过任何打卡点。
+/// 硬点与真实提交一致：必经点（`fixed`）+ 随机 `pick` 个普通点（`ordinary`），
+/// 全部强经过；随机性由 `seed` 决定，与实际运行同 seed 时选择一致。
+/// `pick` 为随机抽取的普通点数量（运行时可变，别写死）。
 pub fn plan_road_view(
     net: &RoadGraph,
-    points_bd: &[(f64, f64)],
+    fixed: &[(f64, f64)],
+    ordinary: &[(f64, f64)],
     dist: f64,
     seed: u64,
     fences: &[Vec<(f64, f64)>],
+    pick: usize,
 ) -> Result<RoadPlan, String> {
     let mut g = net.clone();
     align_network(&mut g);
     g = apply_fences(&g, fences);
-    let ordered = radial_order(points_bd);
+    let ordered = select_route_points_reachable(&g, fixed, ordinary, seed, pick)?;
     let waypoints: Vec<Coord> = ordered.iter().map(|p| Coord::new(p.1, p.0)).collect();
+    let must_pass: Vec<Coord> = waypoints.iter().skip(1).copied().collect();
     let opts = RouteOptions::default();
-    let route = plan_route_split(&g, &waypoints, &[], dist, seed, &opts)?;
+    let route = plan_route_split(&g, &waypoints, &must_pass, dist, seed, &opts)?;
     let route_pts: Vec<(f64, f64)> = route.points.iter().map(|p| (p.lat, p.lon)).collect();
     let edges: Vec<Vec<(f64, f64)>> = g
         .edges_deg()
@@ -154,6 +159,123 @@ pub fn align_network(net: &mut RoadGraph) {
     net.rebuild_index();
 }
 
+/// 真实道路模式随机选中的普通打卡点数量的默认值（运行时可变，别写死）。
+pub const DEFAULT_ORDINARY_PICK: usize = 2;
+
+/// 随机普通点数量的下限（App 判定「至少通过 N 个普通点位」；不同学校可改）。
+pub const MIN_ORDINARY_PICK: usize = 2;
+
+/// 返回 `ordinary` 中与必经点（`fixed`）主分量连通的子集。
+///
+/// 普通点一旦入选即为强制必经，必须保证在当前（已按围栏裁剪的）路网上可达；
+/// 围栏裁断或路网孤立分量上的点会在此被剔除，避免随机选中后整条路线规划失败。
+pub fn reachable_ordinary(
+    net: &RoadGraph,
+    fixed: &[(f64, f64)],
+    ordinary: &[(f64, f64)],
+) -> Vec<(f64, f64)> {
+    let to_coord = |p: &(f64, f64)| Coord::new(p.1, p.0);
+    let anchors: Vec<Coord> = fixed.iter().map(to_coord).collect();
+    let cands: Vec<Coord> = ordinary.iter().map(to_coord).collect();
+    let keep = route_planner::filter_same_component(net, &anchors, &cands);
+    let key = |lat: f64, lon: f64| ((lon * 1e6).round() as i64, (lat * 1e6).round() as i64);
+    let keep_set: std::collections::HashSet<(i64, i64)> =
+        keep.iter().map(|c| key(c.lat, c.lon)).collect();
+    ordinary
+        .iter()
+        .copied()
+        .filter(|p| keep_set.contains(&key(p.0, p.1)))
+        .collect()
+}
+
+/// 可用普通点不足 `MIN_ORDINARY_PICK` 时返回错误（预览与真跑共用）。
+///
+/// App 判定规则含「至少通过 N 个普通点位」，普通点被围栏/连通性过滤后若不足，
+/// 继续生成也无法达标，直接报错优于静默降级。
+pub fn ensure_enough_ordinary(reachable: usize) -> Result<(), String> {
+    if reachable < MIN_ORDINARY_PICK {
+        Err(format!(
+            "可用普通打卡点仅 {reachable} 个（围栏裁断/路网孤立），不足至少 {MIN_ORDINARY_PICK} 个，\
+             无法满足「至少通过 {MIN_ORDINARY_PICK} 个普通点位」；请检查围栏/路网或改用经典模式"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// 先按连通性过滤普通点，再调用 `select_route_points`（预览与真跑共用）。
+/// 过滤后不足 `MIN_ORDINARY_PICK` 个普通点时返回错误。
+pub fn select_route_points_reachable(
+    net: &RoadGraph,
+    fixed: &[(f64, f64)],
+    ordinary: &[(f64, f64)],
+    seed: u64,
+    pick: usize,
+) -> Result<Vec<(f64, f64)>, String> {
+    let reachable = reachable_ordinary(net, fixed, ordinary);
+    ensure_enough_ordinary(reachable.len())?;
+    Ok(select_route_points(fixed, &reachable, seed, pick))
+}
+
+/// 从点位挑选参与路线的硬点：必经点（`fixed`，全部）+ 随机 `pick` 个普通点
+/// （`ordinary`）。`pick` 夹到 `[MIN_ORDINARY_PICK, ordinary.len()]`。
+///
+/// 返回顺序：`[起点] ++ 强经过顺序`，其中
+/// - 起点 = 全部硬点质心角序（`radial_order`）的首点，**不会因 fixed 而变成第一个必经点**；
+/// - 强经过顺序 = `fixed` 保持原序在前，随机普通点按质心角序在后——保证策略必经点顺序不被
+///   打乱（`plan_route_split` 的 must 按此顺序强经过）。
+///
+/// 注意：起点从「全部硬点」里按辐射序选取，可能落在任意一个策略/fixed 点上。因此最终经过顺序
+/// 是「以起点开头、其余硬点保持上述相对顺序」的旋转——策略点的首元素不保证，顺序按此旋转理解。
+///
+/// 随机性由 `seed` 决定，保证预览与实际运行可复现且一致。
+pub fn select_route_points(
+    fixed: &[(f64, f64)],
+    ordinary: &[(f64, f64)],
+    seed: u64,
+    pick: usize,
+) -> Vec<(f64, f64)> {
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+    let near = |a: &(f64, f64), b: &(f64, f64)| {
+        (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
+    };
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ 0x5EED_C0FF_EE00_1234);
+    let mut pool = ordinary.to_vec();
+    pool.shuffle(&mut rng);
+    let pick = pick.max(MIN_ORDINARY_PICK).min(pool.len());
+    let picked: Vec<(f64, f64)> = pool.into_iter().take(pick).collect();
+
+    // 起点候选集合（全部硬点，去重）。
+    let mut all: Vec<(f64, f64)> = fixed.to_vec();
+    for p in &picked {
+        if !all.iter().any(|q| near(q, p)) {
+            all.push(*p);
+        }
+    }
+    let start = radial_order(&all).first().copied();
+
+    // 强经过顺序：fixed 保序在前，随机普通点按质心角序在后。
+    let mut must: Vec<(f64, f64)> = fixed.to_vec();
+    for p in radial_order(&picked) {
+        if !must.iter().any(|q| near(q, &p)) {
+            must.push(p);
+        }
+    }
+
+    // 组装：起点在前，其余按 must 顺序（route_pts[1..] 即强经过 must 列表）。
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(must.len() + 1);
+    if let Some(s) = start {
+        out.push(s);
+    }
+    for p in must {
+        if !out.iter().any(|q| near(q, &p)) {
+            out.push(p);
+        }
+    }
+    out
+}
+
 /// 按质心角度排序打卡点，形成自然环序。
 pub fn radial_order(points_bd: &[(f64, f64)]) -> Vec<(f64, f64)> {
     let n = points_bd.len();
@@ -195,8 +317,9 @@ fn route_ring(route: &Route, c_lat: f64, c_lng: f64) -> (Vec<(f64, f64)>, Vec<f6
 
 /// 模式 B：真实道路拓扑路由轨迹生成。
 ///
-/// `route_bd[0]` 为起点，`route_bd[1..]` 为软引导点（用于方向锚点，不必全经过）；
-/// `must_bd` 为强制必经点（按序，可为空，最终必达）；吸附在 `route_bd` 全量上做。
+/// `route_bd[0]` 为起点；`route_bd[1..]` 为硬点（必经点 + 随机普通点），全部按序强制经过；
+/// `must_bd` 为强制必经点（按序，可为空，最终必达，实际传 `route_bd[1..]`）；
+/// 吸附在 `route_bd` 全量上做。
 pub fn build_road(
     dist: f64,
     dur: i64,

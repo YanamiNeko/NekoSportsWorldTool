@@ -362,6 +362,7 @@ impl App {
                 face_check: config.face_check,
                 plan: None,
                 route_mode: crate::track::generate_road::RouteMode::from_str(&config.route_mode),
+                ordinary_pick: config.ordinary_pick as i64,
                 map: map::MapState::default(),
                 preview: None,
                 preview_stale: true,

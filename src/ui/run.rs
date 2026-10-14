@@ -79,6 +79,8 @@ pub struct RunPage {
     pub plan: Option<RunPlan>,
     /// 路线算法模式
     pub route_mode: RouteMode,
+    /// 真实道路模式随机选中的普通打卡点数量（运行时可调）
+    pub ordinary_pick: i64,
     /// 地图视图状态
     pub map: MapState,
     /// 路网预览（真实道路路由）
@@ -398,6 +400,24 @@ impl App {
                     ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
                 }
             });
+            if page.route_mode == RouteMode::Road {
+                ui.horizontal(|ui| {
+                    ui.label("随机普通点：");
+                    let before = page.ordinary_pick;
+                    mobile::drag_i64(
+                        ui,
+                        "run_ordinary_pick",
+                        &mut page.ordinary_pick,
+                        crate::track::generate_road::MIN_ORDINARY_PICK as i64..=10,
+                        1.0,
+                        "",
+                        " 个",
+                    );
+                    if page.ordinary_pick != before {
+                        page.preview_stale = true;
+                    }
+                });
+            }
         }
 
         // 切换到真实道路路由时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
@@ -516,23 +536,27 @@ impl App {
             self.run_page.map_fitted = false;
             self.run_page.preview_stale = false;
             // 点位缓存按锚点隔离（main 的串城市防护）；锚点无效时视为无缓存
-            let cached = self
-                .identity
-                .anchor_coordinate()
-                .ok()
-                .and_then(crate::api::model::load_points_cache_for);
+            let anchor = self.identity.anchor_coordinate().ok();
+            let cached = anchor.and_then(crate::api::model::load_points_cache_for);
             if let Some((_ts, pts)) = cached {
-                let pts_bd = crate::api::points::points_bd(&pts);
-                if !pts_bd.is_empty() {
+                // 硬点只由点位接口的 isFixed 决定，预览与真跑共用同一解析。
+                let (fixed, ordinary) = crate::api::points::resolve_hard_points(&pts);
+                if !fixed.is_empty() || !ordinary.is_empty() {
                     let fences = crate::api::model::load_fence_cache().unwrap_or_default();
                     match crate::track::generate_road::plan_road_view(
                         &net,
-                        &pts_bd,
+                        &fixed,
+                        &ordinary,
                         plan.dist * 1000.0,
                         plan.seed,
                         &fences,
+                        self.run_page.ordinary_pick.max(0) as usize,
                     ) {
                         Ok(p) => self.run_page.preview = Some(p),
+                        Err(e) if e.contains("不可达") => {
+                            self.status =
+                                format!("路线预览失败：{e}（必经点不可达，请改用经典模式）")
+                        }
                         Err(e) => self.status = format!("路线预览失败：{e}"),
                     }
                 } else {
@@ -707,6 +731,7 @@ impl App {
         let start_ms = plan.start_ms;
         let face_check = if page.face_check { 1 } else { 0 };
         let route_mode = page.route_mode;
+        let ordinary_pick = page.ordinary_pick.max(0) as usize;
         self.config.dist_min = page.dist_min;
         self.config.dist_max = page.dist_max;
         self.config.pace_min = page.pace_min;
@@ -714,6 +739,7 @@ impl App {
         self.config.face_check = page.face_check;
         self.config.manual_altitude = manual_altitude;
         self.config.manual_altitude_range = manual_altitude_range;
+        self.config.ordinary_pick = ordinary_pick;
         self.config.route_mode = if route_mode == RouteMode::Road {
             "road".into()
         } else {
@@ -744,6 +770,7 @@ impl App {
                 manual_altitude_range,
                 seed,
                 route_mode,
+                ordinary_pick,
             };
             let payload = match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
                 Ok(out) => {

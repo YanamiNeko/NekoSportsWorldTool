@@ -126,6 +126,18 @@ fn cmd_run(rest: &[&str]) -> i32 {
     let route_mode = crate::track::generate_road::RouteMode::from_str(
         get(&flags, "route").unwrap_or(&cfg.route_mode),
     );
+    // 只对显式 `--pick` 校验并报错；未传参时用（已规范化的）配置值，不因历史配置罢工。
+    let ordinary_pick: usize = match get(&flags, "pick") {
+        Some(v) => match v.parse::<usize>() {
+            Ok(n) if n >= crate::track::generate_road::MIN_ORDINARY_PICK => n,
+            _ => {
+                let min_pick = crate::track::generate_road::MIN_ORDINARY_PICK;
+                eprintln!("--pick 需为不小于 {min_pick} 的整数（App 要求至少通过 {min_pick} 个普通点位）");
+                return 1;
+            }
+        },
+        None => cfg.ordinary_pick,
+    };
 
     let dist = if dist_km > 0.0 {
         dist_km as f64 * 1000.0
@@ -177,6 +189,7 @@ fn cmd_run(rest: &[&str]) -> i32 {
         manual_altitude_range,
         seed,
         route_mode,
+        ordinary_pick,
     };
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {

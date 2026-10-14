@@ -125,3 +125,34 @@ pub fn points_bd(points: &[Value]) -> Vec<(f64, f64)> {
         })
         .collect()
 }
+
+/// 点位 → BD 系 (lat, lon)，按 `isFixed` 分类。
+fn points_by_fixed(points: &[Value], fixed: bool) -> Vec<(f64, f64)> {
+    points
+        .iter()
+        .filter(|p| (p.get("isFixed").and_then(|v| v.as_i64()).unwrap_or(0) != 0) == fixed)
+        .filter_map(|p| {
+            let lat = p.get("lat")?.as_f64()?;
+            let lon = p.get("lon")?.as_f64()?;
+            Some((lat, lon))
+        })
+        .collect()
+}
+
+/// 必经点（`isFixed != 0`，BD 系）。
+pub fn points_fixed(points: &[Value]) -> Vec<(f64, f64)> {
+    points_by_fixed(points, true)
+}
+
+/// 普通打卡点（`isFixed == 0` 或缺失，BD 系）。
+pub fn points_free(points: &[Value]) -> Vec<(f64, f64)> {
+    points_by_fixed(points, false)
+}
+
+/// 由点位解析硬点，返回 `(必经点, 普通点)`：必经点 = `isFixed != 0` 的点；普通点 = `isFixed == 0`。
+///
+/// 预览与实际运行共用此函数，保证二者的选点输入一致。policy 响应不含必经点，
+/// 硬点唯一来源就是点位接口的 `isFixed`。
+pub fn resolve_hard_points(points: &[Value]) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    (points_fixed(points), points_free(points))
+}

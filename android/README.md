@@ -64,6 +64,12 @@ SDK 默认使用 `ANDROID_HOME`，未设置时使用 `%LOCALAPPDATA%\Android\Sdk
 
 ## 离线验证
 
+发布脚本的语法与版本盖章可单独验证，无需 Android SDK、签名密钥或 gh 登录；此检查只在内存中处理 manifest，不构建或发布 APK：
+
+```powershell
+./android/test-release.ps1
+```
+
 ```powershell
 cargo test --lib --locked
 cargo check --locked --all-targets

@@ -40,9 +40,9 @@ Write-Output "版本：$versionName（versionCode $versionCode）→ $Repo"
 
 # ── 盖章 AndroidManifest ─────────────────────────────────────
 $manifestText = Get-Content $manifest -Raw
-$updated = $manifestText -replace 'android:versionCode="\d+"', "android:versionCode=\"$versionCode\""
-$updated = $updated -replace 'android:versionName="[^"]*"', "android:versionName=\"$versionName\""
-if ($updated -eq $manifestText -and $manifestText -notmatch [regex]::Escape("android:versionName=\"$versionName\"")) {
+$updated = $manifestText -replace 'android:versionCode="\d+"', ('android:versionCode="{0}"' -f $versionCode)
+$updated = $updated -replace 'android:versionName="[^"]*"', ('android:versionName="{0}"' -f $versionName)
+if ($updated -eq $manifestText -and $manifestText -notmatch [regex]::Escape(('android:versionName="{0}"' -f $versionName))) {
     throw 'AndroidManifest.xml 盖章失败（未匹配到 versionCode/versionName）'
 }
 [IO.File]::WriteAllText($manifest, $updated)

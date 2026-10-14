@@ -11,6 +11,7 @@ use eframe::egui;
 pub struct DataPage {
     pub semester: Option<SemesterSummary>,
     pub cheat: Option<CheatReport>,
+    pub cheat_error: Option<String>,
     pub rank_rows: Vec<RankRow>,
     /// 0=个人日 1=个人月 2=班级日 3=班级月 4=院系日 5=院系月 6=室内日 7=室内周 8=室内月 9=历史日 10=历史月
     pub rank_sel: usize,
@@ -88,9 +89,14 @@ impl App {
             .default_open(true)
             .show(ui, |ui| {
                 mobile::row(ui, |ui| {
+                    if let Some(error) = &self.data_page.cheat_error {
+                        ui.colored_label(theme::warn(), format!("自查失败：{error}"));
+                    }
                     match &self.data_page.cheat {
                         Some(c) => {
-                            if c.is_clean() {
+                            if self.data_page.cheat_error.is_some() {
+                                ui.label(format!("上次自查结果：{}", c.self_brief()));
+                            } else if c.is_clean() {
                                 ui.colored_label(
                                     theme::ok(),
                                     "自查：正常（self=null）",

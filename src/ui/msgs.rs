@@ -78,7 +78,6 @@ impl App {
                 self.log.push(&msg);
             }
         }
-        let got_semester = semester_json.is_some();
         let got_cheat = cheat_json.is_some();
         let got_rank = rank_json.is_some();
 
@@ -187,11 +186,12 @@ impl App {
         }
         if let Some(v) = records_json {
             self.records_busy = false;
-            match serde_json::from_str::<Vec<crate::api::records::RecordRow>>(&v) {
-                Ok(rows) => {
+            match serde_json::from_str::<Result<Vec<crate::api::records::RecordRow>, String>>(&v) {
+                Ok(Ok(rows)) => {
                     self.status = format!("已刷新 {} 条记录", rows.len());
                     self.records_page.rows = rows;
                 }
+                Ok(Err(error)) => self.status = format!("记录拉取失败：{error}"),
                 Err(_) => self.status = "记录数据解析失败".into(),
             }
         }
@@ -207,21 +207,30 @@ impl App {
             }
         }
         if let Some(v) = semester_json {
-            match serde_json::from_str::<crate::api::semester::SemesterSummary>(&v) {
-                Ok(sm) => self.data_page.semester = Some(sm),
+            match serde_json::from_str::<
+                Result<Option<crate::api::semester::SemesterSummary>, String>,
+            >(&v)
+            {
+                Ok(Ok(summary)) => self.data_page.semester = summary,
+                Ok(Err(error)) => self.status = format!("学期数据拉取失败：{error}"),
                 Err(_) => self.status = "学期数据解析失败".into(),
             }
         }
         if let Some(v) = cheat_json {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&v) {
-                self.data_page.cheat = Some(crate::api::cheat::CheatReport {
-                    self_info: val.get("self").cloned().unwrap_or(serde_json::Value::Null),
-                    list: val
-                        .get("list")
-                        .and_then(|l| l.as_array())
-                        .cloned()
-                        .unwrap_or_default(),
-                });
+            let result = serde_json::from_str::<Result<crate::api::cheat::CheatReport, String>>(&v)
+                .unwrap_or_else(|_| Err("自查数据解析失败".into()));
+            match result {
+                Ok(report) => {
+                    self.data_page.cheat = Some(report);
+                    self.data_page.cheat_error = None;
+                    if self.status.starts_with("自查失败：") {
+                        self.status = "自查完成".into();
+                    }
+                }
+                Err(error) => {
+                    self.status = format!("自查失败：{error}");
+                    self.data_page.cheat_error = Some(error);
+                }
             }
         }
         if let Some(v) = rank_json {
@@ -340,9 +349,185 @@ impl App {
                 });
             }
         }
-        if got_semester || got_cheat || got_rank {
+        if got_cheat || got_rank {
             self.data_busy = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use crate::api::cheat::CheatReport;
+    use crate::api::records::RecordRow;
+    use crate::api::semester::SemesterSummary;
+    use crate::ui::jobs::refresh_message;
+    use serde_json::json;
+
+    fn saved_record() -> RecordRow {
+        serde_json::from_value(json!({
+            "rrid": 42,
+            "total_dis": 1200.0,
+            "total_time": 600,
+            "start_time": 1_700_000_000_000_i64,
+            "complete": true,
+            "avg_step_freq": 160
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn failed_records_refresh_preserves_rows_and_reports_error() {
+        let mut app = App::test_fixture();
+        app.records_page.rows.push(saved_record());
+        app.records_busy = true;
+        app.tx
+            .send(refresh_message::<Vec<RecordRow>>(
+                RECORDS,
+                Err("连接超时".into()),
+            ))
+            .unwrap();
+        app.poll_messages();
+        assert!(!app.records_busy);
+        assert_eq!(app.records_page.rows.len(), 1);
+        assert_eq!(app.records_page.rows[0].rrid, 42);
+        assert_eq!(app.status, "记录拉取失败：连接超时");
+    }
+
+    #[test]
+    fn successful_empty_records_refresh_clears_previous_rows() {
+        let mut app = App::test_fixture();
+        app.records_page.rows.push(saved_record());
+        app.records_busy = true;
+        app.tx
+            .send(refresh_message(RECORDS, Ok(Vec::<RecordRow>::new())))
+            .unwrap();
+        app.poll_messages();
+        assert!(!app.records_busy);
+        assert!(app.records_page.rows.is_empty());
+        assert_eq!(app.status, "已刷新 0 条记录");
+    }
+
+    #[test]
+    fn malformed_records_refresh_preserves_previous_rows() {
+        let mut app = App::test_fixture();
+        app.records_page.rows.push(saved_record());
+        app.records_busy = true;
+        app.tx.send(format!("{RECORDS}{{\"Ok\":null}}")).unwrap();
+        app.poll_messages();
+        assert!(!app.records_busy);
+        assert_eq!(app.records_page.rows[0].rrid, 42);
+        assert_eq!(app.status, "记录数据解析失败");
+    }
+
+    #[test]
+    fn failed_first_self_check_does_not_create_clean_report() {
+        let mut app = App::test_fixture();
+        app.data_busy = true;
+        app.tx
+            .send(refresh_message::<CheatReport>(CHEAT, Err("未登录".into())))
+            .unwrap();
+        app.poll_messages();
+        assert!(!app.data_busy);
+        assert!(app.data_page.cheat.is_none());
+        assert_eq!(app.data_page.cheat_error.as_deref(), Some("未登录"));
+        assert_eq!(app.status, "自查失败：未登录");
+    }
+
+    #[test]
+    fn failed_self_check_preserves_both_clean_and_flagged_previous_results() {
+        for self_info in [serde_json::Value::Null, json!({ "reason": "已标记" })] {
+            let mut app = App::test_fixture();
+            app.data_page.cheat = Some(CheatReport {
+                self_info: self_info.clone(),
+                list: vec![json!({ "name": "旧结果" })],
+            });
+            app.data_busy = true;
+            app.tx
+                .send(refresh_message::<CheatReport>(
+                    CHEAT,
+                    Err("连接超时".into()),
+                ))
+                .unwrap();
+            app.poll_messages();
+            let report = app.data_page.cheat.as_ref().unwrap();
+            assert_eq!(report.self_info, self_info);
+            assert_eq!(report.list.len(), 1);
+            assert_eq!(app.data_page.cheat_error.as_deref(), Some("连接超时"));
+            assert!(!app.data_busy);
+        }
+    }
+
+    #[test]
+    fn successful_self_check_clears_error_and_replaces_previous_result() {
+        let mut app = App::test_fixture();
+        app.data_page.cheat_error = Some("连接超时".into());
+        app.status = "自查失败：连接超时".into();
+        app.data_page.cheat = Some(CheatReport {
+            self_info: json!({ "reason": "旧结果" }),
+            list: vec![json!({ "name": "旧结果" })],
+        });
+        app.tx
+            .send(refresh_message(
+                CHEAT,
+                Ok(CheatReport {
+                    self_info: serde_json::Value::Null,
+                    list: Vec::new(),
+                }),
+            ))
+            .unwrap();
+        app.poll_messages();
+        let report = app.data_page.cheat.as_ref().unwrap();
+        assert!(report.is_clean());
+        assert!(report.list.is_empty());
+        assert!(app.data_page.cheat_error.is_none());
+        assert_eq!(app.status, "自查完成");
+    }
+
+    #[test]
+    fn malformed_self_check_is_an_error_and_keeps_previous_result() {
+        let mut app = App::test_fixture();
+        app.data_page.cheat = Some(CheatReport {
+            self_info: json!({ "reason": "旧结果" }),
+            list: Vec::new(),
+        });
+        app.data_busy = true;
+        app.tx.send(format!("{CHEAT}{{\"Ok\":{{}}}}")).unwrap();
+        app.poll_messages();
+        assert!(!app.data_page.cheat.as_ref().unwrap().is_clean());
+        assert_eq!(app.data_page.cheat_error.as_deref(), Some("自查数据解析失败"));
+        assert!(!app.data_busy);
+    }
+
+    #[test]
+    fn semester_failure_preserves_data_until_self_check_finishes() {
+        let mut app = App::test_fixture();
+        app.data_page.semester = Some(SemesterSummary {
+            sname: "旧学期".into(),
+            semester_dis: 1200.0,
+            semester_valid_dis: 1200.0,
+            semester_count: 20,
+            semester_valid_count: 1,
+        });
+        app.data_busy = true;
+        app.tx
+            .send(refresh_message::<Option<SemesterSummary>>(
+                SEMESTER,
+                Err("连接超时".into()),
+            ))
+            .unwrap();
+        app.poll_messages();
+        assert_eq!(app.data_page.semester.as_ref().unwrap().sname, "旧学期");
+        assert_eq!(app.status, "学期数据拉取失败：连接超时");
+        assert!(app.data_busy);
+        app.tx
+            .send(refresh_message::<CheatReport>(
+                CHEAT,
+                Err("连接超时".into()),
+            ))
+            .unwrap();
+        app.poll_messages();
+        assert!(!app.data_busy);
     }
 }
 

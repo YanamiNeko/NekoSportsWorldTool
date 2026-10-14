@@ -8,6 +8,13 @@ use crate::api::model;
 use crate::track::generate_road::RouteMode;
 use crate::update::ReleaseInfo;
 
+pub(super) fn refresh_message<T: serde::Serialize>(prefix: &str, result: Result<T, String>) -> String {
+    let payload = serde_json::to_string(&result).unwrap_or_else(|error| {
+        serde_json::json!({ "Err": format!("刷新结果序列化失败: {error}") }).to_string()
+    });
+    format!("{prefix}{payload}")
+}
+
 impl App {
     /// 任一后台任务进行中（更新前的打断保护）。
     pub fn any_busy(&self) -> bool {
@@ -268,14 +275,11 @@ impl App {
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
-            let payload = match crate::api::flow::run_records(&mut client, &mut log) {
-                Ok(rows) => serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()),
-                Err(e) => {
-                    log(&format!("× 记录拉取失败: {e}"));
-                    "[]".to_string()
-                }
-            };
-            tx.send(format!("{RECORDS}{payload}")).ok();
+            let result = crate::api::flow::run_records(&mut client, &mut log);
+            if let Err(error) = &result {
+                log(&format!("× 记录拉取失败: {error}"));
+            }
+            tx.send(refresh_message(RECORDS, result)).ok();
         });
     }
 
@@ -400,9 +404,9 @@ impl App {
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
-            match crate::api::semester::query(&mut client, &mut log) {
+            let semester = match crate::api::semester::query(&mut client, &mut log) {
                 Ok(r) => {
-                    if let Some(s) = r.summary {
+                    if let Some(s) = &r.summary {
                         log(&format!(
                             "√ [semester] {} 有效 {}/{} 次，有效里程 {:.2} km",
                             s.sname,
@@ -410,28 +414,20 @@ impl App {
                             s.semester_count,
                             s.semester_valid_dis / 1000.0
                         ));
-                        let payload = serde_json::to_string(&s).unwrap_or_default();
-                        tx.send(format!("{SEMESTER}{payload}")).ok();
-                    } else {
-                        tx.send(format!("{SEMESTER}{{}}")).ok();
                     }
+                    Ok(r.summary)
                 }
                 Err(e) => {
                     log(&format!("× [semester] 拉取失败: {e}"));
-                    tx.send(format!("{SEMESTER}{{}}")).ok();
+                    Err(e)
                 }
+            };
+            tx.send(refresh_message(SEMESTER, semester)).ok();
+            let cheat = crate::api::cheat::query(&mut client, 1, &mut log);
+            if let Err(error) = &cheat {
+                log(&format!("× [cheat] 检查失败: {error}"));
             }
-            match crate::api::cheat::query(&mut client, 1, &mut log) {
-                Ok(r) => {
-                    let payload = serde_json::json!({ "self": r.self_info, "list": r.list });
-                    tx.send(format!("{CHEAT}{}", payload)).ok();
-                }
-                Err(e) => {
-                    log(&format!("× [cheat] 检查失败: {e}"));
-                    tx.send(format!("{CHEAT}{{\"self\":null,\"list\":[]}}"))
-                        .ok();
-                }
-            }
+            tx.send(refresh_message(CHEAT, cheat)).ok();
         });
     }
 
@@ -445,17 +441,11 @@ impl App {
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
-            match crate::api::cheat::query(&mut client, 1, &mut log) {
-                Ok(r) => {
-                    let payload = serde_json::json!({ "self": r.self_info, "list": r.list });
-                    tx.send(format!("{CHEAT}{}", payload)).ok();
-                }
-                Err(e) => {
-                    log(&format!("× [cheat] 检查失败: {e}"));
-                    tx.send(format!("{CHEAT}{{\"self\":null,\"list\":[]}}"))
-                        .ok();
-                }
+            let result = crate::api::cheat::query(&mut client, 1, &mut log);
+            if let Err(error) = &result {
+                log(&format!("× [cheat] 检查失败: {error}"));
             }
+            tx.send(refresh_message(CHEAT, result)).ok();
         });
     }
 

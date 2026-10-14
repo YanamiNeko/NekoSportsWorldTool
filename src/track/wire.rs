@@ -125,6 +125,41 @@ pub fn validate_five_point_wrapper(wrapper: &str) -> Result<(), String> {
         crate::location::Coordinate::new(lat, lon, 0.0)?;
         crate::location::Coordinate::new(glat, glon, 0.0)?;
     }
+    validate_fence_metadata(&outer)?;
+    Ok(())
+}
+
+fn validate_fence_metadata(outer: &Value) -> Result<(), String> {
+    let has_fences = match outer.get("geoFencesJson") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(text)) if text.trim().is_empty() => false,
+        Some(Value::String(text)) => {
+            let value: Value = serde_json::from_str(text)
+                .map_err(|e| format!("五点轨迹围栏 JSON 无效: {e}"))?;
+            match value {
+                Value::Null => false,
+                Value::Array(items) => !items.is_empty(),
+                _ => return Err("五点轨迹围栏必须是数组".into()),
+            }
+        }
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(_) => return Err("五点轨迹围栏格式无效".into()),
+    };
+    if !has_fences {
+        return Ok(());
+    }
+
+    let run_area_id = match outer.get("runAreaId") {
+        None | Some(Value::Null) => -1,
+        Some(Value::Number(id)) => id.as_i64().ok_or("五点轨迹 runAreaId 无效")?,
+        _ => return Err("五点轨迹 runAreaId 无效".into()),
+    };
+    if run_area_id < -1 {
+        return Err("五点轨迹缺少有效 runAreaId".into());
+    }
+    if outer.get("freedomShowFence").and_then(Value::as_bool) != Some(true) {
+        return Err("五点轨迹缺少有效绿色围栏".into());
+    }
     Ok(())
 }
 
@@ -132,6 +167,65 @@ pub fn validate_five_point_wrapper(wrapper: &str) -> Result<(), String> {
 mod validation_tests {
     use super::*;
     #[test] fn rejects_empty_or_malformed_five_point_payload() { assert!(validate_five_point_wrapper("{}").is_err()); assert!(validate_five_point_wrapper(r#"{"fivePointJson":"[]"}"#).is_err()); }
+
+    fn five_point_wrapper_without_fence_fields() -> Value {
+        json!({
+            "fivePointJson": r#"[{"lat":39.4,"lon":116.2,"glat":39.4,"glon":116.2}]"#
+        })
+    }
+
+    #[test]
+    fn five_point_validation_allows_missing_fence_metadata() {
+        assert!(validate_five_point_wrapper(
+            &five_point_wrapper_without_fence_fields().to_string()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn five_point_validation_allows_empty_fence_metadata() {
+        let mut wrapper = five_point_wrapper_without_fence_fields();
+        wrapper["runAreaId"] = json!(-1);
+        wrapper["geoFencesJson"] = json!("[]");
+        wrapper["freedomShowFence"] = json!(false);
+        assert!(validate_five_point_wrapper(&wrapper.to_string()).is_ok());
+    }
+
+    #[test]
+    fn five_point_validation_allows_null_fence_metadata() {
+        let mut wrapper = five_point_wrapper_without_fence_fields();
+        wrapper["runAreaId"] = Value::Null;
+        wrapper["geoFencesJson"] = Value::Null;
+        wrapper["freedomShowFence"] = Value::Null;
+        assert!(validate_five_point_wrapper(&wrapper.to_string()).is_ok());
+    }
+
+    #[test]
+    fn five_point_validation_accepts_valid_fence_metadata() {
+        let mut wrapper = five_point_wrapper_without_fence_fields();
+        wrapper["runAreaId"] = json!(-1);
+        wrapper["geoFencesJson"] = json!(r#"[{"id":1}]"#);
+        wrapper["freedomShowFence"] = json!(true);
+        assert!(validate_five_point_wrapper(&wrapper.to_string()).is_ok());
+    }
+
+    #[test]
+    fn five_point_validation_rejects_hidden_non_empty_fence() {
+        let mut wrapper = five_point_wrapper_without_fence_fields();
+        wrapper["runAreaId"] = json!(-1);
+        wrapper["geoFencesJson"] = json!(r#"[{"id":1}]"#);
+        wrapper["freedomShowFence"] = json!(false);
+        assert!(validate_five_point_wrapper(&wrapper.to_string()).is_err());
+    }
+
+    #[test]
+    fn five_point_validation_rejects_malformed_present_fence() {
+        let mut wrapper = five_point_wrapper_without_fence_fields();
+        wrapper["runAreaId"] = json!(-1);
+        wrapper["geoFencesJson"] = json!("not-json");
+        wrapper["freedomShowFence"] = json!(true);
+        assert!(validate_five_point_wrapper(&wrapper.to_string()).is_err());
+    }
 
     #[test]
     fn laps_are_rebuilt_from_overridden_altitude() {

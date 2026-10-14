@@ -46,18 +46,24 @@ pub(crate) fn parse_flags(rest: &[&str]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < rest.len() {
-        let k = rest[i].trim_start_matches('-').to_string();
-        let v = rest
-            .get(i + 1)
-            .filter(|n| !n.starts_with('-') && *n != &"")
-            .map(|s| s.to_string());
-        match v {
-            Some(v) => {
-                out.push((k, v));
-                i += 2;
+        let argument = rest[i].trim_start_matches('-');
+        let (key, inline_value) = match argument.split_once('=') {
+            Some((key, value)) => (key, Some(value.to_string())),
+            None => (argument, None),
+        };
+        let has_inline_value = inline_value.is_some();
+        let value = inline_value.or_else(|| {
+            rest.get(i + 1)
+                .filter(|value| !value.starts_with("--") && !value.is_empty())
+                .map(|value| value.to_string())
+        });
+        match value {
+            Some(value) => {
+                out.push((key.to_string(), value));
+                i += if has_inline_value { 1 } else { 2 };
             }
             None => {
-                out.push((k, "1".into()));
+                out.push((key.to_string(), "1".into()));
                 i += 1;
             }
         }
@@ -169,5 +175,33 @@ pub(crate) fn parse_pace(v: &str) -> f32 {
         m.parse::<f32>().unwrap_or(0.0) * 60.0 + s.parse::<f32>().unwrap_or(0.0)
     } else {
         v.parse().unwrap_or(0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn option_values_keep_leading_hyphens() {
+        let flags = parse_flags(&["--ago", "-30", "--pass", "-prefix123", "--remember"]);
+        assert_eq!(get(&flags, "ago"), Some("-30"));
+        assert_eq!(get(&flags, "pass"), Some("-prefix123"));
+        assert_eq!(get(&flags, "remember"), Some("1"));
+    }
+
+    #[test]
+    fn inline_values_keep_option_like_passwords_and_equals() {
+        let flags = parse_flags(&["--pass=--remember=secret", "--user=test", "--remember"]);
+        assert_eq!(get(&flags, "pass"), Some("--remember=secret"));
+        assert_eq!(get(&flags, "user"), Some("test"));
+        assert_eq!(get(&flags, "remember"), Some("1"));
+    }
+
+    #[test]
+    fn switches_do_not_consume_the_next_option() {
+        let flags = parse_flags(&["--remember", "--check", "--user", "test"]);
+        assert_eq!(flags.len(), 3);
+        assert_eq!(get(&flags, "user"), Some("test"));
     }
 }

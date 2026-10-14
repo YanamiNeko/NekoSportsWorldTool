@@ -163,39 +163,45 @@ pub fn parse_osm(bytes: &[u8]) -> Result<ParsedOsm, String> {
                 let local = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                 match local.as_str() {
                     "way" => {
-                        if let Some((id, refs, tags)) = cur_way.take() {
-                            way_nodes.insert(id, refs.clone());
-                            let is_building =
-                                tags.iter().any(|(k, v)| k == "building" && v != "no");
-                            if is_building && refs.len() >= 3 {
-                                buildings.push(OsmBuilding { outer: vec![refs] });
-                            } else if let Some(h) = tags
-                                .iter()
-                                .find(|(k, _)| k == "highway")
-                                .map(|(_, v)| v.clone())
-                            {
-                                if !is_motorized(&h) && refs.len() >= 2 {
-                                    let oneway = tags.iter().any(|(k, v)| {
-                                        k == "oneway" && matches!(v.as_str(), "yes" | "true" | "1")
-                                    });
-                                    let oneway_reversed =
-                                        tags.iter().any(|(k, v)| k == "oneway" && v == "-1");
-                                    let maxspeed = tags
-                                        .iter()
-                                        .find(|(k, _)| k == "maxspeed")
-                                        .and_then(|(_, v)| parse_maxspeed(v));
-                                    roads.push(OsmRoad {
-                                        id,
-                                        node_refs: refs,
-                                        oneway,
-                                        oneway_reversed,
-                                        highway: h,
-                                        maxspeed_kmh: maxspeed,
-                                    });
-                                }
-                            }
-                        }
-                    }
+    if let Some((id, refs, tags)) = cur_way.take() {
+        way_nodes.insert(id, refs.clone());
+        let is_building =
+            tags.iter().any(|(k, v)| k == "building" && v != "no");
+        if is_building && refs.len() >= 3 {
+            buildings.push(OsmBuilding { outer: vec![refs] });
+        } else {
+            // 高速路之外的 highway，或 leisure=track 的跑道，都收进路网
+            let h = tags.iter().find(|(k, _)| k == "highway").map(|(_, v)| v.clone());
+            let is_track = tags.iter().any(|(k, v)| k == "leisure" && v == "track");
+            let highway = match h {
+                Some(h) if !is_motorized(&h) => Some(h),
+                _ if is_track => Some("track".to_string()),
+                _ => None,
+            };
+            if let Some(h) = highway {
+                if refs.len() >= 2 {
+                    let oneway = tags.iter().any(|(k, v)| {
+                        k == "oneway" && matches!(v.as_str(), "yes" | "true" | "1")
+                    });
+                    let oneway_reversed =
+                        tags.iter().any(|(k, v)| k == "oneway" && v == "-1");
+                    let maxspeed = tags
+                        .iter()
+                        .find(|(k, _)| k == "maxspeed")
+                        .and_then(|(_, v)| parse_maxspeed(v));
+                    roads.push(OsmRoad {
+                        id,
+                        node_refs: refs,
+                        oneway,
+                        oneway_reversed,
+                        highway: h,
+                        maxspeed_kmh: maxspeed,
+                    });
+                }
+            }
+        }
+    }
+}
                     "relation" => {
                         if let Some(members) = cur_rel.take() {
                             let is_building = cur_rel_tags
@@ -211,6 +217,33 @@ pub fn parse_osm(bytes: &[u8]) -> Result<ParsedOsm, String> {
                                     rel_buildings.push(outer);
                                 }
                             }
+                            let is_track = cur_rel_tags
+    .iter()
+    .any(|(k, v)| k == "leisure" && v == "track");
+if is_track {
+    // 跑道画成了 relation：把成员 way 的节点序列收进路网
+    for (mtype, r, _role) in members.iter() {
+        if mtype != "way" {
+            continue;
+        }
+        let Ok(wid) = r.parse::<u64>() else {
+            continue;
+        };
+        if let Some(refs) = way_nodes.get(&wid) {
+            if refs.len() >= 2 {
+                roads.push(OsmRoad {
+                    id: wid,
+                    node_refs: refs.clone(),
+                    oneway: false,
+                    oneway_reversed: false,
+                    highway: "track".to_string(),
+                    maxspeed_kmh: None,
+                });
+            }
+        }
+    }
+}
+
                         }
                         cur_rel_tags = Vec::new();
                     }
@@ -243,6 +276,87 @@ pub fn parse_osm(bytes: &[u8]) -> Result<ParsedOsm, String> {
         roads,
         buildings,
     })
+}
+/// 缝合孤立连通块：跑道（leisure=track）在 OSM 里常与路网零共用节点，
+/// 不连边的话寻路永远进不去。把每个小连通块就近连到主连通块上（双向边）。
+fn stitch_components(g: &mut RoadGraph, max_dist_m: f64) {
+    use petgraph::graph::NodeIndex;
+    // 按无向连通标注连通块
+    let mut comp: HashMap<NodeIndex, usize> = HashMap::new();
+    let mut comp_id = 0usize;
+    for start in g.graph.node_indices() {
+        if comp.contains_key(&start) {
+            continue;
+        }
+        let mut stack = vec![start];
+        comp.insert(start, comp_id);
+        while let Some(u) = stack.pop() {
+            for nb in g
+                .graph
+                .neighbors_directed(u, petgraph::Direction::Outgoing)
+                .chain(g.graph.neighbors_directed(u, petgraph::Direction::Incoming))
+            {
+                if !comp.contains_key(&nb) {
+                    comp.insert(nb, comp_id);
+                    stack.push(nb);
+                }
+            }
+        }
+        comp_id += 1;
+    }
+    if comp_id <= 1 {
+        return;
+    }
+    let mut sizes = vec![0usize; comp_id];
+    for &c in comp.values() {
+        sizes[c] += 1;
+    }
+    let main = sizes
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, s)| s)
+        .map(|(i, _)| i)
+        .unwrap();
+    // 每个小连通块找离主块最近的节点对，距离达标就连一条双向边
+    for c in 0..comp_id {
+        if c == main {
+            continue;
+        }
+        let small: Vec<NodeIndex> = comp
+            .iter()
+            .filter(|&(_, &cc)| cc == c)
+            .map(|(&n, _)| n)
+            .collect();
+        let big: Vec<NodeIndex> = comp
+            .iter()
+            .filter(|&(_, &cc)| cc == main)
+            .map(|(&n, _)| n)
+            .collect();
+        let mut best: Option<(NodeIndex, NodeIndex, f64)> = None;
+        for &a in &small {
+            for &b in &big {
+                let d = geo_haversine(g.node_coord(a), g.node_coord(b));
+                if best.map_or(true, |(_, _, bd)| d < bd) {
+                    best = Some((a, b, d));
+                }
+            }
+        }
+        if let Some((a, b, d)) = best.filter(|&(_, _, d)| d <= max_dist_m) {
+            for (from, to) in [(a, b), (b, a)] {
+                g.add_edge(
+                    from,
+                    to,
+                    EdgeData {
+                        way_id: 0,
+                        oneway: false,
+                        highway: "footway".to_string(),
+                        maxspeed_kmh: None,
+                        length_m: d,
+                    },
+                );
+            }
+        }
+    }
 }
 
 /// 用道路 way 构建路网图。
@@ -313,7 +427,7 @@ pub fn build_graph(parsed: &ParsedOsm) -> RoadGraph {
         }
     }
     g.buildings = bld;
-
+stitch_components(&mut g, 30.0);
     g.compute_anchor();
     g.rebuild_index();
     g

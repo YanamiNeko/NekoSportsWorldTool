@@ -167,6 +167,8 @@ impl eframe::App for App {
 
         // ── 内容区 ────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
+            // 手机宽：工具页（设备信息/运行日志/路网/关于）是「我的」的二级页，
+            // 顶部给一条返回条；桌面宽由左侧分组侧栏直达，无需返回条。
             if compact && self.tab >= 5 {
                 let title = mobile::page_label(self.tab);
                 if mobile::sub_page_header(ui, title) {
@@ -248,7 +250,8 @@ impl App {
     }
 
     /// 顶栏：登录态 / IP / 设备号三枚状态胶囊 + 登录（登出）按钮。
-    fn draw_top_bar(&mut self, ui: &mut egui::Ui, _compact: bool) {
+    /// 手机宽拆成两行（胶囊一行、按钮一行），避免窄屏下按钮把胶囊挤成竖排。
+    fn draw_top_bar(&mut self, ui: &mut egui::Ui, compact: bool) {
         ui.add_space(theme::space::SM);
         let logged = self.session.is_some();
         let name_text = match &self.session {
@@ -265,35 +268,57 @@ impl App {
         let device_text = format!("设备 {}", short_id(&self.identity.device_id));
         let busy = self.login_busy;
 
-        let mut login_clicked = false;
-        ui.horizontal_wrapped(|ui| {
-            match &name_text {
-                Some(n) => components::chip(ui, n, components::Tone::Ok),
-                None => components::chip(ui, "● 未登录", components::Tone::Err),
-            }
-            match &ip_text {
-                Some(t) => {
-                    let tone = if t.starts_with("IP 失败") {
-                        components::Tone::Err
-                    } else {
-                        components::Tone::Neutral
-                    };
-                    components::chip(ui, t, tone);
-                }
-                None => components::chip(ui, "IP 获取中", components::Tone::Warn),
-            }
-            components::chip(ui, &device_text, components::Tone::Neutral);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let btn = if logged {
-                    theme::secondary_btn("登出")
+        let chip_identity = |ui: &mut egui::Ui| match &name_text {
+            Some(n) => components::chip(ui, n, components::Tone::Ok),
+            None => components::chip(ui, "● 未登录", components::Tone::Err),
+        };
+        let chip_ip = |ui: &mut egui::Ui| match &ip_text {
+            Some(t) => {
+                let tone = if t.starts_with("IP 失败") {
+                    components::Tone::Err
                 } else {
-                    theme::primary_btn("登录")
+                    components::Tone::Neutral
                 };
-                if ui.add_enabled(!busy, btn).clicked() {
-                    login_clicked = true;
-                }
+                components::chip(ui, t, tone);
+            }
+            None => components::chip(ui, "IP 获取中", components::Tone::Warn),
+        };
+        let login_btn = |ui: &mut egui::Ui, clicked: &mut bool| {
+            let btn = if logged {
+                theme::secondary_btn("登出")
+            } else {
+                theme::primary_btn("登录")
+            };
+            if ui.add_enabled(!busy, btn).clicked() {
+                *clicked = true;
+            }
+        };
+
+        let mut login_clicked = false;
+        if compact {
+            // 手机宽：第一行登录态 + IP，第二行设备号 + 登录按钮。
+            // 必须包在 horizontal 里，否则 with_layout 会吃掉整个面板的剩余高度。
+            ui.horizontal(|ui| {
+                chip_identity(ui);
+                chip_ip(ui);
             });
-        });
+            ui.add_space(theme::space::XS);
+            ui.horizontal(|ui| {
+                components::chip(ui, &device_text, components::Tone::Neutral);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    login_btn(ui, &mut login_clicked);
+                });
+            });
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                chip_identity(ui);
+                chip_ip(ui);
+                components::chip(ui, &device_text, components::Tone::Neutral);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    login_btn(ui, &mut login_clicked);
+                });
+            });
+        }
         ui.add_space(theme::space::SM);
         if login_clicked {
             if logged {

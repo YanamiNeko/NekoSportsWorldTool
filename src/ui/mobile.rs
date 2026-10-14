@@ -93,10 +93,12 @@ fn parse_f64_in_range(input: &str, range: RangeInclusive<f64>) -> Result<f64, St
     }
 }
 
-/// 页面定义：索引 / 标签 / 分组 / 是否手机底部导航直连。
+/// 页面定义：索引 / 完整标签 / 手机底部导航短标签 / 分组 / 是否手机底部导航直连。
 pub struct PageDef {
     pub index: usize,
     pub label: &'static str,
+    /// 手机底部导航用的短标签（宽度有限，保证 6 个入口单行不换行）。
+    pub short: &'static str,
     pub group: &'static str,
     pub mobile_root: bool,
 }
@@ -105,54 +107,63 @@ pub const PAGES: [PageDef; 9] = [
     PageDef {
         index: 0,
         label: "跑步",
+        short: "跑步",
         group: "运动",
         mobile_root: true,
     },
     PageDef {
         index: 1,
         label: "AI 运动",
+        short: "AI 运动",
         group: "运动",
         mobile_root: true,
     },
     PageDef {
         index: 2,
         label: "运动记录",
+        short: "记录",
         group: "数据",
         mobile_root: true,
     },
     PageDef {
         index: 3,
         label: "数据",
+        short: "数据",
         group: "数据",
         mobile_root: true,
     },
     PageDef {
         index: 4,
         label: "我的",
+        short: "我的",
         group: "我的",
         mobile_root: true,
     },
     PageDef {
         index: 5,
         label: "设备信息",
+        short: "设备",
         group: "工具",
         mobile_root: false,
     },
     PageDef {
         index: 6,
         label: "运行日志",
+        short: "日志",
         group: "工具",
         mobile_root: false,
     },
     PageDef {
         index: 7,
         label: "路网",
+        short: "路网",
         group: "工具",
         mobile_root: false,
     },
     PageDef {
         index: 8,
         label: "关于与更新",
+        short: "关于",
         group: "工具",
         mobile_root: false,
     },
@@ -161,7 +172,7 @@ pub const PAGES: [PageDef; 9] = [
 /// 桌面侧栏分组顺序。
 pub const SIDE_GROUPS: [&str; 4] = ["运动", "数据", "我的", "工具"];
 
-/// 手机底部导航首页（"我的"）。
+/// 手机底部导航首页（「我的」）。二级页（设备信息 / 运行日志 / 路网 / 关于）返回时回到这里。
 pub const MOBILE_HOME: usize = 4;
 
 pub fn page_label(index: usize) -> &'static str {
@@ -181,6 +192,24 @@ fn nav_item(
     } else {
         egui::RichText::new(label).color(theme::TEXT_DIM)
     };
+    ui.add_sized(
+        size,
+        egui::Button::new(text)
+            .fill(if on {
+                theme::ACCENT_50
+            } else {
+                egui::Color32::TRANSPARENT
+            })
+            .stroke(egui::Stroke::NONE),
+    )
+}
+
+/// 底部导航单元：格子窄，用略小的字号保证 5 项标签单行不换行。
+fn nav_tab(ui: &mut egui::Ui, label: &str, on: bool, size: egui::Vec2) -> egui::Response {
+    let text = egui::RichText::new(label)
+        .size(theme::FONT_SMALL)
+        .color(if on { theme::ACCENT_700 } else { theme::TEXT_DIM });
+    let text = if on { text.strong() } else { text };
     ui.add_sized(
         size,
         egui::Button::new(text)
@@ -217,7 +246,8 @@ pub fn side_nav(ui: &mut egui::Ui, selected: &mut usize) -> Vec<egui::Response> 
     responses
 }
 
-/// 手机底部导航：跑步 / AI / 记录 / 数据 / 我的 五项。
+/// 手机底部导航：跑步 / AI 运动 / 记录 / 数据 / 我的 五项。
+/// 工具页（设备信息 / 运行日志 / 路网 / 关于与更新）作为「我的」二级页，见 [`tool_entries`]。
 pub fn bottom_nav(ui: &mut egui::Ui, selected: &mut usize) -> Vec<egui::Response> {
     let roots: Vec<&PageDef> = PAGES.iter().filter(|p| p.mobile_root).collect();
     let width = (ui.available_width() / roots.len() as f32).floor();
@@ -225,9 +255,9 @@ pub fn bottom_nav(ui: &mut egui::Ui, selected: &mut usize) -> Vec<egui::Response
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for page in roots {
-            let response = nav_item(
+            let response = nav_tab(
                 ui,
-                page.label,
+                page.short,
                 *selected == page.index,
                 egui::vec2(width, theme::TOUCH_H),
             );
@@ -240,14 +270,33 @@ pub fn bottom_nav(ui: &mut egui::Ui, selected: &mut usize) -> Vec<egui::Response
     responses
 }
 
-/// 手机二级页返回条：返回按钮 + 标题。返回 true 表示应回到首页。
+/// 「我的」二级页入口列表：设备信息 / 运行日志 / 路网 / 关于与更新。
+/// 与原始实现一致，保证全部 9 页在安卓上均可达（仅入口形态由顶部分页改为底部五栏 + 二级页）。
+pub fn tool_entries(ui: &mut egui::Ui, selected: &mut usize) {
+    for page in PAGES.iter().filter(|p| !p.mobile_root) {
+        let resp = ui.add_sized(
+            [ui.available_width(), theme::TOUCH_H],
+            egui::Button::new(
+                egui::RichText::new(format!("{}  ›", page.label))
+                    .size(theme::FONT_BODY)
+                    .color(theme::TEXT),
+            ),
+        );
+        if resp.clicked() {
+            *selected = page.index;
+        }
+        ui.add_space(theme::space::XS);
+    }
+}
+
+/// 手机二级页返回条：返回按钮 + 标题。返回 true 表示应回到「我的」。
 pub fn sub_page_header(ui: &mut egui::Ui, title: &str) -> bool {
     let mut back = false;
     ui.horizontal(|ui| {
         if ui
             .add_sized(
-                [64.0, theme::CONTROL_H],
-                theme::ghost_btn("← 返回"),
+                [72.0, theme::CONTROL_H],
+                theme::ghost_btn("← 我的"),
             )
             .clicked()
         {

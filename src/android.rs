@@ -34,6 +34,7 @@ fn android_main(app: AndroidApp) {
         viewport: egui::ViewportBuilder::default().with_title("NekoSportsWorldTool"),
         ..Default::default()
     };
+    publish_display_density();
     if let Err(error) = crate::run_gui(options) {
         log::error!("GUI startup failed: {error}");
     }
@@ -44,6 +45,49 @@ fn android_main(app: AndroidApp) {
 
 pub(crate) fn data_dir() -> PathBuf {
     DATA_DIR.get().expect("Android storage must be initialized before use").clone()
+}
+
+/// 当前屏幕密度（`DisplayMetrics.density`，与系统 dp 换算一致）。
+pub(crate) fn display_density() -> Option<f32> {
+    with_activity_value(|env, activity| {
+        let resources = env
+            .call_method(activity, "getResources", "()Landroid/content/res/Resources;", &[])?
+            .l()?;
+        let metrics = env
+            .call_method(&resources, "getDisplayMetrics", "()Landroid/util/DisplayMetrics;", &[])?
+            .l()?;
+        Ok(env.get_field(&metrics, "density", "F")?.f()?)
+    })
+}
+
+/// 把权威屏幕密度发布给 winit（vendor 补丁读取该环境变量）。
+///
+/// 部分机型的 `AConfiguration` 密度读数为默认值 160，会让 egui 以 1x 渲染、
+/// 整屏发糊；这里用 `DisplayMetrics.density` 兜底纠正。
+pub(crate) fn publish_display_density() {
+    let metrics_density = display_density().unwrap_or(0.0);
+    let config_density = APP
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|app| app.config().density())
+        .map(|dpi| dpi as f64 / 160.0)
+        .unwrap_or(0.0);
+    log::info!(
+        "display density: DisplayMetrics={metrics_density}, AConfiguration={config_density}"
+    );
+    if metrics_density.is_finite() && (0.75..=8.0).contains(&metrics_density) {
+        std::env::set_var("NEKO_DISPLAY_DENSITY", format!("{metrics_density}"));
+    }
+}
+
+/// 屏幕配置变化（折叠屏展开、系统显示大小调整等）后刷新密度。
+#[no_mangle]
+pub extern "system" fn Java_org_nekosportsworld_tool_MainActivity_nativeDensityChanged(
+    _env: JNIEnv<'_>,
+    _activity: JObject<'_>,
+) {
+    publish_display_density();
 }
 
 pub(crate) fn set_context(context: &egui::Context) {

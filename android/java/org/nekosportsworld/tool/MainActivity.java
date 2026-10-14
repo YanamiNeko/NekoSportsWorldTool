@@ -23,6 +23,7 @@ public final class MainActivity extends NativeActivity {
     private native void nativeSubmitEdit(long id, String value);
     private native void nativeSetInsets(int left, int top, int right, int bottom);
     private native void nativeDeviceInfo(boolean initial, String info, String error);
+    private native void nativeDensityChanged();
 
     public void requestDeviceInfo(boolean initial) {
         runOnUiThread(() -> {
@@ -93,6 +94,13 @@ public final class MainActivity extends NativeActivity {
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) applySystemBarStyle();
+    }
+
+    @Override public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // Manifest declares configChanges="density": the activity is not recreated,
+        // so refresh the density egui renders with (keeps text crisp on foldables etc.).
+        nativeDensityChanged();
     }
 
     private void applySystemBarStyle() {

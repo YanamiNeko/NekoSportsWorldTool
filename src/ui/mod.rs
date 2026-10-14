@@ -223,7 +223,9 @@ impl eframe::App for App {
                         s.sname, s.semester_valid_count, s.semester_count
                     ));
                 }
-                if let Some(c) = &self.data_page.cheat {
+                if self.data_page.cheat_error.is_some() {
+                    ui.colored_label(theme::warn(), "自查失败");
+                } else if let Some(c) = &self.data_page.cheat {
                     if c.is_clean() {
                         ui.colored_label(theme::ok(), "自查正常");
                     } else {
@@ -309,6 +311,48 @@ impl eframe::App for App {
 }
 
 impl App {
+    #[cfg(test)]
+    pub(crate) fn test_fixture() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (net_tx, net_rx) = std::sync::mpsc::channel();
+        let identity = HeaderIdentity::default();
+        Self {
+            tx,
+            rx,
+            log: log::LogStore::default(),
+            font_loaded: None,
+            ip: String::new(),
+            device_buf: identity.clone(),
+            identity,
+            session: None,
+            config: Config::default(),
+            username: String::new(),
+            password: String::new(),
+            remember: false,
+            login_busy: false,
+            run_busy: false,
+            ai_busy: false,
+            records_busy: false,
+            data_busy: false,
+            user_busy: false,
+            status: String::new(),
+            popup: None,
+            ai_confirm: None,
+            tab: 0,
+            run_page: run::RunPage::default(),
+            ai_page: ai::AiPage::default(),
+            records_page: records::RecordsPage::default(),
+            data_page: data::DataPage::default(),
+            user_page: user::UserPage::default(),
+            device_page: device::DevicePage::default(),
+            update: about::UpdateUi::default(),
+            network: None,
+            osm_page: osm::OsmPage::default(),
+            net_tx,
+            net_rx,
+        }
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let (net_tx, net_rx) = std::sync::mpsc::channel();

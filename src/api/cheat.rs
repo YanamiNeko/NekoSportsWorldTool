@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 pub const CHEATLIST_PATH: &str = "/api/v78/cheat/cheatlist";
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CheatReport {
     /// null=干净。
     pub self_info: Value,

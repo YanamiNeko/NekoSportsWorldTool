@@ -310,19 +310,15 @@ impl App {
             return;
         };
         let identity = self.identity.clone();
-        self.records_page.detail_loading = true;
+        let request_id = self.records_page.begin_run_detail(rrid);
         self.spawn_job(move |tx| {
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
-            match crate::api::records::fetch_detail(&mut client, rrid) {
-                Ok(d) => {
-                    let payload = serde_json::to_string(&d).unwrap_or_default();
-                    tx.send(format!("{RUN_DETAIL}{payload}")).ok();
-                }
-                Err(e) => {
-                    let payload = serde_json::json!({ "statusInfo": format!("详情拉取失败：{e}") });
-                    tx.send(format!("{RUN_DETAIL}{payload}")).ok();
-                }
-            }
+            let data = match crate::api::records::fetch_detail(&mut client, rrid) {
+                Ok(d) => serde_json::to_value(d).unwrap_or_default(),
+                Err(e) => serde_json::json!({ "statusInfo": format!("详情拉取失败：{e}") }),
+            };
+            let payload = serde_json::json!({ "request_id": request_id, "record_id": rrid, "data": data });
+            tx.send(format!("{RUN_DETAIL}{payload}")).ok();
         });
     }
 
@@ -332,13 +328,14 @@ impl App {
             return;
         };
         let identity = self.identity.clone();
-        self.records_page.ai_detail_loading = true;
+        let request_id = self.records_page.begin_ai_detail(id);
         self.spawn_job(move |tx| {
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
-            let payload = match crate::api::ai::fetch_record_detail(&mut client, id) {
-                Ok(d) => d.to_string(),
-                Err(e) => serde_json::json!({ "fetchError": e }).to_string(),
+            let data = match crate::api::ai::fetch_record_detail(&mut client, id) {
+                Ok(d) => d,
+                Err(e) => serde_json::json!({ "fetchError": e }),
             };
+            let payload = serde_json::json!({ "request_id": request_id, "record_id": id, "data": data });
             tx.send(format!("{AI_DETAIL}{payload}")).ok();
         });
     }

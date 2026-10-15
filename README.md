@@ -38,6 +38,7 @@
 NekoSportsWorldTool login --user <手机号> --pass <密码> --remember
 NekoSportsWorldTool run                                  # 一键跑步（--altitude 17.2 固定海拔，或 11.6-22.8 映射到区间）
 NekoSportsWorldTool ai --sport 2 --score 26000           # AI 运动
+NekoSportsWorldTool safety                               # 风控自检状态（今日计数与每日上限）
 NekoSportsWorldTool rank main --type 1 --sort 1          # 排行榜
 NekoSportsWorldTool update [--check]           # 自动更新（--check 仅检查不下载）
 NekoSportsWorldTool template --file run.gpx   # 本地分析真实记录海拔（不会上传）
@@ -51,9 +52,25 @@ NekoSportsWorldTool help                                 # 全部命令
 
 青龙定时任务：首次手工 `login --remember` 一次，之后定时挂 `run` 即可。
 
+## 风控自检（防封号 / 降风控）
+
+程序内置本地风控自检闸门（`src/safety.rs`），默认 fail-closed：
+
+- **深夜拦截**：默认 23:00–6:00 不提交跑步 / AI（可调）。
+- **每日上限**：跑步 ≤ 1 / 天、AI ≤ 2 / 天；批量补签 ≤ 3 天且总条数不越过每日 AI 上限。
+- AI 提交 / 批量补签在提交前自检；跑步 / AI 都计入 `safety_state.json`（跨天自动清零）。
+
+策略持久化在 `config.json` 的 `safety` 对象（缺省即上述默认值），关闭或调整请自行评估后果，
+例如写入 `{"safety":{"enabled":false}}`。
+
+查看状态：`NekoSportsWorldTool safety`；清零今日计数：`NekoSportsWorldTool safety --reset`。
+
+更详细的低风控用法与单次提交参数建议见 [SAFETY.md](SAFETY.md)（防封号与风控指南）。
+
 ## 常见问题
 
 - **提示未登录 / 401**：先执行 `login --remember`（GUI 勾选记住密码等价），会话失效会自动重登
+- **风控自检拦截（深夜 / 次数超限）**：改到白天、减少当天提交次数，或按需调整 `config.json` 的 `safety` 策略
 - **10121 设备风险**：设备身份是持久化的，删除 `identity.json` 等于换了新设备，不要频繁删
 - **10603 点位限流**：点位接口 5 分钟限 3 次，程序内置 300s 缓存，正常使用不会触发
 - **榜单为空**：当天还没有人产生有效里程，查询会自动回退最近 3 天

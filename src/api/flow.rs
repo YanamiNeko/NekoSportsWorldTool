@@ -49,6 +49,11 @@ pub fn run_full_flow(
 ) -> Result<RunOutcome, String> {
     let sess: Session = client.login.clone().ok_or("未登录")?;
 
+    // 风控自检：深夜时段拦截 + 每日跑步次数上限（生成轨迹上传的禁用由单独 PR 覆盖）。
+    let policy = crate::api::model::load_config().safety;
+    let state = crate::safety::load_state();
+    crate::safety::check_run(&policy, &state)?;
+
     // ① policy
     log("[policy] 拉取跑步策略…");
     let pol = fetch_policy(client)?;
@@ -355,8 +360,13 @@ pub fn run_ai_submit(
     mode: super::ai::AiMode,
     log: &mut dyn FnMut(&str),
 ) -> Result<Value, String> {
+    // 风控自检：深夜时段拦截、每日 AI 次数上限。
+    let policy = crate::api::model::load_config().safety;
+    let mut state = crate::safety::load_state();
+    crate::safety::check_ai(&policy, &state)?;
     log(&format!("[ai] 提交 sportId={sport_id} mode={mode:?}…"));
     let biz = super::ai::upload(client, sport_id, mode, None)?;
+    crate::safety::record_ai(&mut state);
     log("√ [ai] 提交成功");
     Ok(biz)
 }

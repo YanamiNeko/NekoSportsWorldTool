@@ -108,6 +108,13 @@ impl App {
         ui.add_space(10.0);
         ui.separator();
         ui.label("批量补签（单线程顺序提交，每天随机时刻）");
+        ui.label(format!(
+            "风控上限：AI 每日 ≤ {} 次 · 批量补签 ≤ {} 天 · 深夜 {}:00–{}:00 拦截提交",
+            self.config.safety.max_ai_per_day,
+            self.config.safety.max_backfill_days,
+            self.config.safety.night_start_hour,
+            self.config.safety.night_end_hour,
+        ));
         let picked = self.ai_page.picked.clone();
         let days = self.ai_page.days.max(1);
         let per = self.ai_page.per_day.max(1);
@@ -168,7 +175,18 @@ impl App {
                     });
                 });
             if confirmed {
-                self.run_ai_batch(plan);
+                let policy = self.config.safety.clone();
+                let state = crate::safety::load_state();
+                match crate::safety::check_backfill(
+                    &policy,
+                    &state,
+                    plan.days,
+                    plan.per_day,
+                    plan.sport_ids.len(),
+                ) {
+                    Ok(()) => self.run_ai_batch(plan),
+                    Err(error) => self.status = error,
+                }
             } else if cancelled {
                 self.status = "已取消批量提交".into();
             } else {

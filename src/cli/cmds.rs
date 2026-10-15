@@ -24,6 +24,7 @@ pub fn dispatch(args: Vec<String>) -> i32 {
         "ai-info" => cmd_ai_info(&rest),
         "semester" => cmd_semester(),
         "cheat" => cmd_cheat(&rest),
+        "safety" => cmd_safety(&rest),
         "rank" => cmd_rank(&rest),
         "update" => cmd_update(&rest),
         "help" | "--help" | "-h" => {
@@ -40,6 +41,26 @@ pub fn dispatch(args: Vec<String>) -> i32 {
 
 fn usage() {
     super::usage();
+}
+
+/// 风控自检：显示今日计数与策略；--reset 清零今日计数。
+fn cmd_safety(rest: &[&str]) -> i32 {
+    let flags = parse_flags(rest);
+    let policy = model::load_config().safety;
+    if get(&flags, "reset").is_some() {
+        let mut state = crate::safety::load_state();
+        state.run_count = 0;
+        state.ai_count = 0;
+        state.backfill_count = 0;
+        crate::safety::save_state(&state);
+        println!("今日风控计数已清零");
+        return 0;
+    }
+    let state = crate::safety::load_state();
+    for line in crate::safety::report(&policy, &state) {
+        println!("{line}");
+    }
+    0
 }
 
 fn cmd_login(rest: &[&str]) -> i32 {

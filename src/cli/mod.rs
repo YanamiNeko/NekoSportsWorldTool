@@ -31,6 +31,7 @@ fn usage() {
   ai-records --sport <id>                  AI 运动记录（按天分组）
   semester                                 学期完成度
   cheat  [--page n]                        违规自查
+  safety [--reset]                        风控自检：今日跑步/AI/补签计数与每日上限；--reset 清零今日计数
   rank   main   --type 1|2|3 --sort 1|2 [--gender 0|1] [--date YYYY-MM-DD]
                                            排行榜（1个人 2班级 3院系；1日 2月）
   rank   indoor --range 1|2|3 [--gender 0|1]

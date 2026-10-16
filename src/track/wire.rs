@@ -4,7 +4,6 @@
 //! 10s 窗（speed/step_freq）；每 1000m 一圈；五点 fixed_point_json。
 #![allow(non_snake_case)]
 
-use chrono::{Local, TimeZone};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde_json::{json, Value};
@@ -272,12 +271,13 @@ pub fn build_obs_object(
 }
 
 /// OBS objectKey（两个都要传）。
+///
+/// ⚠️ 第一个 key 里的 `YYYYMMDDHH` **必须是北京时间** —— 真机就是按北京时间
+/// 分目录的（实测：App 的记录都在 `<当地时间小时>` 目录下）。
+/// 这里原先用 `chrono::Local`：在 UTC 的机器上会写进**早 8 小时**的目录，
+/// 于是详情页按标准 key 取不到轨迹 —— 表现为「运动数据有问题」。
 pub fn obs_keys(track: &Track, rrid: i64, uuid: &str) -> Vec<String> {
-    let t0 = Local
-        .timestamp_millis_opt(track.startTime)
-        .single()
-        .map(|t| t.format("%Y%m%d%H").to_string())
-        .unwrap_or_default();
+    let t0 = super::geom::fmt_cst(track.startTime, "%Y%m%d%H");
     vec![
         format!("run_data/{t0}/{uuid}.json"),
         format!("run_data/{}/{}.json", rrid / 1000000, rrid),

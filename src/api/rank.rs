@@ -31,7 +31,9 @@ pub fn main_rank(
 ) -> Result<Vec<RankRow>, String> {
     let unid = unid_of(client);
     let date = date.unwrap_or_else(|| {
-        chrono::Local::now().format("%Y-%m-%d").to_string()
+        // 榜单日期必须是**北京日期**：跑在 UTC 机器上时，
+        // CST 00:00–08:00 这段时间用本机时区会查成"前一天"。
+        crate::track::geom::fmt_cst(chrono::Utc::now().timestamp_millis(), "%Y-%m-%d")
     });
     let body = json!({
         "unid": unid,

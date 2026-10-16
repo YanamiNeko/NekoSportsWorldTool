@@ -2,7 +2,6 @@
 //!
 //! round 封装、RNG、打卡点 Catmull-Rom 拟合环 + 弧长表 + 弧长插值。
 
-use chrono::{Local, TimeZone};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
@@ -199,10 +198,66 @@ pub fn wgs84_to_bd09(lat: f64, lng: f64) -> (f64, f64) {
     gcj02_to_bd09(g_lat, g_lng)
 }
 
-pub fn fmt_gain_time(ms: i64) -> String {
-    Local
-        .timestamp_millis_opt(ms)
-        .single()
-        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+/// 北京时间相对 UTC 的**分钟**偏移。
+///
+/// ## 为什么不能依赖 `chrono::Local`
+///
+/// `Local` 取的是**跑这个程序的机器**的时区。桌面上它是用户时区（北京时间），
+/// 所以看不出问题；但只要跑在**时区不是 UTC+8 的环境**里（服务器 / 容器 /
+/// CI / 用户把系统时区设成 UTC），就会整体偏 8 小时 —— 而且**不报错、静默写错**。
+///
+/// 这不是假想：本工具被跑到服务器上时实测到（2026-10，容器 `Etc/UTC`）——
+///
+/// ```text
+///   App 自己跑的 120 个点：gainTime 相对 flag 偏差中位 +0.09 小时   ✅
+///   本工具生成的 126 个点：中位 −7.92 小时，100% 命中                ❌
+/// ```
+///
+/// 也就是同一个点的 `flag` 是 08:30、`gainTime` 字符串却写 00:30 ——
+/// **同一条记录里两个时间自相矛盾**。真机写的是北京时间，所以这里固定 +8。
+pub const CST_OFFSET_MIN: i64 = 8 * 60;
+
+/// epoch 毫秒 → **北京时间**字符串，格式由 `fmt` 给（如 `"%Y%m%d%H"`）。
+///
+/// 所有"要给人看/要给服务端对"的时间都必须走这里，不要再直接用 `chrono::Local`。
+pub fn fmt_cst(ms: i64, fmt: &str) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|t| {
+            (t + chrono::Duration::minutes(CST_OFFSET_MIN))
+                .format(fmt)
+                .to_string()
+        })
         .unwrap_or_default()
+}
+
+/// 轨迹点的 `gainTime`（真机格式 `YYYY-MM-DD HH:MM:SS`，**北京时间**）。
+pub fn fmt_gain_time(ms: i64) -> String {
+    fmt_cst(ms, "%Y-%m-%d %H:%M:%S")
+}
+
+#[cfg(test)]
+mod cst_tests {
+    use super::*;
+
+    /// 向量取自**真机**记录（2026-10 实测对比 App 的 OBS 对象），不是自造的。
+    #[test]
+    fn gain_time_is_beijing_regardless_of_host_timezone() {
+        // App 自己跑的那条：flag=1789600250000。该 epoch 对应的北京时间是 07:10:50
+        // （真机那条的 gainTime 写的是 "2026-09-17 07:10:55" —— 那是"点的采集时刻"，
+        //  比 flag 晚几秒，属于同一个口径）
+        assert_eq!(fmt_gain_time(1789600250000), "2026-09-17 07:10:50");
+        // 本工具生成的那条：flag=1791937828401 → 北京 08:30:28
+        assert_eq!(fmt_gain_time(1791937828401), "2026-10-14 08:30:28");
+        // **关键回归**：绝不能退化成 UTC（差 8 小时就是那个 bug）
+        assert_ne!(fmt_gain_time(1791937828401), "2026-10-14 00:30:28");
+    }
+
+    /// OBS 的「小时目录」也必须按北京时间（真机就是按北京时间分目录的）。
+    #[test]
+    fn obs_hour_key_is_beijing() {
+        assert_eq!(fmt_cst(1791937828401, "%Y%m%d%H"), "2026101408");
+        // 北京 00:30（UTC 还是前一天 16:30）—— 用 UTC 会落到前一天
+        let midnightish = 1791937800000 - CST_OFFSET_MIN * 60_000;
+        assert_eq!(fmt_cst(midnightish, "%Y%m%d%H"), "2026101400");
+    }
 }

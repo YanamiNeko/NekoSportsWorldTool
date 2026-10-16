@@ -14,7 +14,9 @@ name: Release
 
 on:
   push:
+    branches: [feat/map-location-picker]
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
     inputs:
       mode:
@@ -24,7 +26,7 @@ on:
         options: [full, cli]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -40,6 +42,10 @@ jobs:
             target: aarch64-apple-darwin
             mode: full
             artifact: NekoSportsWorldTool-macos-arm64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            mode: full
+            artifact: NekoSportsWorldTool-linux-x64-gui
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             mode: cli
@@ -62,6 +68,23 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux' && env.MODE == 'full'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libgl1-mesa-dev
+
+      - name: Check native GUI APIs (macOS and Linux)
+        if: env.MODE == 'full' && runner.os != 'Windows'
+        run: cargo check --locked --target "$TARGET"
+        shell: bash
+
+      - name: GUI regression tests (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo test --locked --lib
+
+      - name: Route planner tests (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo test --locked -p route-planner
+
       - name: Install cross (Linux 交叉编译)
         if: matrix.cross == true
         uses: taiki-e/install-action@v2
@@ -72,15 +95,15 @@ jobs:
         if: env.MODE == 'cli'
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target "$TARGET" --no-default-features
+            cross build --locked --release --target "$TARGET" --no-default-features
           else
-            cargo build --release --target "$TARGET" --no-default-features
+            cargo build --locked --release --target "$TARGET" --no-default-features
           fi
         shell: bash
 
       - name: Build (full = GUI + CLI)
         if: env.MODE == 'full'
-        run: cargo build --release --target "$TARGET"
+        run: cargo build --locked --release --target "$TARGET"
         shell: bash
 
       - name: Package
@@ -89,20 +112,47 @@ jobs:
           mkdir -p dist
           BIN=target/$TARGET/release/nekosportsworldtool
           if [ "${{ matrix.os }}" = "windows-latest" ]; then BIN="$BIN.exe"; fi
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+          if [ "${{ matrix.os }}" = "macos-latest" ] && [ "$MODE" = "full" ]; then
+            app="dist/NekoSportsWorldTool.app"
+            mkdir -p "$app/Contents/MacOS"
+            cp "$BIN" "$app/Contents/MacOS/nekosportsworldtool"
+            cp macos/Info.plist "$app/Contents/Info.plist"
+            version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
+            plutil -lint "$app/Contents/Info.plist"
+            codesign --force --deep --sign - "$app"
+            codesign --verify --deep --strict "$app"
+            tar czf "dist/$ARTIFACT.tar.gz" -C dist NekoSportsWorldTool.app
+            rm -rf "$app"
+          elif [ "${{ matrix.os }}" = "ubuntu-latest" ] && [ "$MODE" = "full" ]; then
+            mkdir -p dist/linux-gui
+            cp "$BIN" linux/org.nekosportsworld.tool.desktop dist/linux-gui/
+            tar czf "dist/$ARTIFACT.tar.gz" -C dist/linux-gui .
+            rm -rf dist/linux-gui
+          elif [ "${{ matrix.os }}" = "windows-latest" ]; then
             7z a "dist/$ARTIFACT.zip" "$BIN"
           else
             tar czf "dist/$ARTIFACT.tar.gz" -C "$(dirname "$BIN")" "$(basename "$BIN")"
           fi
 
       - uses: actions/upload-artifact@v4
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
           name: ${{ matrix.artifact }}
           path: dist/*
 
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+  publish:
+    name: Publish release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: NekoSportsWorldTool-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

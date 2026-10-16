@@ -395,7 +395,7 @@ impl App {
                 ui.selectable_value(&mut page.route_mode, RouteMode::Legacy, "经典打卡点环");
                 ui.selectable_value(&mut page.route_mode, RouteMode::Road, "真实道路路由");
                 if page.route_mode == RouteMode::Road && self.network.is_none() {
-                    ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
+                    ui.colored_label(theme::warn(), "（需先在「路网」页导入或在线下载路网）");
                 }
             });
         }
@@ -503,7 +503,7 @@ impl App {
         let Some(net) = self.network.clone() else {
             ui.colored_label(
                 theme::warn(),
-                "未加载 OSM 路网，无法预览（请先到「路网」页导入）",
+                "未加载路网，无法预览（请先到「路网」页导入或下载）",
             );
             return;
         };

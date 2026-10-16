@@ -17,6 +17,12 @@ pub struct Coordinate {
 }
 
 impl Coordinate {
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn from_system_json(json: &str) -> Result<Self, String> {
+        let coordinate: Self = serde_json::from_str(json).map_err(|_| "系统定位返回无效数据")?;
+        coordinate.validate()?;
+        Ok(coordinate)
+    }
     pub fn new(latitude: f64, longitude: f64, accuracy: f64) -> Result<Self, String> {
         let coordinate = Self {
             latitude,
@@ -79,6 +85,15 @@ mod tests {
         assert!(Coordinate::new(91.0, 116.4, 5.0).is_err());
         assert!(Coordinate::new(39.9, 181.0, 5.0).is_err());
         assert!(Coordinate::new(39.9, 116.4, -1.0).is_err());
+    }
+
+    #[test]
+    fn system_location_rejects_invalid_values_and_preserves_accuracy() {
+        let location = Coordinate::from_system_json(r#"{"latitude":39.9,"longitude":116.4,"accuracy":250.5}"#).unwrap();
+        assert_eq!(location.accuracy, 250.5);
+        assert!(Coordinate::from_system_json(r#"{"latitude":91,"longitude":116.4}"#).is_err());
+        assert!(Coordinate::from_system_json(r#"{"latitude":39.9,"longitude":116.4,"accuracy":-1}"#).is_err());
+        assert!(Coordinate::from_system_json("{}").is_err());
     }
 
     #[test]

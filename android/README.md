@@ -64,6 +64,14 @@ SDK 默认使用 `ANDROID_HOME`，未设置时使用 `%LOCALAPPDATA%\Android\Sdk
 
 ## 离线验证
 
+在线路网与定位功能可用现有 x86_64 模拟器验证（无需登录或提交业务数据）：
+
+```powershell
+./android/test.ps1 -Serial emulator-5580 -TargetDir ./target/android-apk -Suite location
+```
+
+该检查验证过期定位拒绝、精度保留、超时返回可用坐标、前后台取消、设备确认后的 Java/Rust 定位桥接、手动保存边界及系统权限弹窗拒绝。需先构建并安装同一 `TargetDir` 下的 x86_64 debug APK。系统定位仍需在真实 ARM64 手机验证；模拟器注入坐标仅验证处理流程。
+
 ```powershell
 cargo test --lib --locked
 cargo check --locked --all-targets

@@ -8,6 +8,9 @@ nekosportsworldtool.log*
 /config.json
 /identity.json
 /points_cache.json
+/map_tiles/
+/online_roads/
+/city_boundaries.json
 /semester_result.json
 /rank_result.json
 /.idea/

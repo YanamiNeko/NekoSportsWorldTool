@@ -82,25 +82,6 @@ impl App {
         let got_cheat = cheat_json.is_some();
         let got_rank = rank_json.is_some();
 
-        // OSM 路网加载回传
-        while let Ok(res) = self.net_rx.try_recv() {
-            self.osm_page.busy = false;
-            match res {
-                Ok(net) => {
-                    let nodes = net.graph.node_count();
-                    let bld = net.buildings.len();
-                    self.osm_page.fitted = false;
-                    self.osm_page.status = format!("√ 路网加载成功：{nodes} 节点 / {bld} 建筑");
-                    self.log
-                        .push(&format!("[osm] 路网加载成功：{nodes} 节点 / {bld} 建筑"));
-                    self.network = Some(net);
-                }
-                Err(e) => {
-                    self.osm_page.status = format!("路网加载失败：{e}");
-                    self.log.push(&format!("[osm] 路网加载失败：{e}"));
-                }
-            }
-        }
         if let Some(ip) = done_ip {
             self.ip = ip;
         }

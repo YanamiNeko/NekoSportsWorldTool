@@ -168,8 +168,9 @@ pub fn run_full_flow(
     let mut track = match params.route_mode {
         RouteMode::Road => {
             let cfg = crate::api::model::load_config();
-            if cfg.osm_path.is_empty() {
-                log("⚠ [track] 未配置 OSM 路网，回退经典算法");
+            let network_path = if cfg.osm_path.is_empty() { &cfg.road_cache_path } else { &cfg.osm_path };
+            if network_path.is_empty() {
+                log("⚠ [track] 未配置本地或在线路网，回退经典算法");
                 gen_track(
                     params.dist,
                     params.dur,
@@ -179,7 +180,7 @@ pub fn run_full_flow(
                     &pts_bd,
                 )
             } else {
-                match crate::track::generate_road::load_network_path(&cfg.osm_path) {
+                match crate::track::generate_road::load_network_path(network_path) {
                     Ok(mut net) => {
                         crate::track::generate_road::align_network(&mut net);
                         // 电子围栏：裁剪到围栏内道路（失败/无围栏则跳过）

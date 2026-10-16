@@ -1,29 +1,45 @@
-//! 「路网」导入页：选择 OSM 文件 → 后台解析 → 画布预览 + 统计。
+//! 在线路网：地图选范围 → 下载道路拓扑 → 预览与规划。
 
 use eframe::egui;
 use std::sync::Arc;
 
-use route_planner::{Coord, RoadGraph};
+use route_planner::Coord;
 
 use super::map::{collect_bounds, MapState};
 use super::{theme, App};
 
 pub struct OsmPage {
     pub path: String,
+    load_rx: Option<std::sync::mpsc::Receiver<Result<LoadedRoads, String>>>,
     pub busy: bool,
     pub status: String,
     pub map: MapState,
     pub fitted: bool,
+    pub(super) online_center: Option<(f64, f64)>,
+    pub(super) radius: u32,
+    pub(super) picker: Option<super::location_picker::LocationPicker>,
+}
+
+enum LoadedRoads {
+    Local {
+        path: String,
+        network: route_planner::RoadGraph,
+    },
+    Online(super::online_osm::Download),
 }
 
 impl Default for OsmPage {
     fn default() -> Self {
         OsmPage {
             path: String::new(),
+            load_rx: None,
             busy: false,
             status: String::new(),
             map: MapState::default(),
             fitted: false,
+            online_center: None,
+            radius: 1000,
+            picker: None,
         }
     }
 }
@@ -34,47 +50,112 @@ fn ring_to_pts(ring: &[Coord]) -> Vec<(f64, f64)> {
 
 impl App {
     pub fn draw_osm_page(&mut self, ui: &mut egui::Ui) {
-        let mut load_now = false;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.draw_osm_inner(ui));
+    }
 
-        ui.horizontal(|ui| {
-            ui.label("OSM 文件：");
-            ui.add_sized(
-                [340.0, 26.0],
+    fn draw_osm_inner(&mut self, ui: &mut egui::Ui) {
+        let mut import = false;
+        super::mobile::row(ui, |ui| {
+            ui.label("本地 OSM 文件：");
+            ui.add(
                 egui::TextEdit::singleline(&mut self.osm_page.path)
-                    .hint_text("拖入 .osm 文件或填写路径"),
+                    .desired_width(240.0)
+                    .hint_text("填写 .osm / .xml 路径，或拖入文件"),
             );
             #[cfg(not(target_os = "android"))]
             if ui.button("浏览…").clicked() {
-                if let Some(p) = rfd::FileDialog::new()
-                    .add_filter("OSM", &["osm", "xml", "pbf"])
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("OSM XML", &["osm", "xml"])
                     .pick_file()
                 {
-                    self.osm_page.path = p.display().to_string();
+                    self.osm_page.path = path.display().to_string();
                 }
             }
-            let can_load = !self.osm_page.path.is_empty() && !self.osm_page.busy;
             if ui
-                .add_enabled(can_load, theme::primary_btn("加载路网"))
+                .add_enabled(
+                    !self.osm_page.busy && !self.osm_page.path.trim().is_empty(),
+                    theme::primary_btn("导入本地路网"),
+                )
                 .clicked()
             {
-                load_now = true;
+                import = true;
             }
         });
-
-        // 拖拽导入
-        let dropped: Vec<String> = ui.ctx().input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .filter_map(|f| f.path.as_ref().map(|p| p.display().to_string()))
-                .collect()
-        });
-        if let Some(p) = dropped.into_iter().find(|p| !p.is_empty()) {
-            self.osm_page.path = p;
-            if !self.osm_page.busy {
-                load_now = true;
+        if !self.osm_page.busy {
+            if let Some(path) = ui.ctx().input(|input| {
+                input
+                    .raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|file| file.path.as_ref())
+                    .find(|path| {
+                        path.extension().is_some_and(|ext| {
+                            ext.eq_ignore_ascii_case("osm") || ext.eq_ignore_ascii_case("xml")
+                        })
+                    })
+                    .cloned()
+            }) {
+                self.osm_page.path = path.display().to_string();
+                import = true;
             }
         }
+        if import {
+            self.load_osm_async(self.osm_page.path.clone());
+        }
+        ui.separator();
+        let mut center = self
+            .osm_page
+            .online_center
+            .unwrap_or((self.identity.anchor_lat, self.identity.anchor_lon));
+        super::mobile::row(ui, |ui| {
+            ui.label("在线路网中心：");
+            if ui.button("使用已保存锚点").clicked() {
+                center = (self.identity.anchor_lat, self.identity.anchor_lon);
+                self.osm_page.picker = None;
+            }
+            if ui
+                .button(if self.osm_page.picker.is_some() {
+                    "关闭选点"
+                } else {
+                    "地图选择范围"
+                })
+                .clicked()
+            {
+                self.osm_page.picker = if self.osm_page.picker.is_some() {
+                    None
+                } else {
+                    Some(super::location_picker::LocationPicker::new(center))
+                };
+            }
+            ui.label("半径（米）：");
+            ui.add(
+                egui::DragValue::new(&mut self.osm_page.radius)
+                    .range(200..=2000)
+                    .speed(100),
+            );
+            if ui
+                .add_enabled(!self.osm_page.busy, theme::primary_btn("在线下载附近路网"))
+                .clicked()
+            {
+                self.download_osm_async(center);
+            }
+        });
+        if let Some(picker) = self.osm_page.picker.as_mut() {
+            if let Some(point) = picker.draw(ui, center) {
+                center = point;
+            }
+        }
+        self.osm_page.online_center = Some(center);
+        ui.label(format!(
+            "中心 WGS84：{:.7}, {:.7}；下载道路与建筑，缓存 7 天。此处选点不修改设备锚点。",
+            center.0, center.1
+        ));
+        ui.hyperlink_to(
+            "© OpenStreetMap contributors · Overpass API",
+            "https://www.openstreetmap.org/copyright",
+        );
 
         if !self.osm_page.status.is_empty() {
             ui.colored_label(theme::plain(), &self.osm_page.status);
@@ -89,7 +170,12 @@ impl App {
                     net.graph.edge_count(),
                     net.buildings.len()
                 ));
-                if let Ok(meta) = std::fs::metadata(&self.osm_page.path) {
+                let path = if self.config.osm_path.is_empty() {
+                    &self.config.road_cache_path
+                } else {
+                    &self.config.osm_path
+                };
+                if let Ok(meta) = std::fs::metadata(path) {
                     ui.label(format!("· 文件 {:.1} KB", meta.len() as f64 / 1024.0));
                 }
             });
@@ -107,10 +193,11 @@ impl App {
         }
         let rect = ui.available_rect_before_wrap();
         let (response, painter) = ui.allocate_painter(
-            egui::Vec2::new(rect.width().max(200.0), rect.height().max(220.0)),
+            egui::Vec2::new(rect.width().max(1.0), rect.height().clamp(220.0, 420.0)),
             egui::Sense::drag(),
         );
         let canvas = response.rect;
+        let painter = painter.with_clip_rect(canvas);
 
         if let Some(net) = &self.network {
             if !self.osm_page.fitted {
@@ -154,35 +241,116 @@ impl App {
             painter.text(
                 canvas.center(),
                 egui::Align2::CENTER_CENTER,
-                "加载 OSM 路网后可预览道路与建筑",
+                "导入本地 OSM 或在线下载路网后可预览道路与建筑",
                 egui::FontId::proportional(14.0),
                 egui::Color32::from_rgb(150, 160, 156),
             );
         }
 
         self.osm_page.map.interact(ui, canvas);
+    }
 
-        if load_now {
-            let path = self.osm_page.path.clone();
-            self.load_osm_async(path);
+    /// Failed loads preserve the current network and saved source.
+    pub(super) fn poll_online_osm(&mut self) {
+        let Some(receiver) = self.osm_page.load_rx.as_ref() else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("路网加载线程已退出，请重试".into())
+            }
+        };
+        self.osm_page.load_rx = None;
+        self.osm_page.busy = false;
+        match result {
+            Ok(loaded) => {
+                let (network, source) = match loaded {
+                    LoadedRoads::Local { path, network } => {
+                        self.config.osm_path = path;
+                        self.config.road_cache_path.clear();
+                        (network, "已导入本地")
+                    }
+                    LoadedRoads::Online(download) => {
+                        self.config.osm_path.clear();
+                        self.config.road_cache_path = download.path.display().to_string();
+                        (
+                            download.network,
+                            if download.cached {
+                                "已读取缓存"
+                            } else {
+                                "已下载并缓存"
+                            },
+                        )
+                    }
+                };
+                self.osm_page.fitted = false;
+                self.run_page.preview_stale = true;
+                self.osm_page.status = format!(
+                    "√ {source}路网：{} 节点 / {} 建筑",
+                    network.graph.node_count(),
+                    network.buildings.len()
+                );
+                self.network = Some(Arc::new(network));
+                if let Err(error) = crate::api::model::save_config(&self.config) {
+                    self.osm_page
+                        .status
+                        .push_str(&format!("；配置保存失败：{error}"));
+                }
+            }
+            Err(error) => self.osm_page.status = error,
         }
     }
 
-    /// 后台线程加载 OSM 路网，成功后经 `net_rx` 回传。
+    fn download_osm_async(&mut self, center: (f64, f64)) {
+        let coordinate = match crate::location::Coordinate::new(center.0, center.1, 0.0) {
+            Ok(coordinate) => coordinate,
+            Err(error) => {
+                self.osm_page.status = error;
+                return;
+            }
+        };
+        let radius = self.osm_page.radius;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.osm_page.load_rx = Some(receiver);
+        self.osm_page.busy = true;
+        self.osm_page.status = format!("正在下载附近 {radius} 米路网…");
+        std::thread::spawn(move || {
+            let _ = sender
+                .send(super::online_osm::download(coordinate, radius).map(LoadedRoads::Online));
+        });
+    }
+
     pub fn load_osm_async(&mut self, path: String) {
+        if self.osm_page.busy {
+            return;
+        }
         self.osm_page.path = path.clone();
         self.osm_page.busy = true;
-        self.osm_page.status = format!("加载中：{path} …");
-        self.config.osm_path = path.clone();
-        let _ = crate::api::model::save_config(&self.config);
-        let tx = self.net_tx.clone();
+        self.osm_page.status = format!("正在导入本地路网：{path}");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.osm_page.load_rx = Some(receiver);
         std::thread::spawn(move || {
-            let res = (|| -> Result<Arc<RoadGraph>, String> {
-                let bytes = std::fs::read(&path).map_err(|e| format!("读取失败: {e}"))?;
-                let net = route_planner::load_osm(&bytes)?;
-                Ok(Arc::new(net))
-            })();
-            let _ = tx.send(res);
+            let result = std::fs::read(&path)
+                .map_err(|error| format!("读取本地路网失败：{error}"))
+                .and_then(|bytes| route_planner::load_osm(&bytes))
+                .map(|network| LoadedRoads::Local { path, network });
+            let _ = sender.send(result);
+        });
+    }
+
+    /// Restore only the application's downloaded road cache on startup.
+    pub(super) fn restore_road_cache(&mut self, path: String) {
+        self.osm_page.busy = true;
+        self.osm_page.status = "正在读取已下载路网…".into();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.osm_page.load_rx = Some(receiver);
+        std::thread::spawn(move || {
+            let _ = sender.send(
+                super::online_osm::load_cache(std::path::PathBuf::from(path))
+                    .map(LoadedRoads::Online),
+            );
         });
     }
 }

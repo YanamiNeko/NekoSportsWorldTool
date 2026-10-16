@@ -74,9 +74,12 @@ pub struct Config {
     /// 启动时检查更新：silent（静默，发现新版才弹窗）/ ask（每次询问）/ off
     #[serde(default = "default_update_check")]
     pub update_check: String,
-    /// OSM 路网文件路径（真实道路路由用）。
+    /// 本地导入的 OSM 文件；与在线缓存互斥，记录最近成功加载的来源。
     #[serde(default)]
     pub osm_path: String,
+    /// 已在线下载的路网缓存。
+    #[serde(default)]
+    pub road_cache_path: String,
     /// 路线算法：legacy | road。
     #[serde(default = "default_route_mode")]
     pub route_mode: String,
@@ -122,6 +125,7 @@ impl Default for Config {
             ai_reps: default_ai_reps(),
             update_check: default_update_check(),
             osm_path: String::new(),
+            road_cache_path: String::new(),
             route_mode: default_route_mode(),
         }
     }

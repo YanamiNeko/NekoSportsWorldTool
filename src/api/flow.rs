@@ -273,11 +273,7 @@ pub fn run_full_flow(
         track.locations.len(),
         track.totalDistance,
         track.totalSteps,
-        chrono::Local
-            .timestamp_millis_opt(params.start_ms)
-            .single()
-            .map(|t| t.format("%H:%M:%S").to_string())
-            .unwrap_or_default(),
+        crate::track::geom::fmt_cst(params.start_ms, "%H:%M:%S"),
     ));
 
     // ④ 五点 wrapper（跑完态）

@@ -1,6 +1,6 @@
 //! 运动记录页：跑步 / AI 两个分栏，egui_extras 表格。
 
-use super::{mobile, theme, App};
+use super::{components, mobile, theme, App};
 use chrono::TimeZone;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
@@ -23,11 +23,10 @@ pub struct RecordsPage {
 
 impl App {
     pub fn draw_records(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
+        ui.add_space(theme::space::SM);
         mobile::row(ui, |ui| {
-            ui.selectable_value(&mut self.records_page.sub, 0, "跑步");
-            ui.selectable_value(&mut self.records_page.sub, 1, "AI 运动");
-            ui.add_space(8.0);
+            components::segmented(ui, &mut self.records_page.sub, &["跑步", "AI 运动"]);
+            ui.add_space(theme::space::SM);
             match self.records_page.sub {
                 0 => {
                     if ui
@@ -53,7 +52,7 @@ impl App {
                 }
             }
         });
-        ui.separator();
+        ui.add_space(theme::space::SM);
 
         match self.records_page.sub {
             0 => self.draw_run_view(ui),
@@ -148,8 +147,9 @@ impl App {
 
     fn draw_run_table(&mut self, ui: &mut egui::Ui) {
         if self.records_page.rows.is_empty() {
-            ui.add_space(20.0);
-            ui.centered_and_justified(|ui| ui.label("暂无跑步记录"));
+            components::card_titled(ui, "跑步记录", |ui| {
+                components::empty(ui, "暂无跑步记录");
+            });
             return;
         }
         let fmt_time = |ms: i64| -> String {
@@ -173,109 +173,104 @@ impl App {
 
         let toggle_target = std::cell::Cell::new(None::<i64>);
 
-        if mobile::compact_ui(ui) {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for r in &self.records_page.rows {
-                        let rrid = r.rrid;
-                        let (pace_min, pace_sec) = pace_of(r.total_dis, r.total_time);
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            mobile::row(ui, |ui| {
-                                ui.strong(fmt_time(r.start_time));
-                                if r.complete {
-                                    ui.colored_label(theme::ok(), "达标");
-                                } else {
-                                    ui.colored_label(theme::err(), "未达标");
+        components::card_titled(ui, "跑步记录", |ui| {
+            if mobile::compact_ui(ui) {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for r in &self.records_page.rows {
+                            let rrid = r.rrid;
+                            let (pace_min, pace_sec) = pace_of(r.total_dis, r.total_time);
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                mobile::row(ui, |ui| {
+                                    ui.strong(fmt_time(r.start_time));
+                                    if r.complete {
+                                        ui.colored_label(theme::ok(), "达标");
+                                    } else {
+                                        ui.colored_label(theme::err(), "未达标");
+                                    }
+                                });
+                                ui.label(format!(
+                                    "{:.2} km · {} · 配速 {pace_min}:{pace_sec:02}/km",
+                                    r.total_dis / 1000.0,
+                                    fmt_dur(r.total_time),
+                                ));
+                                ui.label(format!("步频 {} spm · rrid {rrid}", r.avg_step_freq));
+                                if ui.add_sized([96.0, mobile::TOUCH_HEIGHT], egui::Button::new("详情")).clicked() {
+                                    toggle_target.set(Some(rrid));
                                 }
                             });
-                            ui.label(format!(
-                                "{:.2} km · {} · 配速 {pace_min}:{pace_sec:02}/km",
-                                r.total_dis / 1000.0,
-                                fmt_dur(r.total_time),
-                            ));
-                            ui.label(format!("步频 {} spm · rrid {rrid}", r.avg_step_freq));
-                            if ui.add_sized([96.0, mobile::TOUCH_HEIGHT], egui::Button::new("详情")).clicked() {
-                                toggle_target.set(Some(rrid));
-                            }
-                        });
-                        ui.add_space(6.0);
-                    }
-                });
-            if let Some(rrid) = toggle_target.get() {
-                self.records_page.detail_rrid = Some(rrid);
-                self.records_page.detail_raw = None;
-                self.records_page.detail_loading = true;
-                self.fetch_run_detail(rrid);
+                            ui.add_space(theme::space::SM);
+                        }
+                    });
+            } else {
+                TableBuilder::new(ui)
+                    .striped(true)
+                    .vscroll(true)
+                    .auto_shrink([false, false])
+                    .column(Column::auto().at_least(130.0)) // 时间
+                    .column(Column::auto().at_least(70.0)) // 距离
+                    .column(Column::auto().at_least(70.0)) // 时长
+                    .column(Column::auto().at_least(60.0)) // 配速
+                    .column(Column::auto().at_least(70.0)) // 步频
+                    .column(Column::auto().at_least(60.0)) // 达标
+                    .column(Column::auto().at_least(90.0)) // rrid
+                    .column(Column::remainder()) // 操作
+                    .header(22.0, |mut h| {
+                        for t in ["时间", "距离", "时长", "配速", "步频", "达标", "rrid", "操作"] {
+                            h.col(|ui| {
+                                ui.label(egui::RichText::new(t).strong().color(theme::text()));
+                            });
+                        }
+                    })
+                    .body(|mut body| {
+                        let sel = self.records_page.detail_rrid;
+                        for r in &self.records_page.rows {
+                            let rrid = r.rrid;
+                            let is_detail = sel == Some(rrid);
+                            body.row(20.0, |mut row| {
+                                row.col(|ui| {
+                                    let color = if is_detail { theme::accent() } else { theme::text() };
+                                    ui.label(egui::RichText::new(fmt_time(r.start_time)).color(color));
+                                });
+                                row.col(|ui| {
+                                    ui.monospace(format!("{:.2} km", r.total_dis / 1000.0));
+                                });
+                                row.col(|ui| {
+                                    ui.monospace(fmt_dur(r.total_time));
+                                });
+                                row.col(|ui| {
+                                    let (m, s) = pace_of(r.total_dis, r.total_time);
+                                    ui.monospace(format!("{m}:{s:02}"));
+                                });
+                                row.col(|ui| {
+                                    ui.monospace(format!("{} spm", r.avg_step_freq));
+                                });
+                                row.col(|ui| {
+                                    if r.complete {
+                                        ui.colored_label(theme::ok(), "达标");
+                                    } else {
+                                        ui.colored_label(theme::err(), "未达标");
+                                    }
+                                });
+                                row.col(|ui| {
+                                    ui.monospace(rrid.to_string());
+                                });
+                                row.col(|ui| {
+                                    let txt = if is_detail {
+                                        egui::RichText::new("收起").color(theme::accent())
+                                    } else {
+                                        egui::RichText::new("详情").color(theme::accent())
+                                    };
+                                    if ui.small_button(txt).clicked() {
+                                        toggle_target.set(if is_detail { None } else { Some(rrid) });
+                                    }
+                                });
+                            });
+                        }
+                    });
             }
-            return;
-        }
-
-        TableBuilder::new(ui)
-            .striped(true)
-            .vscroll(true)
-            .auto_shrink([false, false])
-            .column(Column::auto().at_least(130.0)) // 时间
-            .column(Column::auto().at_least(70.0)) // 距离
-            .column(Column::auto().at_least(70.0)) // 时长
-            .column(Column::auto().at_least(60.0)) // 配速
-            .column(Column::auto().at_least(70.0)) // 步频
-            .column(Column::auto().at_least(60.0)) // 达标
-            .column(Column::auto().at_least(90.0)) // rrid
-            .column(Column::remainder()) // 操作
-            .header(22.0, |mut h| {
-                for t in ["时间", "距离", "时长", "配速", "步频", "达标", "rrid", "操作"] {
-                    h.col(|ui| {
-                        ui.label(egui::RichText::new(t).strong().color(theme::text()));
-                    });
-                }
-            })
-            .body(|mut body| {
-                let sel = self.records_page.detail_rrid;
-                for r in &self.records_page.rows {
-                    let rrid = r.rrid;
-                    let is_detail = sel == Some(rrid);
-                    body.row(20.0, |mut row| {
-                        row.col(|ui| {
-                            let color = if is_detail { theme::accent() } else { theme::text() };
-                            ui.label(egui::RichText::new(fmt_time(r.start_time)).color(color));
-                        });
-                        row.col(|ui| {
-                            ui.monospace(format!("{:.2} km", r.total_dis / 1000.0));
-                        });
-                        row.col(|ui| {
-                            ui.monospace(fmt_dur(r.total_time));
-                        });
-                        row.col(|ui| {
-                            let (m, s) = pace_of(r.total_dis, r.total_time);
-                            ui.monospace(format!("{m}:{s:02}"));
-                        });
-                        row.col(|ui| {
-                            ui.monospace(format!("{} spm", r.avg_step_freq));
-                        });
-                        row.col(|ui| {
-                            if r.complete {
-                                ui.colored_label(theme::ok(), "达标");
-                            } else {
-                                ui.colored_label(theme::err(), "未达标");
-                            }
-                        });
-                        row.col(|ui| {
-                            ui.monospace(rrid.to_string());
-                        });
-                        row.col(|ui| {
-                            let txt = if is_detail {
-                                egui::RichText::new("收起").color(theme::accent())
-                            } else {
-                                egui::RichText::new("详情").color(theme::accent())
-                            };
-                            if ui.small_button(txt).clicked() {
-                                toggle_target.set(if is_detail { None } else { Some(rrid) });
-                            }
-                        });
-                    });
-                }
-            });
+        });
 
         if let Some(rrid) = toggle_target.get() {
             self.records_page.detail_rrid = Some(rrid);
@@ -287,134 +282,132 @@ impl App {
 
     fn draw_ai_table(&mut self, ui: &mut egui::Ui) {
         if self.records_page.ai_groups.is_empty() {
-            ui.add_space(20.0);
-            ui.centered_and_justified(|ui| ui.label("暂无 AI 记录，选择项目后「刷新记录」"));
+            components::card_titled(ui, "AI 运动记录", |ui| {
+                components::empty(ui, "暂无 AI 记录，选择项目后「刷新记录」");
+            });
             return;
         }
-        ui.label(format!(
-            "共 {} 条（{} 天）",
-            self.records_page.ai_total,
-            self.records_page.ai_groups.len()
-        ));
         let num = |s: &str| s.parse::<f64>().unwrap_or(0.0);
         let toggle_target = std::cell::Cell::new(None::<i64>);
-        if mobile::compact_ui(ui) {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for g in &self.records_page.ai_groups {
-                        let date = chrono::Local
-                            .timestamp_millis_opt(g.score_date)
-                            .single()
-                            .map(|t| t.format("%Y-%m-%d").to_string())
-                            .unwrap_or_default();
-                        for r in &g.records {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.strong(format!("{} · {}", date, r.name));
-                                let score = if r.rtype == 2 {
-                                    format!("{:.1} 秒", num(&r.score) / 1000.0)
-                                } else {
-                                    format!("{} 个", r.score)
-                                };
-                                ui.label(format!("成绩 {score} · 视频 {}", if r.has_video { "有" } else { "-" }));
-                                ui.label(format!(
-                                    "提交 {}",
-                                    chrono::Local
-                                        .timestamp_millis_opt(r.upload_time)
-                                        .single()
-                                        .map(|t| t.format("%m-%d %H:%M").to_string())
-                                        .unwrap_or_default(),
-                                ));
-                                if ui.add_sized([96.0, mobile::TOUCH_HEIGHT], egui::Button::new("详情")).clicked() {
-                                    toggle_target.set(Some(r.id));
-                                }
-                            });
-                            ui.add_space(6.0);
+
+        components::card_titled(ui, "AI 运动记录", |ui| {
+            ui.label(format!(
+                "共 {} 条（{} 天）",
+                self.records_page.ai_total,
+                self.records_page.ai_groups.len()
+            ));
+            if mobile::compact_ui(ui) {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for g in &self.records_page.ai_groups {
+                            let date = chrono::Local
+                                .timestamp_millis_opt(g.score_date)
+                                .single()
+                                .map(|t| t.format("%Y-%m-%d").to_string())
+                                .unwrap_or_default();
+                            for r in &g.records {
+                                egui::Frame::group(ui.style()).show(ui, |ui| {
+                                    ui.strong(format!("{} · {}", date, r.name));
+                                    let score = if r.rtype == 2 {
+                                        format!("{:.1} 秒", num(&r.score) / 1000.0)
+                                    } else {
+                                        format!("{} 个", r.score)
+                                    };
+                                    ui.label(format!("成绩 {score} · 视频 {}", if r.has_video { "有" } else { "-" }));
+                                    ui.label(format!(
+                                        "提交 {}",
+                                        chrono::Local
+                                            .timestamp_millis_opt(r.upload_time)
+                                            .single()
+                                            .map(|t| t.format("%m-%d %H:%M").to_string())
+                                            .unwrap_or_default(),
+                                    ));
+                                    if ui.add_sized([96.0, mobile::TOUCH_HEIGHT], egui::Button::new("详情")).clicked() {
+                                        toggle_target.set(Some(r.id));
+                                    }
+                                });
+                                ui.add_space(theme::space::SM);
+                            }
                         }
-                    }
-                });
-            if let Some(id) = toggle_target.get() {
-                self.records_page.ai_detail_id = Some(id);
-                self.records_page.ai_detail_raw = None;
-                self.records_page.ai_detail_loading = true;
-                self.fetch_ai_detail(id);
-            }
-            return;
-        }
-        TableBuilder::new(ui)
-            .striped(true)
-            .vscroll(true)
-            .auto_shrink([false, false])
-            .column(Column::auto().at_least(100.0)) // 日期
-            .column(Column::auto().at_least(110.0)) // 项目
-            .column(Column::auto().at_least(90.0)) // 成绩
-            .column(Column::auto().at_least(100.0)) // 完成时间
-            .column(Column::auto().at_least(90.0)) // 提交时间
-            .column(Column::auto().at_least(60.0)) // 视频
-            .column(Column::remainder()) // 操作
-            .header(22.0, |mut h| {
-                for t in ["日期", "项目", "成绩", "完成时间", "提交时间", "视频", "操作"] {
-                    h.col(|ui| {
-                        ui.label(egui::RichText::new(t).strong().color(theme::text()));
                     });
-                }
-            })
-            .body(|mut body| {
-                for g in &self.records_page.ai_groups {
-                    let date = chrono::Local
-                        .timestamp_millis_opt(g.score_date)
-                        .single()
-                        .map(|t| t.format("%Y-%m-%d").to_string())
-                        .unwrap_or_default();
-                    for r in &g.records {
-                        body.row(20.0, |mut row| {
-                            row.col(|ui| {
-                                ui.monospace(&date);
+            } else {
+                TableBuilder::new(ui)
+                    .striped(true)
+                    .vscroll(true)
+                    .auto_shrink([false, false])
+                    .column(Column::auto().at_least(100.0)) // 日期
+                    .column(Column::auto().at_least(110.0)) // 项目
+                    .column(Column::auto().at_least(90.0)) // 成绩
+                    .column(Column::auto().at_least(100.0)) // 完成时间
+                    .column(Column::auto().at_least(90.0)) // 提交时间
+                    .column(Column::auto().at_least(60.0)) // 视频
+                    .column(Column::remainder()) // 操作
+                    .header(22.0, |mut h| {
+                        for t in ["日期", "项目", "成绩", "完成时间", "提交时间", "视频", "操作"] {
+                            h.col(|ui| {
+                                ui.label(egui::RichText::new(t).strong().color(theme::text()));
                             });
-                            row.col(|ui| {
-                                ui.label(&r.name);
-                            });
-                            row.col(|ui| {
-                                if r.rtype == 2 {
-                                    // 计时类：成绩即用时（毫秒）
-                                    ui.monospace(format!("{:.1} 秒", num(&r.score) / 1000.0));
-                                } else {
-                                    ui.monospace(format!("{} 个", r.score));
-                                }
-                            });
-                            row.col(|ui| {
-                                let ms = chrono::Local
-                                    .timestamp_millis_opt(r.score_date)
-                                    .single()
-                                    .map(|t| t.format("%H:%M:%S").to_string())
-                                    .unwrap_or_default();
-                                ui.monospace(ms);
-                            });
-                            row.col(|ui| {
-                                ui.monospace(
-                                    chrono::Local
-                                        .timestamp_millis_opt(r.upload_time)
-                                        .single()
-                                        .map(|t| t.format("%m-%d %H:%M").to_string())
-                                        .unwrap_or_default(),
-                                );
-                            });
-                            row.col(|ui| {
-                                if r.has_video {
-                                    ui.colored_label(theme::accent(), "有");
-                                } else {
-                                    ui.label("-");
-                                }
-                            });
-                            row.col(|ui| {
-                                if ui.small_button("详情").clicked() {
-                                    toggle_target.set(Some(r.id));
-                                }
-                            });
-                        });
-                    }
-                }
-            });
+                        }
+                    })
+                    .body(|mut body| {
+                        for g in &self.records_page.ai_groups {
+                            let date = chrono::Local
+                                .timestamp_millis_opt(g.score_date)
+                                .single()
+                                .map(|t| t.format("%Y-%m-%d").to_string())
+                                .unwrap_or_default();
+                            for r in &g.records {
+                                body.row(20.0, |mut row| {
+                                    row.col(|ui| {
+                                        ui.monospace(&date);
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(&r.name);
+                                    });
+                                    row.col(|ui| {
+                                        if r.rtype == 2 {
+                                            // 计时类：成绩即用时（毫秒）
+                                            ui.monospace(format!("{:.1} 秒", num(&r.score) / 1000.0));
+                                        } else {
+                                            ui.monospace(format!("{} 个", r.score));
+                                        }
+                                    });
+                                    row.col(|ui| {
+                                        let ms = chrono::Local
+                                            .timestamp_millis_opt(r.score_date)
+                                            .single()
+                                            .map(|t| t.format("%H:%M:%S").to_string())
+                                            .unwrap_or_default();
+                                        ui.monospace(ms);
+                                    });
+                                    row.col(|ui| {
+                                        ui.monospace(
+                                            chrono::Local
+                                                .timestamp_millis_opt(r.upload_time)
+                                                .single()
+                                                .map(|t| t.format("%m-%d %H:%M").to_string())
+                                                .unwrap_or_default(),
+                                        );
+                                    });
+                                    row.col(|ui| {
+                                        if r.has_video {
+                                            ui.colored_label(theme::accent(), "有");
+                                        } else {
+                                            ui.label("-");
+                                        }
+                                    });
+                                    row.col(|ui| {
+                                        if ui.small_button("详情").clicked() {
+                                            toggle_target.set(Some(r.id));
+                                        }
+                                    });
+                                });
+                            }
+                        }
+                    });
+            }
+        });
 
         if let Some(id) = toggle_target.get() {
             self.records_page.ai_detail_id = Some(id);

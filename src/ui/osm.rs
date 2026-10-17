@@ -6,7 +6,7 @@ use std::sync::Arc;
 use route_planner::{Coord, RoadGraph};
 
 use super::map::{collect_bounds, MapState};
-use super::{theme, App};
+use super::{components, mobile, theme, App};
 
 pub struct OsmPage {
     pub path: String,
@@ -36,131 +36,137 @@ impl App {
     pub fn draw_osm_page(&mut self, ui: &mut egui::Ui) {
         let mut load_now = false;
 
-        ui.horizontal(|ui| {
-            ui.label("OSM 文件：");
-            ui.add_sized(
-                [340.0, 26.0],
-                egui::TextEdit::singleline(&mut self.osm_page.path)
-                    .hint_text("拖入 .osm 文件或填写路径"),
-            );
-            #[cfg(not(target_os = "android"))]
-            if ui.button("浏览…").clicked() {
-                if let Some(p) = rfd::FileDialog::new()
-                    .add_filter("OSM", &["osm", "xml", "pbf"])
-                    .pick_file()
-                {
-                    self.osm_page.path = p.display().to_string();
+        // ── 导入路网 ────────────────────────────────────────────
+        components::card_titled(ui, "导入路网", |ui| {
+            mobile::row(ui, |ui| {
+                ui.label("OSM 文件：");
+                ui.add_sized(
+                    [240.0, theme::CONTROL_H],
+                    egui::TextEdit::singleline(&mut self.osm_page.path)
+                        .hint_text("拖入 .osm 文件或填写路径"),
+                );
+                #[cfg(not(target_os = "android"))]
+                if ui.add(theme::secondary_btn("浏览…")).clicked() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("OSM", &["osm", "xml", "pbf"])
+                        .pick_file()
+                    {
+                        self.osm_page.path = p.display().to_string();
+                    }
                 }
-            }
-            let can_load = !self.osm_page.path.is_empty() && !self.osm_page.busy;
-            if ui
-                .add_enabled(can_load, theme::primary_btn("加载路网"))
-                .clicked()
-            {
-                load_now = true;
-            }
-        });
-
-        // 拖拽导入
-        let dropped: Vec<String> = ui.ctx().input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .filter_map(|f| f.path.as_ref().map(|p| p.display().to_string()))
-                .collect()
-        });
-        if let Some(p) = dropped.into_iter().find(|p| !p.is_empty()) {
-            self.osm_page.path = p;
-            if !self.osm_page.busy {
-                load_now = true;
-            }
-        }
-
-        if !self.osm_page.status.is_empty() {
-            ui.colored_label(theme::plain(), &self.osm_page.status);
-        }
-
-        // 统计
-        if let Some(net) = &self.network {
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "节点 {} · 有向边 {} · 建筑 {}",
-                    net.graph.node_count(),
-                    net.graph.edge_count(),
-                    net.buildings.len()
-                ));
-                if let Ok(meta) = std::fs::metadata(&self.osm_page.path) {
-                    ui.label(format!("· 文件 {:.1} KB", meta.len() as f64 / 1024.0));
+                let can_load = !self.osm_page.path.is_empty() && !self.osm_page.busy;
+                if ui
+                    .add_enabled(can_load, theme::primary_btn("加载路网"))
+                    .clicked()
+                {
+                    load_now = true;
                 }
             });
-        }
 
-        ui.add_space(4.0);
-        if self.network.is_some() {
-            super::map::legend(
-                ui,
-                &[
-                    ("道路", egui::Color32::from_rgb(190, 200, 196)),
-                    ("建筑", egui::Color32::from_rgb(214, 182, 158)),
-                ],
-            );
-        }
-        let rect = ui.available_rect_before_wrap();
-        let (response, painter) = ui.allocate_painter(
-            egui::Vec2::new(rect.width().max(200.0), rect.height().max(220.0)),
-            egui::Sense::drag(),
-        );
-        let canvas = response.rect;
-
-        if let Some(net) = &self.network {
-            if !self.osm_page.fitted {
-                let mut bounds: Vec<(f64, f64)> = collect_bounds(
-                    &net.edges_deg()
-                        .iter()
-                        .map(|e| ring_to_pts(e))
-                        .collect::<Vec<_>>(),
-                );
-                for b in &net.buildings {
-                    bounds.extend(ring_to_pts(b));
+            // 拖拽导入
+            let dropped: Vec<String> = ui.ctx().input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.as_ref().map(|p| p.display().to_string()))
+                    .collect()
+            });
+            if let Some(p) = dropped.into_iter().find(|p| !p.is_empty()) {
+                self.osm_page.path = p;
+                if !self.osm_page.busy {
+                    load_now = true;
                 }
-                self.osm_page.map.fit(canvas, &bounds);
-                self.osm_page.fitted = true;
             }
-        }
 
-        painter.rect_filled(
-            canvas,
-            egui::Rounding::ZERO,
-            egui::Color32::from_rgb(250, 252, 251),
-        );
-        if let Some(net) = &self.network {
-            let road_color = egui::Color32::from_rgb(190, 200, 196);
-            for e in net.edges_deg() {
-                self.osm_page.map.draw_polyline(
-                    &painter,
-                    canvas,
-                    &ring_to_pts(&e),
-                    road_color,
-                    1.0,
+            if !self.osm_page.status.is_empty() {
+                ui.add_space(theme::space::SM);
+                components::notice(ui, components::Tone::Info, &self.osm_page.status);
+            }
+        });
+
+        // ── 路网预览 ────────────────────────────────────────────
+        components::card_titled(ui, "路网预览", |ui| {
+            // 统计
+            if let Some(net) = &self.network {
+                mobile::row(ui, |ui| {
+                    ui.label(format!(
+                        "节点 {} · 有向边 {} · 建筑 {}",
+                        net.graph.node_count(),
+                        net.graph.edge_count(),
+                        net.buildings.len()
+                    ));
+                    if let Ok(meta) = std::fs::metadata(&self.osm_page.path) {
+                        ui.label(format!("· 文件 {:.1} KB", meta.len() as f64 / 1024.0));
+                    }
+                });
+            }
+
+            if self.network.is_some() {
+                super::map::legend(
+                    ui,
+                    &[
+                        ("道路", egui::Color32::from_rgb(190, 200, 196)),
+                        ("建筑", egui::Color32::from_rgb(214, 182, 158)),
+                    ],
                 );
             }
-            let bld_color = egui::Color32::from_rgb(214, 182, 158);
-            for b in &net.buildings {
-                self.osm_page
-                    .map
-                    .draw_polygon(&painter, canvas, &ring_to_pts(b), bld_color, 1.0);
-            }
-        } else {
-            painter.text(
-                canvas.center(),
-                egui::Align2::CENTER_CENTER,
-                "加载 OSM 路网后可预览道路与建筑",
-                egui::FontId::proportional(14.0),
-                egui::Color32::from_rgb(150, 160, 156),
+            let rect = ui.available_rect_before_wrap();
+            let (response, painter) = ui.allocate_painter(
+                egui::Vec2::new(rect.width().max(200.0), rect.height().max(220.0)),
+                egui::Sense::drag(),
             );
-        }
+            let canvas = response.rect;
 
-        self.osm_page.map.interact(ui, canvas);
+            if let Some(net) = &self.network {
+                if !self.osm_page.fitted {
+                    let mut bounds: Vec<(f64, f64)> = collect_bounds(
+                        &net.edges_deg()
+                            .iter()
+                            .map(|e| ring_to_pts(e))
+                            .collect::<Vec<_>>(),
+                    );
+                    for b in &net.buildings {
+                        bounds.extend(ring_to_pts(b));
+                    }
+                    self.osm_page.map.fit(canvas, &bounds);
+                    self.osm_page.fitted = true;
+                }
+            }
+
+            painter.rect_filled(
+                canvas,
+                egui::Rounding::ZERO,
+                egui::Color32::from_rgb(250, 252, 251),
+            );
+            if let Some(net) = &self.network {
+                let road_color = egui::Color32::from_rgb(190, 200, 196);
+                for e in net.edges_deg() {
+                    self.osm_page.map.draw_polyline(
+                        &painter,
+                        canvas,
+                        &ring_to_pts(&e),
+                        road_color,
+                        1.0,
+                    );
+                }
+                let bld_color = egui::Color32::from_rgb(214, 182, 158);
+                for b in &net.buildings {
+                    self.osm_page
+                        .map
+                        .draw_polygon(&painter, canvas, &ring_to_pts(b), bld_color, 1.0);
+                }
+            } else {
+                painter.text(
+                    canvas.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "加载 OSM 路网后可预览道路与建筑",
+                    egui::FontId::proportional(14.0),
+                    egui::Color32::from_rgb(150, 160, 156),
+                );
+            }
+
+            self.osm_page.map.interact(ui, canvas);
+        });
 
         if load_now {
             let path = self.osm_page.path.clone();

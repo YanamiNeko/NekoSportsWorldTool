@@ -5,7 +5,7 @@
 //! （尚未到达时按当前时刻），「换一版」只重掷运动量，不动时刻。
 
 use super::map::MapState;
-use super::{mobile, theme, App};
+use super::{components, mobile, theme, App};
 use crate::track::generate_road::RouteMode;
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike};
 use eframe::egui;
@@ -270,133 +270,134 @@ impl App {
         let prev_route = self.run_page.route_mode;
         {
             let page = &mut self.run_page;
-            let compact = mobile::compact_ui(ui);
-            let mut draw_distance_inputs = |ui: &mut egui::Ui| {
-                mobile::drag_f32(
-                    ui,
-                    "run_dist_min",
-                    &mut page.dist_min,
-                    0.5..=20.0,
-                    0.05,
-                    2,
-                    " km",
-                );
-                ui.label("至");
-                mobile::drag_f32(
-                    ui,
-                    "run_dist_max",
-                    &mut page.dist_max,
-                    0.5..=20.0,
-                    0.05,
-                    2,
-                    " km",
-                );
-            };
-            if compact {
-                ui.label("距离范围（km）：");
-                ui.horizontal(draw_distance_inputs);
-            } else {
-                ui.horizontal(|ui| {
+            let need_osm = self.network.is_none();
+
+            components::card_titled(ui, "距离与配速", |ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("距离范围（km）：");
-                    draw_distance_inputs(ui);
+                    mobile::drag_f32(
+                        ui,
+                        "run_dist_min",
+                        &mut page.dist_min,
+                        0.5..=20.0,
+                        0.05,
+                        2,
+                        " km",
+                    );
+                    ui.label("至");
+                    mobile::drag_f32(
+                        ui,
+                        "run_dist_max",
+                        &mut page.dist_max,
+                        0.5..=20.0,
+                        0.05,
+                        2,
+                        " km",
+                    );
                 });
-            }
-            let mut draw_pace_inputs = |ui: &mut egui::Ui| {
-                mobile::drag_f32(
-                    ui,
-                    "run_pace_min",
-                    &mut page.pace_min,
-                    180.0..=520.0,
-                    5.0,
-                    0,
-                    "",
-                );
-                ui.label("至");
-                mobile::drag_f32(
-                    ui,
-                    "run_pace_max",
-                    &mut page.pace_max,
-                    180.0..=520.0,
-                    5.0,
-                    0,
-                    "",
-                );
-            };
-            if compact {
-                ui.label("配速范围（秒/km）：");
-                ui.horizontal(draw_pace_inputs);
-            } else {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("配速范围（秒/km）：");
-                    draw_pace_inputs(ui);
-                });
-            }
-            mobile::row(ui, |ui| {
-                ui.label("手动海拔（米/区间）：");
-                mobile::text_edit(
-                    ui,
-                    "run_manual_altitude",
-                    &mut page.manual_altitude,
-                    crate::platform::InputKind::Text,
-                    120.0,
-                );
-                ui.label("留空自动；可填 17.2 或 11.6-22.8");
-            });
-            mobile::row(ui, |ui| {
-                ui.label("开始时间：");
-                ui.radio_value(&mut page.start_mode, 0, "随机时刻");
-                ui.radio_value(&mut page.start_mode, 1, "指定时刻");
-                ui.label("日期：");
-                egui::ComboBox::from_id_salt("run_days_ago")
-                    .width(96.0)
-                    .selected_text(days_ago_label(page.days_ago))
-                    .show_ui(ui, |ui| {
-                        for d in 0..=3 {
-                            ui.selectable_value(&mut page.days_ago, d, days_ago_label(d));
-                        }
-                    });
-                if page.start_mode == 0 {
-                    ui.label(format!("（{RAND_HOUR_LO}:00-{RAND_HOUR_HI}:00 内随机）"));
-                } else {
-                    ui.label("时刻：");
-                    mobile::drag_i64(ui, "run_hour", &mut page.hour, 0..=23, 1.0, "", " 点");
-                    ui.label(":");
-                    mobile::drag_i64(ui, "run_minute", &mut page.minute, 0..=59, 1.0, "", "");
-                }
-            });
-            if page.start_mode == 1 && page.days_ago == 0 {
-                // 今天 + 指定时刻：提示是否落在未来
-                let now = Local::now();
-                let spec = Local
-                    .with_ymd_and_hms(
-                        now.year(),
-                        now.month(),
-                        now.day(),
-                        page.hour as u32,
-                        page.minute as u32,
+                    mobile::drag_f32(
+                        ui,
+                        "run_pace_min",
+                        &mut page.pace_min,
+                        180.0..=520.0,
+                        5.0,
                         0,
-                    )
-                    .single();
-                if let Some(t) = spec {
-                    if t.timestamp_millis() > crate::crypto::envelope::now_ms() {
-                        ui.colored_label(
-                            theme::warn(),
-                            "指定时刻在今天且尚未到达，将按当前时间提交",
+                        "",
+                    );
+                    ui.label("至");
+                    mobile::drag_f32(
+                        ui,
+                        "run_pace_max",
+                        &mut page.pace_max,
+                        180.0..=520.0,
+                        5.0,
+                        0,
+                        "",
+                    );
+                });
+                mobile::row(ui, |ui| {
+                    ui.label("手动海拔（米/区间）：");
+                    mobile::text_edit(
+                        ui,
+                        "run_manual_altitude",
+                        &mut page.manual_altitude,
+                        crate::platform::InputKind::Text,
+                        120.0,
+                    );
+                    ui.label("留空自动；可填 17.2 或 11.6-22.8");
+                });
+            });
+
+            components::card_titled(ui, "开始时间", |ui| {
+                mobile::row(ui, |ui| {
+                    ui.label("开始时间：");
+                    ui.radio_value(&mut page.start_mode, 0, "随机时刻");
+                    ui.radio_value(&mut page.start_mode, 1, "指定时刻");
+                    ui.label("日期：");
+                    egui::ComboBox::from_id_salt("run_days_ago")
+                        .width(96.0)
+                        .selected_text(days_ago_label(page.days_ago))
+                        .show_ui(ui, |ui| {
+                            for d in 0..=3 {
+                                ui.selectable_value(&mut page.days_ago, d, days_ago_label(d));
+                            }
+                        });
+                    if page.start_mode == 0 {
+                        ui.label(format!("（{RAND_HOUR_LO}:00-{RAND_HOUR_HI}:00 内随机）"));
+                    } else {
+                        ui.label("时刻：");
+                        mobile::drag_i64(ui, "run_hour", &mut page.hour, 0..=23, 1.0, "", " 点");
+                        ui.label(":");
+                        mobile::drag_i64(
+                            ui,
+                            "run_minute",
+                            &mut page.minute,
+                            0..=59,
+                            1.0,
+                            "",
+                            "",
                         );
                     }
+                });
+                if page.start_mode == 1 && page.days_ago == 0 {
+                    // 今天 + 指定时刻：提示是否落在未来
+                    let now = Local::now();
+                    let spec = Local
+                        .with_ymd_and_hms(
+                            now.year(),
+                            now.month(),
+                            now.day(),
+                            page.hour as u32,
+                            page.minute as u32,
+                            0,
+                        )
+                        .single();
+                    if let Some(t) = spec {
+                        if t.timestamp_millis() > crate::crypto::envelope::now_ms() {
+                            ui.colored_label(
+                                theme::warn(),
+                                "指定时刻在今天且尚未到达，将按当前时间提交",
+                            );
+                        }
+                    }
                 }
-            }
-            mobile::row(ui, |ui| {
-                ui.label("人脸校验标记：");
-                ui.checkbox(&mut page.face_check, "faceCheck=1");
+                mobile::row(ui, |ui| {
+                    ui.label("人脸校验标记：");
+                    ui.checkbox(&mut page.face_check, "faceCheck=1");
+                });
             });
-            ui.horizontal(|ui| {
-                ui.label("路线算法：");
-                ui.selectable_value(&mut page.route_mode, RouteMode::Legacy, "经典打卡点环");
-                ui.selectable_value(&mut page.route_mode, RouteMode::Road, "真实道路路由");
-                if page.route_mode == RouteMode::Road && self.network.is_none() {
-                    ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
-                }
+
+            components::card_titled(ui, "路线与标记", |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("路线算法：");
+                    ui.selectable_value(&mut page.route_mode, RouteMode::Legacy, "经典打卡点环");
+                    ui.selectable_value(&mut page.route_mode, RouteMode::Road, "真实道路路由");
+                    if page.route_mode == RouteMode::Road && need_osm {
+                        ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
+                    }
+                });
             });
         }
 
@@ -406,7 +407,6 @@ impl App {
             self.refresh_points();
         }
 
-        ui.add_space(8.0);
         let fmt_pace = |s: f32| format!("{}:{:02}", (s / 60.0) as i64, (s as i64) % 60);
         let fmt_dur = |s: i64| {
             if s >= 3600 {
@@ -418,46 +418,54 @@ impl App {
         // 参数变更时补方案；显示本次提交的确定方案
         self.run_page.ensure_plan();
         self.draw_run_warnings(ui);
-        let plan_label = match &self.run_page.plan {
+        let (dist_text, dur_text, pace_text, start_text) = match &self.run_page.plan {
             Some(p) => {
                 let start = chrono::Local
                     .timestamp_millis_opt(p.start_ms)
                     .single()
                     .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_default();
-                let (dist, pace, dur) = (p.dist, p.pace, p.dur);
-                format!(
-                    "本次方案：距离 {dist:.2} km · 配速 {}/km · 用时 {} · 开始 {start}",
-                    fmt_pace(pace),
-                    fmt_dur(dur)
+                (
+                    format!("{:.2} km", p.dist),
+                    fmt_dur(p.dur),
+                    format!("{}/km", fmt_pace(p.pace)),
+                    start,
                 )
             }
-            None => String::new(),
+            None => (String::new(), String::new(), String::new(), String::new()),
         };
-        mobile::row(ui, |ui| {
-            ui.colored_label(theme::plain(), plan_label);
-            if ui.small_button("换一版").clicked() {
-                self.run_page.regen_plan();
-            }
+        components::card_titled(ui, "本次方案", |ui| {
+            components::stat_row(
+                ui,
+                &[
+                    (dist_text.as_str(), "距离"),
+                    (dur_text.as_str(), "预估用时"),
+                    (pace_text.as_str(), "配速"),
+                ],
+            );
+            ui.add_space(theme::space::SM);
+            mobile::row(ui, |ui| {
+                ui.label(format!("开始 {start_text}"));
+                if ui.small_button("换一版").clicked() {
+                    self.run_page.regen_plan();
+                }
+            });
         });
 
         self.draw_run_map(ui);
 
-        ui.add_space(8.0);
         let enabled = !self.run_busy && self.session.is_some();
         let btn = if self.run_busy {
             theme::primary_btn("提交中…")
         } else {
             theme::primary_btn("开始跑步")
         };
-        mobile::row(ui, |ui| {
-            if ui.add_enabled(enabled, btn).clicked() {
-                self.start_run();
-            }
-            if self.session.is_none() {
-                ui.label("（请先登录）");
-            }
-        });
+        if components::wide(ui, enabled, btn, theme::ACTION_H).clicked() {
+            self.start_run();
+        }
+        if self.session.is_none() {
+            ui.label("（请先登录）");
+        }
     }
 
     /// 开始时间相关的提示。须在 `ensure_plan()` 之后调用，才对得上本次提交时刻。

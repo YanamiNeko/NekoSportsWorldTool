@@ -2,7 +2,7 @@
 //! 数据来源：登录 profile / HomePageInfo / getPersonalSemesterInfo(runMode) /
 //! recordssummary / personalSemesterCompleted(最近 rrid)。
 
-use super::{mobile, theme, App};
+use super::{components, mobile, theme, App};
 use eframe::egui;
 use egui::RichText;
 use chrono::TimeZone;
@@ -29,55 +29,65 @@ impl App {
         });
         ui.separator();
 
-        let Some(info) = &self.user_page.info else {
-            ui.add_space(12.0);
-            ui.label("未拉取，点击「刷新」");
-            return;
-        };
-
+        // 手机宽：工具页（设备信息 / 运行日志 / 路网 / 关于）下沉到本页的「更多设置」，
+        // 与底部 5 项导航配合；未登录时也要可达，所以不放在 profile 数据之后提前返回。
+        let compact = mobile::compact_ui(ui);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                section(ui, "个人信息", |ui| {
-                    let rows = profile_rows(&info.profile);
-                    if rows.is_empty() {
-                        ui.label("本次登录未返回 profile，重新登录后可见");
-                    } else {
-                        grid(ui, "profile_grid", &rows);
+                match self.user_page.info.as_ref() {
+                    Some(info) => {
+                        section(ui, "个人信息", |ui| {
+                            let rows = profile_rows(&info.profile);
+                            if rows.is_empty() {
+                                ui.label("本次登录未返回 profile，重新登录后可见");
+                            } else {
+                                grid(ui, "profile_grid", &rows);
+                            }
+                        });
+
+                        section(ui, "学期", |ui| {
+                            grid(ui, "sem_grid", &localized(&info.personal_semester));
+                        });
+
+                        section(ui, "完成状态", |ui| {
+                            if info.completed.is_null() {
+                                ui.label("（暂无有效记录）");
+                            } else {
+                                grid(ui, "done_grid", &localized(&info.completed));
+                            }
+                        });
+
+                        section(ui, "主页统计", |ui| {
+                            if info.home_page.is_null() {
+                                ui.label("（HomePageInfo 不可用）");
+                            } else {
+                                grid(ui, "home_grid", &localized(&info.home_page));
+                            }
+                        });
+
+                        section(ui, "学期汇总", |ui| {
+                            grid(ui, "sum_grid", &localized(&info.summary));
+                        });
                     }
-                });
-
-                section(ui, "学期", |ui| {
-                    grid(ui, "sem_grid", &localized(&info.personal_semester));
-                });
-
-                section(ui, "完成状态", |ui| {
-                    if info.completed.is_null() {
-                        ui.label("（暂无有效记录）");
-                    } else {
-                        grid(ui, "done_grid", &localized(&info.completed));
+                    None => {
+                        ui.add_space(12.0);
+                        ui.label("未拉取，点击「刷新」");
                     }
-                });
+                }
 
-                section(ui, "主页统计", |ui| {
-                    if info.home_page.is_null() {
-                        ui.label("（HomePageInfo 不可用）");
-                    } else {
-                        grid(ui, "home_grid", &localized(&info.home_page));
-                    }
-                });
-
-                section(ui, "学期汇总", |ui| {
-                    grid(ui, "sum_grid", &localized(&info.summary));
-                });
+                if compact {
+                    ui.add_space(theme::space::MD);
+                    section(ui, "更多设置", |ui| {
+                        mobile::tool_entries(ui, &mut self.tab);
+                    });
+                }
             });
     }
 }
 
 fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    egui::CollapsingHeader::new(RichText::new(title).strong().color(theme::text()))
-        .default_open(true)
-        .show(ui, add);
+    components::card_titled(ui, title, add);
 }
 
 fn grid(ui: &mut egui::Ui, id: &str, rows: &[(String, String)]) {

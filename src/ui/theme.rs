@@ -158,12 +158,31 @@ pub fn danger_btn(text: &str) -> egui::Button<'static> {
 }
 
 /// 卡片柔和投影（供组件库 card_frame 使用）。
+///
+/// 对齐设计稿 `--sh-1: 0 1px 3px rgba(22,31,29,.06)`，也就是 DESIGN.md §1.5
+/// 的 elevation-1：offset(0,1) / blur 3 / alpha .06。早期实现用
+/// offset(0,2) blur 10，卡片比设计稿更飘更灰。
+///
+/// Android 按 DESIGN.md §1.5 降级为「无阴影 + 描边」，只靠边框区分层级，
+/// 因为移动端渲染开销更敏感。
 pub fn card_shadow() -> egui::Shadow {
-    egui::Shadow {
-        offset: egui::vec2(0.0, 2.0),
-        blur: 10.0,
-        spread: 0.0,
-        color: Color32::from_black_alpha(22),
+    #[cfg(target_os = "android")]
+    {
+        egui::Shadow {
+            offset: egui::vec2(0.0, 0.0),
+            blur: 0.0,
+            spread: 0.0,
+            color: Color32::TRANSPARENT,
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        egui::Shadow {
+            offset: egui::vec2(0.0, 1.0),
+            blur: 3.0,
+            spread: 0.0,
+            color: Color32::from_black_alpha(15), // ≈ rgba(22,31,29,.06)
+        }
     }
 }
 
@@ -226,12 +245,19 @@ pub fn apply(ctx: &egui::Context) {
     }
 
     // 字号阶梯：标题 / 正文 / 按钮 / 说明 / 等宽，让页面有主次。
+    // Android 整体 +1（DESIGN.md §1.2）：手机阅读距离更近，且 egui 在
+    // Android 上换算 pixels_per_point 后小字号偏细。
+    #[cfg(target_os = "android")]
+    const SIZE_BUMP: f32 = 1.0;
+    #[cfg(not(target_os = "android"))]
+    const SIZE_BUMP: f32 = 0.0;
+
     for (key, size) in [
-        (TextStyle::Heading, FONT_TITLE),
-        (TextStyle::Body, FONT_BODY),
-        (TextStyle::Button, FONT_BODY),
-        (TextStyle::Small, FONT_SMALL),
-        (TextStyle::Monospace, FONT_MONO),
+        (TextStyle::Heading, FONT_TITLE + SIZE_BUMP),
+        (TextStyle::Body, FONT_BODY + SIZE_BUMP),
+        (TextStyle::Button, FONT_BODY + SIZE_BUMP),
+        (TextStyle::Small, FONT_SMALL + SIZE_BUMP),
+        (TextStyle::Monospace, FONT_MONO + SIZE_BUMP),
     ] {
         let family = if key == TextStyle::Monospace {
             FontFamily::Monospace

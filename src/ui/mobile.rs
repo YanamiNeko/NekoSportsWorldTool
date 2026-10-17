@@ -93,12 +93,14 @@ fn parse_f64_in_range(input: &str, range: RangeInclusive<f64>) -> Result<f64, St
     }
 }
 
-/// 页面定义：索引 / 完整标签 / 手机底部导航短标签 / 分组 / 是否手机底部导航直连。
+/// 页面定义：索引 / 完整标签 / 手机底部导航短标签 / 图标 / 分组 / 是否手机底部导航直连。
 pub struct PageDef {
     pub index: usize,
     pub label: &'static str,
-    /// 手机底部导航用的短标签（宽度有限，保证 6 个入口单行不换行）。
+    /// 手机底部导航用的短标签（宽度有限，保证 5 个入口单行不换行）。
     pub short: &'static str,
+    /// 导航图标（设计稿：底部导航为「图标 + 文字」竖排）。
+    pub icon: &'static str,
     pub group: &'static str,
     pub mobile_root: bool,
 }
@@ -108,6 +110,7 @@ pub const PAGES: [PageDef; 9] = [
         index: 0,
         label: "跑步",
         short: "跑步",
+        icon: "🏃",
         group: "运动",
         mobile_root: true,
     },
@@ -115,6 +118,7 @@ pub const PAGES: [PageDef; 9] = [
         index: 1,
         label: "AI 运动",
         short: "AI 运动",
+        icon: "🤖",
         group: "运动",
         mobile_root: true,
     },
@@ -122,6 +126,7 @@ pub const PAGES: [PageDef; 9] = [
         index: 2,
         label: "运动记录",
         short: "记录",
+        icon: "📋",
         group: "数据",
         mobile_root: true,
     },
@@ -129,6 +134,7 @@ pub const PAGES: [PageDef; 9] = [
         index: 3,
         label: "数据",
         short: "数据",
+        icon: "📊",
         group: "数据",
         mobile_root: true,
     },
@@ -136,6 +142,7 @@ pub const PAGES: [PageDef; 9] = [
         index: 4,
         label: "我的",
         short: "我的",
+        icon: "👤",
         group: "我的",
         mobile_root: true,
     },
@@ -143,6 +150,7 @@ pub const PAGES: [PageDef; 9] = [
         index: 5,
         label: "设备信息",
         short: "设备",
+        icon: "📱",
         group: "工具",
         mobile_root: false,
     },
@@ -150,6 +158,7 @@ pub const PAGES: [PageDef; 9] = [
         index: 6,
         label: "运行日志",
         short: "日志",
+        icon: "🧾",
         group: "工具",
         mobile_root: false,
     },
@@ -157,6 +166,7 @@ pub const PAGES: [PageDef; 9] = [
         index: 7,
         label: "路网",
         short: "路网",
+        icon: "🗺",
         group: "工具",
         mobile_root: false,
     },
@@ -164,6 +174,7 @@ pub const PAGES: [PageDef; 9] = [
         index: 8,
         label: "关于与更新",
         short: "关于",
+        icon: "ℹ",
         group: "工具",
         mobile_root: false,
     },
@@ -185,41 +196,85 @@ fn nav_item(
     on: bool,
     size: egui::Vec2,
 ) -> egui::Response {
-    let text = if on {
-        egui::RichText::new(label)
-            .color(theme::ACCENT_700)
-            .strong()
-    } else {
-        egui::RichText::new(label).color(theme::TEXT_DIM)
-    };
-    ui.add_sized(
-        size,
-        egui::Button::new(text)
-            .fill(if on {
-                theme::ACCENT_50
-            } else {
-                egui::Color32::TRANSPARENT
-            })
-            .stroke(egui::Stroke::NONE),
-    )
+    let fg = if on { theme::ACCENT_700 } else { theme::TEXT_DIM };
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let painter = ui.painter();
+    if on {
+        painter.rect_filled(rect, egui::Rounding::same(theme::radius::MD), theme::ACCENT_50);
+        // 设计稿 .navi.on::before：贴左缘的 3px 竖条。
+        let bar = egui::Rect::from_min_size(
+            egui::pos2(rect.left(), rect.top() + 7.0),
+            egui::vec2(3.0, (rect.height() - 14.0).max(6.0)),
+        );
+        painter.rect_filled(bar, egui::Rounding::same(2.0), theme::ACCENT_500);
+    }
+    let font = egui::FontId::proportional(theme::FONT_BODY);
+    painter.text(
+        egui::pos2(rect.left() + theme::space::MD, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font,
+        fg,
+    );
+    response
 }
 
-/// 底部导航单元：格子窄，用略小的字号保证 5 项标签单行不换行。
-fn nav_tab(ui: &mut egui::Ui, label: &str, on: bool, size: egui::Vec2) -> egui::Response {
-    let text = egui::RichText::new(label)
-        .size(theme::FONT_SMALL)
-        .color(if on { theme::ACCENT_700 } else { theme::TEXT_DIM });
-    let text = if on { text.strong() } else { text };
-    ui.add_sized(
-        size,
-        egui::Button::new(text)
-            .fill(if on {
-                theme::ACCENT_50
-            } else {
-                egui::Color32::TRANSPARENT
-            })
-            .stroke(egui::Stroke::NONE),
-    )
+/// 底部导航单元：图标 + 文字竖排，选中项顶部有指示条。
+///
+/// 对应设计稿 preview.html 的 `.p-nav .it`：
+///   - `.it .ic` 是图标（display:block，字号略大、下方留 3px）；
+///   - `.it.on::before` 是选中项顶部 2.5px 的强调条。
+fn nav_tab(ui: &mut egui::Ui, page: &PageDef, on: bool, size: egui::Vec2) -> egui::Response {
+    let fg = if on { theme::ACCENT_700 } else { theme::TEXT_DIM };
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+
+    let painter = ui.painter();
+    let bg = if on {
+        theme::ACCENT_50
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    painter.rect_filled(rect, egui::Rounding::same(theme::radius::MD), bg);
+
+    // 选中指示条：设计稿里贴在该单元的顶部。
+    if on {
+        let bar = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 14.0, rect.top()),
+            egui::vec2((rect.width() - 28.0).max(8.0), 2.5),
+        );
+        painter.rect_filled(bar, egui::Rounding::same(2.0), theme::ACCENT_500);
+    }
+
+    // 图标在上、标签在下，整块垂直居中。
+    let icon_font = egui::FontId::proportional(theme::FONT_BODY + 1.0);
+    let label_font = egui::FontId::proportional(theme::FONT_SMALL - 0.5);
+    let icon_h = ui.fonts(|f| f.row_height(&icon_font));
+    let label_h = ui.fonts(|f| f.row_height(&label_font));
+    let gap = 3.0; // 设计稿 .ic 的 margin-bottom
+    let top = rect.center().y - (icon_h + gap + label_h) / 2.0;
+
+    painter.text(
+        egui::pos2(rect.center().x, top),
+        egui::Align2::CENTER_TOP,
+        page.icon,
+        icon_font,
+        fg,
+    );
+    painter.text(
+        egui::pos2(rect.center().x, top + icon_h + gap),
+        egui::Align2::CENTER_TOP,
+        page.short,
+        label_font,
+        fg,
+    );
+
+    response
 }
 
 /// 桌面分组侧栏：按「运动 / 数据 / 我的 / 工具」列出全部 9 页。
@@ -257,9 +312,9 @@ pub fn bottom_nav(ui: &mut egui::Ui, selected: &mut usize) -> Vec<egui::Response
         for page in roots {
             let response = nav_tab(
                 ui,
-                page.short,
+                page,
                 *selected == page.index,
-                egui::vec2(width, theme::TOUCH_H),
+                egui::vec2(width, theme::TOUCH_H + 8.0),
             );
             if response.clicked() {
                 *selected = page.index;

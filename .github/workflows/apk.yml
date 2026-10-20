@@ -1,12 +1,11 @@
 # NekoSportsWorldTool Android APK 自动构建
 #
 # 触发方式：
-#   ① 推送 tag：git tag v0.2.6 && git push origin v0.2.6
+#   ① 上游仓库推送 tag：git tag v0.2.6 && git push origin v0.2.6
 #      —— APK 以固定资产名 NekoSportsWorldTool-android-arm64.apk 挂到该 tag 的
 #        Release（与 release.yml 写同一个 Release，桌面端产物由那边附加），
 #        Android 端「关于页」自更新按此资产名精确匹配（src/update.rs asset_name）。
-#   ② 推送 main：仅出 Actions 构建产物（不发布），用于验证 Android 链路可编译。
-#   ③ 手动：Actions 页面 Run workflow。
+#   ② fork、手动构建和非 tag 构建只上传 Actions artifact，不创建 Release。
 #
 # 版本盖章（与 android/release.ps1 同一套编码）：
 #   versionName = <version>-android.<rev>
@@ -18,12 +17,12 @@
 #   非 tag 构建读 Cargo.toml。
 #
 # 签名（关键！Android 覆盖安装要求签名一致）：
-#   - tag 构建必须配置仓库 Secret ANDROID_KEYSTORE_BASE64（keystore 文件的
+#   - 上游 tag 发布必须配置仓库 Secret ANDROID_KEYSTORE_BASE64（keystore 文件的
 #     base64），缺失时直接失败——绝不能换密钥静默发布，否则所有已装用户
 #     无法覆盖安装，卸载重装还会丢 identity/session。
 #   - 可选 Secret：ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS /
 #     ANDROID_KEY_PASSWORD（默认 android / androiddebugkey / android）。
-#   - 非 tag 构建无 Secret 时生成一次性调试密钥，产物仅供冒烟安装。
+#   - fork 和非发布构建无 Secret 时生成一次性调试密钥，产物仅供测试安装。
 #   注意：本地脚本默认用 android/.signing/local-test.keystore（不入库）。
 #     若历史 APK 均由该密钥签名，请把它 base64 后配成上述 Secret，保持连续。
 #
@@ -178,8 +177,8 @@ jobs:
             echo "KS_ALIAS=${KS_ALIAS_SECR:-androiddebugkey}" >> "$GITHUB_ENV"
             echo "KEY_PASS=${KEY_PASS_SECR:-android}" >> "$GITHUB_ENV"
             echo "使用仓库 Secret 签名密钥"
-          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            echo "::error::tag 构建必须配置 Secret ANDROID_KEYSTORE_BASE64（keystore 的 base64）。签名不一致会导致所有已装用户无法覆盖安装；本地历史密钥为 android/.signing/local-test.keystore，请将其 base64 后配置。"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/tags/* && "$GITHUB_REPOSITORY" == "YanamiNeko/NekoSportsWorldTool" ]]; then
+            echo "::error::上游 tag 发布必须配置 Secret ANDROID_KEYSTORE_BASE64（keystore 的 base64）。签名不一致会导致所有已装用户无法覆盖安装；本地历史密钥为 android/.signing/local-test.keystore，请将其 base64 后配置。"
             exit 1
           else
             keytool -genkeypair -keystore "$ks" -storepass android -keypass android \
@@ -206,13 +205,13 @@ jobs:
           sha256sum "$apk"
 
       - uses: actions/upload-artifact@v4
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: ${{ github.repository != 'YanamiNeko/NekoSportsWorldTool' || github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
         with:
           name: NekoSportsWorldTool-android-arm64
           path: dist/*
 
-      - name: 发布到 Release（tag 触发）
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: 发布到 Release（仅上游 tag push）
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.repository == 'YanamiNeko/NekoSportsWorldTool' }}
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*

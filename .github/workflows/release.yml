@@ -96,13 +96,13 @@ jobs:
           fi
 
       - uses: actions/upload-artifact@v4
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: ${{ github.repository != 'YanamiNeko/NekoSportsWorldTool' || github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
         with:
           name: ${{ matrix.artifact }}
           path: dist/*
 
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Release (upstream tag push only)
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.repository == 'YanamiNeko/NekoSportsWorldTool' }}
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*

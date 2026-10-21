@@ -19,7 +19,7 @@ winit = { path = "vendor/winit-0.30.13" }
 
 [features]
 default = ["gui"]
-gui = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:rfd"]
+gui = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:rfd", "dep:zbus", "dep:objc2", "dep:objc2-foundation", "dep:objc2-core-location"]
 android = ["gui", "eframe/android-native-activity", "dep:android-activity", "dep:android_logger", "dep:jni", "dep:log", "dep:winit"]
 
 [dependencies]
@@ -39,7 +39,8 @@ base64 = "0.22"
 rand = "0.8"
 rand_distr = "0.4"
 flate2 = "1"
-image = { version = "0.25", default-features = false, features = ["png"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 
@@ -47,7 +48,6 @@ uuid = { version = "1", features = ["v4"] }
 # rfd 无 Android 后端，仅在桌面目标编译（调用点 osm.rs 已按 cfg 门控）
 rfd = { version = "0.15", optional = true }
 ureq = { version = "2", default-features = false, features = ["native-certs"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = "0.4"
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -56,6 +56,17 @@ android_logger = { version = "0.14", optional = true }
 jni = { version = "0.21", optional = true }
 log = { version = "0.4", optional = true }
 winit = { version = "0.30", default-features = false, features = ["android-native-activity"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = ["Devices_Geolocation", "Foundation", "Win32_System_WinRT"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true }
+objc2-core-location = { version = "0.3", optional = true }
 
 [profile.release]
 opt-level = 3

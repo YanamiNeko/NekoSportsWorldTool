@@ -199,6 +199,19 @@ pub fn wgs84_to_bd09(lat: f64, lng: f64) -> (f64, f64) {
     gcj02_to_bd09(g_lat, g_lng)
 }
 
+/// BD-09 → WGS84, numerically inverting the same forward transform used by roads.
+pub fn bd09_to_wgs84(lat: f64, lng: f64) -> (f64, f64) {
+    let (mut wlat, mut wlng) = super::wire::bd09_to_gcj02(lat, lng);
+    for _ in 0..12 {
+        let (blat, blng) = wgs84_to_bd09(wlat, wlng);
+        let (dlat, dlng) = (blat - lat, blng - lng);
+        wlat -= dlat;
+        wlng -= dlng;
+        if dlat.abs().max(dlng.abs()) < 1e-10 { break; }
+    }
+    (wlat, wlng)
+}
+
 pub fn fmt_cst(ms: i64, format: &str) -> String {
     FixedOffset::east_opt(8 * 3600)
         .unwrap()

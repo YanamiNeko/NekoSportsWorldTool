@@ -189,7 +189,7 @@ pub fn run_full_flow_cancellable(
             }
             let config = super::model::load_config();
             let mut net = super::school_roads::load_for_route_cancellable(
-                &config.osm_path,
+                config.manual_road_path(),
                 &sess.unid,
                 &fences.polygons,
                 &route_pts,

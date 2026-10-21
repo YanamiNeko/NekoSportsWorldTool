@@ -15,9 +15,41 @@ const ANDROID_OS_POOL: [&str; 4] = ["12", "13", "14", "15"];
 #[derive(Default)]
 pub struct DevicePage {
     saved_flash: f32,
+    picker: Option<super::location_picker::LocationPicker>,
+    pub(super) city_lookup: super::city_lookup::CityLookup,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    desktop_location: Option<crate::desktop_location::Request>,
 }
 
 impl App {
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    pub(super) fn poll_system_location(&mut self) {
+        let Some(request) = self.device_page.desktop_location.as_mut() else { return };
+        let Some(result) = request.poll() else { return };
+        self.device_page.desktop_location = None;
+        self.apply_system_location(result);
+    }
+
+    #[cfg(target_os = "android")]
+    pub(super) fn poll_system_location(&mut self) {
+        let Some(result) = crate::android::take_location() else { return };
+        self.apply_system_location(result);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "android", target_os = "linux", target_os = "macos"))]
+    fn apply_system_location(&mut self, result: Result<crate::location::Coordinate, String>) {
+        match result {
+            Ok(coordinate) => {
+                super::coordinates::set_anchor_wgs84(&mut self.device_buf, (coordinate.latitude, coordinate.longitude));
+                if self.device_page.picker.is_some() {
+                    self.device_page.picker = Some(super::location_picker::LocationPicker::new((coordinate.latitude, coordinate.longitude)));
+                }
+                self.status = format!("已读取本机定位，精度约 {:.1} 米；请核对城市和坐标，点击保存后生效", coordinate.accuracy);
+            }
+            Err(error) => self.status = format!("定位未填写：{error}"),
+        }
+    }
+
     #[cfg(target_os = "android")]
     pub(super) fn poll_device_info(&mut self) {
         let Some(reply) = crate::android::take_device_info() else { return };
@@ -77,8 +109,32 @@ impl App {
         });
 
         #[cfg(target_os = "android")]
-        if ui.button("读取本机信息").clicked() {
-            crate::android::request_device_info(false);
+        {
+            let locating = crate::android::location_pending();
+            if ui.add_enabled(!locating, egui::Button::new("读取本机信息和定位")).clicked() {
+                crate::android::request_device_info(false);
+            }
+            if locating { ui.label("正在获取系统定位（最多 60 秒）；城市需手动核对。"); }
+        }
+
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        {
+            if ui.add_enabled(page.desktop_location.is_none(), egui::Button::new("获取本机系统定位")).clicked() {
+                match crate::desktop_location::Request::start() {
+                    Ok(request) => {
+                        page.desktop_location = Some(request);
+                        self.status = "正在获取本机系统定位，请按系统提示授权…".into();
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
+            if page.desktop_location.is_some() {
+                ui.label("正在定位（最多 60 秒）；电脑定位精度可能较低，请用卫星图核对操场。");
+                if ui.button("取消定位").clicked() {
+                    page.desktop_location = None;
+                    self.status = "已取消定位，原坐标保留".into();
+                }
+            }
         }
 
         ui.add_space(6.0);
@@ -142,9 +198,58 @@ impl App {
         }
 
         ui.add_space(4.0);
+        let valid_anchor = self.device_buf.anchor_coordinate().is_ok();
+        if ui.add_enabled(valid_anchor, egui::Button::new("自动识别城市")).clicked() {
+            self.device_buf.city.clear();
+            page.city_lookup.request(super::coordinates::anchor_wgs84(&self.device_buf));
+        }
+        if !page.city_lookup.status.is_empty() { ui.label(&page.city_lookup.status); }
+        let toggle = if page.picker.is_some() {
+            "关闭地图选点"
+        } else {
+            "在线地图选点"
+        };
+        if ui
+            .add_enabled(valid_anchor, egui::Button::new(toggle))
+            .clicked()
+        {
+            page.picker = if page.picker.is_some() {
+                None
+            } else {
+                Some(super::location_picker::LocationPicker::new(super::coordinates::anchor_wgs84(&self.device_buf)))
+            };
+        }
+        if let Some(picker) = page.picker.as_mut() {
+            if let Some((lat, lon)) =
+                picker.draw(ui, super::coordinates::anchor_wgs84(&self.device_buf))
+            {
+                super::coordinates::set_anchor_wgs84(&mut self.device_buf, (lat, lon));
+                self.status = "已选择地图坐标；请核对城市，点击保存后生效".into();
+            }
+            ui.label(format!(
+                "所选锚点（BD-09）：纬度 {:.7}，经度 {:.7}",
+                self.device_buf.anchor_lat, self.device_buf.anchor_lon
+            ));
+            mobile::row(ui, |ui| {
+                ui.label("微调 0.000001°：");
+                if ui.button("北 ↑").clicked() {
+                    self.device_buf.anchor_lat = (self.device_buf.anchor_lat + 0.000001).min(90.0);
+                }
+                if ui.button("南 ↓").clicked() {
+                    self.device_buf.anchor_lat = (self.device_buf.anchor_lat - 0.000001).max(-90.0);
+                }
+                if ui.button("西 ←").clicked() {
+                    self.device_buf.anchor_lon =
+                        (self.device_buf.anchor_lon - 0.000001).max(-180.0);
+                }
+                if ui.button("东 →").clicked() {
+                    self.device_buf.anchor_lon = (self.device_buf.anchor_lon + 0.000001).min(180.0);
+                }
+            });
+        }
         ui.colored_label(
             theme::text_dim(),
-            "定位锚点填写顺序：先填纬度，再填经度；地图常见的“经度,纬度”格式需要调换后填写。",
+            "手填锚点使用 BD-09：先纬度、后经度。系统定位和地图 WGS84 选点会自动转换。",
         );
         ui.colored_label(
             theme::text_dim(),
@@ -159,7 +264,7 @@ impl App {
 
         ui.add_space(8.0);
         mobile::row(ui, |ui| {
-            if ui.add(theme::primary_btn("保存")).clicked() {
+            if ui.add_enabled(!page.city_lookup.busy() || !self.device_buf.city.trim().is_empty(), theme::primary_btn("保存")).clicked() {
                 match crate::api::model::save_identity(&self.device_buf) {
                     Ok(()) => {
                         self.identity = self.device_buf.clone();

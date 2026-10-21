@@ -34,13 +34,7 @@ pub fn validate_fences(fences: &[Vec<(f64, f64)>]) -> Result<(), String> {
 
 // Invert the same forward transform used to align roads, avoiding mixed coordinate systems.
 pub fn to_wgs(lat: f64, lon: f64) -> (f64, f64) {
-    let (mut y, mut x) = (lat, lon);
-    for _ in 0..16 {
-        let (by, bx) = crate::track::geom::wgs84_to_bd09(y, x);
-        y += lat - by;
-        x += lon - bx;
-    }
-    (y, x)
+    crate::track::geom::bd09_to_wgs84(lat, lon)
 }
 
 fn query(fences: &[Vec<(f64, f64)>]) -> Result<String, String> {

@@ -9,7 +9,14 @@ use super::map::{collect_bounds, MapState};
 use super::{theme, App};
 
 #[derive(Clone)]
+pub enum RoadSource {
+    Local(String),
+    Online(String),
+}
+
+#[derive(Clone)]
 pub struct NetworkLoad {
+    pub source: Option<RoadSource>,
     pub pending: bool,
     pub warning: String,
     pub offline: bool,
@@ -22,6 +29,7 @@ pub struct NetworkLoad {
 }
 
 pub struct OsmPage {
+    pub(super) retry_source: Option<RoadSource>,
     pub campuses: Vec<crate::api::campus::Campus>,
     pub selected_key: String,
     pub offline: bool,
@@ -31,6 +39,9 @@ pub struct OsmPage {
     pub gpx_text: Option<String>,
     pub gpx: Option<crate::track::analysis::Analysis>,
     pub request_id: u64,
+    pub online_center: Option<(f64, f64)>,
+    pub radius: u32,
+    pub picker: Option<super::location_picker::LocationPicker>,
     pub path: String,
     pub busy: bool,
     pub status: String,
@@ -41,6 +52,7 @@ pub struct OsmPage {
 impl Default for OsmPage {
     fn default() -> Self {
         OsmPage {
+            retry_source: None,
             cancel: Arc::new(crate::task_control::Control::default()),
             campuses: Vec::new(),
             selected_key: String::new(),
@@ -50,6 +62,9 @@ impl Default for OsmPage {
             gpx_text: None,
             gpx: None,
             request_id: 0,
+            online_center: None,
+            radius: 1000,
+            picker: None,
             path: String::new(),
             busy: false,
             status: String::new(),
@@ -106,17 +121,17 @@ impl App {
             }
             if ui
                 .add_enabled(
-                    !self.osm_page.busy && self.config.osm_path.is_empty(),
+                    !self.osm_page.busy && self.config.manual_road_path().is_empty(),
                     egui::Button::new("重新下载路网"),
                 )
                 .clicked()
             {
                 self.use_school_roads(true);
             }
-            ui.label(if self.config.osm_path.is_empty() {
+            ui.label(if self.config.manual_road_path().is_empty() {
                 "当前：按学校自动获取"
             } else {
-                "当前：手动文件"
+                "当前：本地文件或选点下载"
             });
         });
         ui.hyperlink_to(
@@ -159,10 +174,17 @@ impl App {
                     "已取消接收结果；已发出的网络请求可能仍会运行到结束或超时".into();
             }
             if !self.osm_page.busy && ui.button("重试获取路网").clicked() {
-                if self.config.osm_path.is_empty() {
-                    self.refresh_school_route(false);
-                } else {
-                    self.load_osm_async(self.osm_page.path.clone());
+                match self.osm_page.retry_source.clone() {
+                    Some(RoadSource::Local(path)) => self.load_osm_async(path),
+                    Some(RoadSource::Online(path)) if !path.is_empty() => {
+                        self.restore_road_cache(path)
+                    }
+                    Some(RoadSource::Online(_)) => self.download_osm_async(
+                        self.osm_page
+                            .online_center
+                            .unwrap_or_else(|| super::coordinates::anchor_wgs84(&self.identity)),
+                    ),
+                    None => self.refresh_school_route(false),
                 }
             }
         });
@@ -182,6 +204,59 @@ impl App {
                 load_now = true;
             }
         }
+
+        ui.separator();
+        let mut center = self
+            .osm_page
+            .online_center
+            .unwrap_or_else(|| super::coordinates::anchor_wgs84(&self.identity));
+        super::mobile::row(ui, |ui| {
+            ui.label("在线路网中心：");
+            if ui.button("使用已保存锚点").clicked() {
+                center = super::coordinates::anchor_wgs84(&self.identity);
+                self.osm_page.picker = None;
+            }
+            if ui
+                .button(if self.osm_page.picker.is_some() {
+                    "关闭选点"
+                } else {
+                    "地图选择范围"
+                })
+                .clicked()
+            {
+                self.osm_page.picker = if self.osm_page.picker.is_some() {
+                    None
+                } else {
+                    Some(super::location_picker::LocationPicker::new(center))
+                };
+            }
+            ui.label("半径（米）：");
+            ui.add(
+                egui::DragValue::new(&mut self.osm_page.radius)
+                    .range(200..=2000)
+                    .speed(100),
+            );
+            if ui
+                .add_enabled(!self.osm_page.busy, theme::primary_btn("在线下载附近路网"))
+                .clicked()
+            {
+                self.download_osm_async(center);
+            }
+        });
+        if let Some(picker) = self.osm_page.picker.as_mut() {
+            if let Some(point) = picker.draw(ui, center) {
+                center = point;
+            }
+        }
+        self.osm_page.online_center = Some(center);
+        ui.label(format!(
+            "中心 WGS84：{:.7}, {:.7}；下载道路与建筑，缓存 7 天。此处选点不修改设备锚点。",
+            center.0, center.1
+        ));
+        ui.hyperlink_to(
+            "© OpenStreetMap contributors · Overpass API",
+            "https://www.openstreetmap.org/copyright",
+        );
 
         // 统计
         if let Some(net) = &self.network {
@@ -323,6 +398,7 @@ impl App {
     }
 
     pub(crate) fn begin_network_load(&mut self) -> u64 {
+        self.osm_page.retry_source = None;
         self.osm_page.cancel.cancel();
         self.osm_page.cancel = Arc::new(crate::task_control::Control::default());
         self.run_page.preview_cancel.cancel();
@@ -345,6 +421,7 @@ impl App {
             return;
         }
         self.config.osm_path.clear();
+        self.config.road_cache_path.clear();
         self.osm_page.path.clear();
         self.config.route_mode = "road".into();
         self.run_page.route_mode = crate::track::generate_road::RouteMode::Road;
@@ -352,34 +429,35 @@ impl App {
         self.refresh_school_route(force);
     }
 
-    /// 后台线程加载 OSM 路网，成功后经 `net_rx` 回传。
-    pub fn load_osm_async(&mut self, path: String) {
-        // Reading a local map must never depend on login, location or school APIs.
+    fn load_manual_roads<F>(&mut self, source: RoadSource, load: F)
+    where
+        F: FnOnce() -> Result<(Arc<RoadGraph>, RoadSource), String> + Send + 'static,
+    {
+        let network = self.network.clone();
         let inputs = self.run_page.preview_inputs.clone();
         let campuses = self.osm_page.campuses.clone();
         let selected_key = self.osm_page.selected_key.clone();
         let request_id = self.begin_network_load();
-        self.osm_page.path = path.clone();
-        self.osm_page.status = format!("加载中：{path} …");
-        self.config.osm_path = path.clone();
-        let _ = crate::api::model::save_config(&self.config);
+        self.osm_page.retry_source = Some(source.clone());
+        self.network = network;
+        self.run_page.preview_inputs = inputs.clone();
+        self.osm_page.campuses = campuses.clone();
+        self.osm_page.selected_key = selected_key.clone();
         let tx = self.net_tx.clone();
         let control = self.osm_page.cancel.clone();
         std::thread::spawn(move || {
             let result = control
                 .check()
-                .and_then(|_| crate::track::generate_road::load_network_path(&path).map(Arc::new))
-                .and_then(|net| {
-                    control.check()?;
-                    Ok(net)
-                });
+                .and_then(|_| load())
+                .and_then(|value| control.check().map(|_| value));
+            let (result, source) = match result {
+                Ok((network, source)) => (Ok(network), source),
+                Err(error) => (Err(error), source),
+            };
             let _ = tx.send(NetworkLoad {
+                source: Some(source),
                 pending: false,
-                warning: if inputs.is_none() {
-                    "本地路网已读取；路线预览需登录后刷新策略与点位".into()
-                } else {
-                    String::new()
-                },
+                warning: String::new(),
                 offline: false,
                 request_id,
                 scope: None,
@@ -388,6 +466,45 @@ impl App {
                 inputs,
                 result,
             });
+        });
+    }
+
+    pub fn load_osm_async(&mut self, path: String) {
+        self.osm_page.path = path.clone();
+        self.osm_page.status = "加载中：正在导入本地路网…".into();
+        self.load_manual_roads(RoadSource::Local(path.clone()), move || {
+            crate::track::generate_road::load_network_path(&path)
+                .map(|network| (Arc::new(network), RoadSource::Local(path)))
+        });
+    }
+
+    fn download_osm_async(&mut self, center: (f64, f64)) {
+        let coordinate = match crate::location::Coordinate::new(center.0, center.1, 0.0) {
+            Ok(value) => value,
+            Err(error) => {
+                self.osm_page.status = error;
+                return;
+            }
+        };
+        let radius = self.osm_page.radius;
+        self.osm_page.status = format!("正在下载附近 {radius} 米路网…");
+        self.load_manual_roads(RoadSource::Online(String::new()), move || {
+            let download = super::online_osm::download(coordinate, radius)?;
+            Ok((
+                Arc::new(download.network),
+                RoadSource::Online(download.path.display().to_string()),
+            ))
+        });
+    }
+
+    pub(super) fn restore_road_cache(&mut self, path: String) {
+        self.osm_page.status = "正在读取已下载路网…".into();
+        self.load_manual_roads(RoadSource::Online(path.clone()), move || {
+            let download = super::online_osm::load_cache(path.into())?;
+            Ok((
+                Arc::new(download.network),
+                RoadSource::Online(download.path.display().to_string()),
+            ))
         });
     }
 }

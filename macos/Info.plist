@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>org.nekosportsworld.tool</string>
+    <key>CFBundleName</key><string>NekoSportsWorldTool</string>
+    <key>CFBundleExecutable</key><string>nekosportsworldtool</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.3.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSLocationUsageDescription</key><string>获取一次当前位置以填写定位锚点，并帮助你在地图上找到学校操场。坐标需手动保存。</string>
+    <key>NSLocationWhenInUseUsageDescription</key><string>获取一次当前位置以填写定位锚点，并帮助你在地图上找到学校操场。坐标需手动保存。</string>
+</dict>
+</plist>

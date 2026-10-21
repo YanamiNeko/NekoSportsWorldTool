@@ -1,7 +1,8 @@
 //! OSM `.osm`（XML）解析：节点 / 道路 way / 建筑 way+multipolygon relation。
 //!
 //! 输入为 openstreetmap.org 导出的标准 OSM XML（`<node>`/`<way>`/`<relation>`）。
-//! 只抽取：`highway` 路径（剔除机动车道）、`building` 轮廓。
+//! 只抽取：`highway` 路径（剔除机动车道）、明确标注的跑道线、`building` 轮廓。
+//! 保留 OSM 节点连接关系，不按距离为孤立路网补造连接边。
 
 use std::collections::HashMap;
 
@@ -46,6 +47,17 @@ fn is_motorized(h: &str) -> bool {
             | "construction"
             | "proposed"
     )
+}
+
+fn is_running_track(tags: &[(String, String)]) -> bool {
+    let tagged = |key: &str, value: &str| tags.iter().any(|(k, v)| k == key && v == value);
+    tagged("leisure", "track")
+        && !tagged("area", "yes")
+        && tags.iter().any(|(k, v)| {
+            k == "sport"
+                && v.split(';')
+                    .any(|sport| matches!(sport.trim(), "running" | "athletics"))
+        })
 }
 
 fn parse_maxspeed(v: &str) -> Option<f64> {
@@ -173,6 +185,9 @@ pub fn parse_osm(bytes: &[u8]) -> Result<ParsedOsm, String> {
                                 .iter()
                                 .find(|(k, _)| k == "highway")
                                 .map(|(_, v)| v.clone())
+                                .or_else(|| {
+                                    is_running_track(&tags).then(|| "footway".to_owned())
+                                })
                             {
                                 if !is_motorized(&h) && refs.len() >= 2 {
                                     let oneway = tags.iter().any(|(k, v)| {
@@ -323,7 +338,7 @@ pub fn build_graph(parsed: &ParsedOsm) -> RoadGraph {
 pub fn load_osm(bytes: &[u8]) -> Result<RoadGraph, String> {
     let parsed = parse_osm(bytes)?;
     if parsed.roads.is_empty() {
-        return Err("OSM 中未找到可用的 highway 道路".into());
+        return Err("OSM 中未找到可用道路或标注的跑道线".into());
     }
     Ok(build_graph(&parsed))
 }
@@ -334,4 +349,55 @@ fn geo_haversine(a: Coord, b: Coord) -> f64 {
     let pa = geo::Point::new(a.lon, a.lat);
     let pb = geo::Point::new(b.lon, b.lat);
     pa.haversine_distance(&pb)
+}
+
+#[cfg(test)]
+mod running_track_tests {
+    use super::*;
+    #[test]
+    fn running_track_lines_connect_but_pitch_and_track_areas_do_not() {
+        let prefix = r#"<osm><node id="1" lat="23.14" lon="113.32"/><node id="2" lat="23.141" lon="113.321"/><way id="10"><nd ref="1"/><nd ref="2"/>"#;
+        for (tags, expected) in [
+            (r#"<tag k="leisure" v="track"/><tag k="sport" v="running"/>"#, true),
+            (r#"<tag k="leisure" v="track"/><tag k="sport" v="athletics"/>"#, true),
+            (r#"<tag k="leisure" v="track"/><tag k="sport" v="cycling; running"/>"#, true),
+            (r#"<tag k="leisure" v="track"/>"#, false),
+            (r#"<tag k="highway" v="motorway"/><tag k="leisure" v="track"/><tag k="sport" v="running"/>"#, false),
+            (r#"<tag k="leisure" v="track"/><tag k="sport" v="cycling"/>"#, false),
+            (r#"<tag k="leisure" v="track"/><tag k="sport" v="running"/><tag k="area" v="yes"/>"#, false),
+            (r#"<tag k="leisure" v="pitch"/><tag k="sport" v="soccer"/>"#, false),
+        ] {
+            let xml = format!("{prefix}{tags}</way></osm>");
+            let result = load_osm(xml.as_bytes());
+            assert_eq!(result.is_ok(), expected, "tags: {tags}");
+            if let Ok(network) = result {
+                assert_eq!(network.graph.edge_count(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn nearby_track_and_road_remain_disconnected_without_shared_osm_nodes() {
+        // About 11 m apart: proximity alone does not prove a traversable connection.
+        let xml = br#"<osm>
+            <node id="1" lat="23.14" lon="113.32"/>
+            <node id="2" lat="23.141" lon="113.32"/>
+            <node id="3" lat="23.14" lon="113.3201"/>
+            <node id="4" lat="23.141" lon="113.3201"/>
+            <way id="10"><nd ref="1"/><nd ref="2"/><tag k="highway" v="footway"/></way>
+            <way id="20"><nd ref="3"/><nd ref="4"/><tag k="leisure" v="track"/><tag k="sport" v="running"/></way>
+        </osm>"#;
+        let network = load_osm(xml).unwrap();
+        assert_eq!(network.graph.node_count(), 4);
+        assert_eq!(network.graph.edge_count(), 4);
+        assert_eq!(petgraph::algo::connected_components(&network.graph), 2);
+
+        let shared = String::from_utf8(xml.to_vec()).unwrap().replace(
+            "<nd ref=\"3\"/><nd ref=\"4\"/>",
+            "<nd ref=\"2\"/><nd ref=\"4\"/>",
+        );
+        let network = load_osm(shared.as_bytes()).unwrap();
+        assert_eq!(petgraph::algo::connected_components(&network.graph), 1);
+        assert_eq!(network.graph.edge_count(), 4);
+    }
 }

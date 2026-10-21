@@ -29,6 +29,7 @@ pub struct HeaderIdentity {
     /// 本地展示的制造商品牌；不改变服务端 deviceName（机型）字段。
     #[serde(default)]
     pub manufacturer: String,
+    /// Persisted BD-09 anchor. WGS84 system/map coordinates must be converted first.
     #[serde(default = "default_anchor_lat")]
     pub anchor_lat: f64,
     #[serde(default = "default_anchor_lon")]
@@ -70,7 +71,6 @@ impl HeaderIdentity {
     /// 旧版本首次启动会写入大连默认值。未明确配置前禁止将它作为异地跑步位置使用。
     pub fn has_unconfigured_default_location(&self) -> bool {
         self.city.trim().is_empty()
-            || self.city.trim() == crate::location::default_city()
             || self.anchor_coordinate().map(|c| c.is_default_dalian()).unwrap_or(true)
     }
 
@@ -343,5 +343,7 @@ mod tests {
             ..Default::default()
         };
         assert!(!configured.has_unconfigured_default_location());
+        let dalian = HeaderIdentity { city: "大连市".into(), anchor_lat: 38.92, anchor_lon: 121.61, ..Default::default() };
+        assert!(!dalian.has_unconfigured_default_location(), "actual configured Dalian locations must remain usable");
     }
 }

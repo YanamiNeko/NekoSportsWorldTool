@@ -210,7 +210,7 @@ impl App {
                 && res.scope.is_none()
                 && res.inputs.is_none()
                 && res.result.is_ok()
-                && !self.config.osm_path.is_empty()
+                && (res.source.is_some() || !self.config.manual_road_path().is_empty())
                 && self
                     .session
                     .as_ref()
@@ -249,6 +249,21 @@ impl App {
             }
             match res.result {
                 Ok(net) => {
+                    if let Some(source) = &res.source {
+                        match source {
+                            super::osm::RoadSource::Local(path) => {
+                                self.config.osm_path = path.clone();
+                                self.config.road_cache_path.clear();
+                            }
+                            super::osm::RoadSource::Online(path) => {
+                                self.config.osm_path.clear();
+                                self.config.road_cache_path = path.clone();
+                            }
+                        }
+                        if let Err(error) = model::save_config(&self.config) {
+                            self.log.push(&format!("路网已加载，但配置保存失败：{error}"));
+                        }
+                    }
                     let nodes = net.graph.node_count();
                     let bld = net.buildings.len();
                     self.osm_page.fitted = false;
@@ -267,7 +282,7 @@ impl App {
                     self.analyze_gpx();
                 }
                 Err(e) => {
-                    self.network = None;
+                    if res.source.is_none() { self.network = None; }
                     self.run_page.preview = None;
                     self.run_page.preview_stale = true;
                     self.osm_page.status = crate::road_status::explain(&e);

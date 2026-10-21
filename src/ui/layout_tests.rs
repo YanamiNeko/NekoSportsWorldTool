@@ -205,6 +205,7 @@ fn failed_network_load_clears_previous_preview() {
     app.run_page.preview_stale = false;
     app.net_tx
         .send(super::osm::NetworkLoad {
+            source: None,
             pending: false,
             warning: String::new(),
             offline: false,
@@ -255,6 +256,7 @@ fn stale_network_results_cannot_replace_newer_school_or_manual_load() {
     app.osm_page.busy = true;
     app.net_tx
         .send(super::osm::NetworkLoad {
+            source: None,
             pending: false,
             warning: String::new(),
             offline: false,
@@ -271,6 +273,7 @@ fn stale_network_results_cannot_replace_newer_school_or_manual_load() {
     assert!(app.osm_page.busy);
     app.net_tx
         .send(super::osm::NetworkLoad {
+            source: None,
             pending: false,
             warning: String::new(),
             offline: false,
@@ -309,6 +312,7 @@ fn cancelling_download_discards_late_result_and_retry_is_reachable() {
     assert!(app.osm_page.cancel.check().is_err());
     app.net_tx
         .send(super::osm::NetworkLoad {
+            source: None,
             pending: false,
             warning: String::new(),
             offline: false,
@@ -525,6 +529,7 @@ fn downloaded_roads_are_visible_while_points_load_and_survive_metadata_failure()
     ] {
         app.net_tx
             .send(super::osm::NetworkLoad {
+                source: None,
                 pending,
                 warning: warning.into(),
                 offline: false,
@@ -576,6 +581,7 @@ fn school_401_clears_saved_session_but_preserves_manual_map_and_device_settings(
     let id = app.begin_network_load();
     app.net_tx
         .send(super::osm::NetworkLoad {
+            source: None,
             pending: false,
             warning: format!("路线预览暂不可用：{}", crate::api::client::SESSION_EXPIRED),
             offline: false,
@@ -626,6 +632,7 @@ fn delayed_401_from_old_token_cannot_remove_a_new_login() {
     app.osm_page.status = "fresh request".into();
     app.net_tx
         .send(super::osm::NetworkLoad {
+            source: None,
             pending: false,
             warning: String::new(),
             offline: false,
@@ -850,6 +857,7 @@ fn manual_map_completion_refreshes_metadata_once_without_discarding_map() {
     let net = std::sync::Arc::new(route_planner::RoadGraph::new());
     app.net_tx
         .send(super::osm::NetworkLoad {
+            source: None,
             pending: false,
             warning: "地图已读取".into(),
             offline: false,
@@ -929,4 +937,35 @@ fn run_page_distinguishes_active_refresh_from_idle_missing_data() {
         900.,
         "本地地图已加载；请设置定位锚点，再刷新路线点位与围栏。",
     );
+}
+
+#[test]
+fn manual_online_results_preserve_source_and_reject_stale_replies() {
+    let root = std::env::temp_dir().join(format!("manual-online-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    crate::platform::TEST_DATA_DIR.with(|p| *p.borrow_mut() = Some(root.clone()));
+    let ctx = egui::Context::default();
+    let mut app = App::from_state(&ctx, HeaderIdentity::default(), Session::default(), Config::default());
+    let network = Arc::new(route_planner::load_osm(LOCAL_OSM.as_bytes()).unwrap());
+    let cached = root.join("online_roads/fixture.osm").display().to_string();
+    let result = |request_id, source, result| super::osm::NetworkLoad {
+        source: Some(source), pending: false, warning: String::new(), offline: false,
+        request_id, campuses: Vec::new(), selected_key: String::new(), scope: None, inputs: None, result,
+    };
+    app.net_tx.send(result(0, super::osm::RoadSource::Online(cached.clone()), Ok(network.clone()))).unwrap();
+    app.poll_messages();
+    assert_eq!(app.config.manual_road_path(), cached);
+    assert!(app.config.osm_path.is_empty());
+    assert_eq!(model::load_config().road_cache_path, cached);
+    app.net_tx.send(result(0, super::osm::RoadSource::Local("broken.osm".into()), Err("invalid map".into()))).unwrap();
+    app.poll_messages();
+    assert!(Arc::ptr_eq(app.network.as_ref().unwrap(), &network));
+    assert_eq!(app.config.manual_road_path(), cached);
+    app.begin_network_load();
+    app.net_tx.send(result(0, super::osm::RoadSource::Local("stale.osm".into()), Ok(network))).unwrap();
+    app.poll_messages();
+    assert!(app.network.is_none());
+    assert_eq!(app.config.manual_road_path(), cached);
+    crate::platform::TEST_DATA_DIR.with(|p| *p.borrow_mut() = None);
+    std::fs::remove_dir_all(root).unwrap();
 }

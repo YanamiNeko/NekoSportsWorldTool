@@ -82,6 +82,7 @@ impl App {
                         {
                             if entry.fences.is_empty() {
                                 self.config.osm_path.clear();
+                                self.config.road_cache_path.clear();
                                 let _ = crate::api::model::save_config(&self.config);
                                 self.refresh_school_route(true);
                             } else if let Some(c) = self.osm_page.campuses.iter().find(|c| {
@@ -94,6 +95,7 @@ impl App {
                                     confirmed: false,
                                 });
                                 self.config.osm_path.clear();
+                                self.config.road_cache_path.clear();
                                 let _ = crate::api::model::save_config(&self.config);
                                 self.refresh_school_route(true);
                             } else {
@@ -204,7 +206,7 @@ impl App {
             let mut value = crate::diagnostics::report(
                 &self.status,
                 &self.osm_page.status,
-                !self.config.osm_path.is_empty(),
+                !self.config.manual_road_path().is_empty(),
                 self.osm_page.offline,
                 nodes,
                 edges,
@@ -250,6 +252,7 @@ impl App {
                 Ok(std::sync::Arc::new(net))
             });
             let _ = tx.send(super::osm::NetworkLoad {
+                source: None,
                 pending: false,
                 warning: String::new(),
                 offline: true,

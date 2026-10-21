@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=NekoSportsWorldTool
+Comment=Map location picker and route planner
+Exec=nekosportsworldtool
+Terminal=false
+Categories=Utility;
+X-Geoclue-Reason=获取一次当前位置以填写定位锚点，并帮助选择学校操场。

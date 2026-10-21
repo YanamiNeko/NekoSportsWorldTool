@@ -1,45 +1,60 @@
-# UI: teal-themed card-based redesign (Windows + Android)
+# UI 改版：青绿主题 · 卡片式布局（Windows + Android）
 
-## Summary
-This PR rebuilds the UI layer to match the design spec (screenshots below) while keeping **all business logic unchanged**. It targets both the Windows desktop build and the Android build from the single shared `eframe/egui` codebase.
+## 概述
 
-## What changed (UI only)
-- `src/ui/theme.rs`: design tokens — teal accent scale, 5-step type ramp, 4pt spacing grid, radius tiers, card shadow.
-- `src/ui/components.rs` (new): shared `card` / `chip` / `segmented` / `notice` / `stat` components.
-- `src/ui/mobile.rs`: grouped side nav for desktop, bottom 5-tab nav for phones, sub-page back header; responsive tiers (phone / tablet / desktop).
-- `src/ui/mod.rs`: login moved into a modal, top status chips, app skeleton.
-- Card-ified all 9 pages: run, AI, records, data, user, device, log, osm (map), about.
+本 PR 按设计稿（见下方截图）重做了整个 UI 层，**业务逻辑零改动**。桌面端与安卓端共用同一套 `eframe/egui` 代码，两端同步生效。
 
-## Post-review fixes
-- **Android navigation**: the tool pages (设备信息 / 运行日志 / 路网 / 关于与更新) are reachable from the 我的 page as a 更多设置 section that opens a sub-page with a `← 我的` back bar. All 9 pages stay reachable, exactly as before — UI form only, no logic changes.
-- **Android blurry rendering**: some devices report the default density (160) through `AConfiguration`, so egui rendered at 1x and the whole UI looked blurry. The app now publishes the authoritative `DisplayMetrics.density` from the activity (refreshed on configuration changes) and the vendored winit prefers it in `scale_factor()`.
-  Files: `src/android.rs`, `android/java/org/nekosportsworld/tool/MainActivity.java`, `vendor/winit-0.30.13/src/platform_impl/android/mod.rs`.
-- **Compact top bar**: the status chips + login button no longer collapse into a vertical column on narrow screens; on phones the bar is split into two rows.
+## 改了什么（仅 UI）
 
-## Unchanged (verified)
-- No protocol / api / crypto / track / update logic touched.
-- `src/ui/osm.rs`, `src/ui/map.rs`, and `crates/route-planner` are **original** to the repo — this PR only restyles them, it does not add routing / network features.
-- `cargo test --lib`: 90 passed.
+- `src/ui/theme.rs`：设计 token —— 青绿主色阶、5 级字号、4pt 间距栅格、圆角分层、卡片阴影。
+- `src/ui/components.rs`（新增）：共用组件 `card` / `chip` / `segmented` / `notice` / `stat`。
+- `src/ui/mobile.rs`：桌面端分组侧栏、手机端底部 5 项导航、二级页返回条；响应式断点（手机 / 平板 / 桌面）。
+- `src/ui/mod.rs`：登录改为弹窗，顶栏改为状态胶囊，应用骨架重排。
+- 9 个页面全部卡片化：跑步、AI 运动、记录、数据、我的、设备信息、运行日志、路网（地图）、关于。
 
-## Screenshots
+## 复审后修复
 
-### Windows (desktop, 1218×764)
+- **安卓导航**：设备信息 / 运行日志 / 路网 / 关于与更新等工具页，从「我的」页的「更多设置」进入二级页，顶部带「← 我的」返回条。9 个页面仍然全部可达，与改版前一致 —— 只改 UI 形态，不动逻辑。
+- **安卓模糊**：部分机型通过 `AConfiguration` 上报的默认像素密度为 160，导致 egui 按 1 倍渲染、整体发虚。现在由 Activity 上报权威的 `DisplayMetrics.density`（配置变化时刷新），内嵌的 winit 在 `scale_factor()` 中优先采用它。
+  涉及文件：`src/android.rs`、`android/java/org/nekosportsworld/tool/MainActivity.java`、`vendor/winit-0.30.13/src/platform_impl/android/mod.rs`。
+- **窄屏顶栏**：状态胶囊与登录按钮不再在窄屏下挤成竖排，手机上顶栏拆为两行。
+
+## 未改动（已核对）
+
+- 协议、API、加密、轨迹、更新等逻辑均未触碰。
+- `src/ui/osm.rs`、`src/ui/map.rs`、`crates/route-planner` 均为仓库原有实现 —— 本 PR 只换外观，不新增路由 / 路网功能。
+- `cargo test --features gui --lib`：184 passed / 0 failed。
+
+## 已解决与 `main` 的冲突
+
+已合入最新 `main`（含 PR #88），合并提交 `ed90ce7`，冲突清零（`mergeable_state` 已从 `dirty` 变为 `clean`）：
+
+- 上游新增的 `crates/route-planner`（boundary / check / gpx）、`api/school_roads`、`api/submission_guard`、`ui/road_tools`、`ui/layout_tests` 等逻辑**全部保留**；
+- `src/ui/{data,mod,osm,run,user}.rs` 共 16 处冲突逐个手工合并，原则是**以上游逻辑为准，只叠加卡片外观**。
+
+## 截图
+
+### Windows（桌面，1218×764）
+
 | 跑步 | AI 教练 |
 |---|---|
 | ![run](https://raw.githubusercontent.com/kek2233/NekoSportsWorldTool/assets/ui-screenshots/win_run.png) | ![ai](https://raw.githubusercontent.com/kek2233/NekoSportsWorldTool/assets/ui-screenshots/win_ai.png) |
 
-### Android (phone layout, 378×844)
+### Android（手机布局，378×844）
+
 | 首页（底部 5 栏） | 我的（更多设置入口） | 设备信息二级页 |
 |---|---|---|
 | ![phone home](https://raw.githubusercontent.com/kek2233/NekoSportsWorldTool/assets/ui-screenshots/phone_home.png) | ![phone user](https://raw.githubusercontent.com/kek2233/NekoSportsWorldTool/assets/ui-screenshots/phone_user.png) | ![phone device](https://raw.githubusercontent.com/kek2233/NekoSportsWorldTool/assets/ui-screenshots/phone_device.png) |
 
-### Design mockup (`docs/ui-redesign/preview.html`, kept out of the repo per `.gitignore`)
-| Desktop | Android |
+### 设计稿（`docs/ui-redesign/preview.html`，按 `.gitignore` 不入库）
+
+| 桌面 | Android |
 |---|---|
 | ![desktop mockup](https://raw.githubusercontent.com/kek2233/NekoSportsWorldTool/assets/ui-screenshots/preview_desktop.png) | ![android mockup](https://raw.githubusercontent.com/kek2233/NekoSportsWorldTool/assets/ui-screenshots/preview_android.png) |
 
-## Test plan
-- [x] Windows: run `nekosportsworldtool.exe`, check all 9 pages render with the teal theme.
-- [x] Android: install the arm64 apk, verify bottom nav + cards on a phone.
-- [x] Confirm login modal, status chips, side / bottom nav behave functionally as before.
-- [x] All 9 pages reachable on Android (tool pages under 我的 → 更多设置).
+## 测试计划
+
+- [x] Windows：运行 `nekosportsworldtool.exe`，确认 9 个页面均以青绿主题正常渲染。
+- [x] Android：安装 arm64 apk，在手机上验证底部导航与卡片布局。
+- [x] 确认登录弹窗、状态胶囊、侧栏 / 底部导航的功能行为与改版前一致。
+- [x] Android 上 9 个页面全部可达（工具页位于「我的」→「更多设置」）。

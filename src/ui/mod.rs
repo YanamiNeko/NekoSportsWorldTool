@@ -19,7 +19,9 @@ pub mod map;
 pub mod mobile;
 pub mod msgs;
 pub mod osm;
+mod preview_jobs;
 pub mod records;
+mod road_tools;
 pub mod run;
 pub mod theme;
 pub mod user;
@@ -38,18 +40,6 @@ fn short_id(id: &str) -> String {
     s
 }
 
-/// 按字符数截断文本。
-#[allow(dead_code)]
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        text.to_string()
-    } else {
-        let mut s: String = text.chars().take(max_chars).collect();
-        s.push('…');
-        s
-    }
-}
-
 pub const IP: &str = "__IP_DONE__";
 pub const LOGIN_DONE: &str = "__LOGIN_DONE__";
 pub const RUN_DONE: &str = "__RUN_DONE__";
@@ -66,7 +56,6 @@ pub const RUN_DETAIL: &str = "__RUN_DETAIL__";
 pub const UPDATE_CHK: &str = "__UPDATE_CHK__";
 pub const UPDATE_PROG: &str = "__UPDATE_PROG__";
 pub const UPDATE_DONE: &str = "__UPDATE_DONE__";
-pub const FENCE_DONE: &str = "__FENCE_DONE__";
 pub const POINTS_DONE: &str = "__POINTS_DONE__";
 
 /// 提交结果弹窗。
@@ -76,7 +65,34 @@ pub struct PopupInfo {
 }
 
 /// 顶层 App。
+#[derive(Clone)]
+pub struct JobSender {
+    tx: Sender<String>,
+    auth: Option<crate::api::client::AuthContext>,
+}
+impl JobSender {
+    pub fn send(&self, message: String) -> Result<(), std::sync::mpsc::SendError<String>> {
+        self.tx.send(match &self.auth {
+            Some(context) => format!("__SESSION_JOB__{}|{message}", context.epoch),
+            None => message,
+        })
+    }
+    pub fn client(
+        &self,
+        identity: HeaderIdentity,
+        session: Option<Session>,
+    ) -> crate::api::client::ApiClient {
+        crate::api::client::ApiClient::new(identity, session).with_auth_context(self.auth.clone())
+    }
+}
+
 pub struct App {
+    #[cfg(test)]
+    route_fixture: Option<(String, std::path::PathBuf)>,
+    pub session_epoch: u64,
+    pub auth_guard: Arc<std::sync::atomic::AtomicBool>,
+    auth_tx: Sender<crate::api::client::AuthFailure>,
+    auth_rx: Receiver<crate::api::client::AuthFailure>,
     pub tx: Sender<String>,
     pub rx: Receiver<String>,
     pub log: log::LogStore,
@@ -92,9 +108,11 @@ pub struct App {
     pub password: String,
     pub remember: bool,
     pub login_busy: bool,
+    pub auth_expired: bool,
     pub login_open: bool,
     pub run_busy: bool,
     pub ai_busy: bool,
+    pub ai_submit_active: bool,
     pub records_busy: bool,
     pub data_busy: bool,
     pub user_busy: bool,
@@ -114,8 +132,11 @@ pub struct App {
     /// 已加载的 OSM 路网（真实道路路由 + 地图显示共用）。
     pub network: Option<Arc<route_planner::RoadGraph>>,
     pub osm_page: osm::OsmPage,
-    net_tx: Sender<Result<Arc<route_planner::RoadGraph>, String>>,
-    net_rx: Receiver<Result<Arc<route_planner::RoadGraph>, String>>,
+    net_tx: Sender<osm::NetworkLoad>,
+    net_rx: Receiver<osm::NetworkLoad>,
+    preview_tx: Sender<preview_jobs::PreviewResult>,
+    preview_rx: Receiver<preview_jobs::PreviewResult>,
+    run_control: Arc<crate::task_control::Control>,
 }
 
 impl eframe::App for App {
@@ -135,59 +156,17 @@ impl eframe::App for App {
         crate::platform::set_keep_screen_on(self.run_busy || self.ai_busy || self.login_busy);
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
 
-        // ── 桌面分组侧栏 ──────────────────────────────────────
-        let compact = mobile::is_compact(ctx.screen_rect().width());
-        if !compact {
-            egui::SidePanel::left("nav_panel")
-                .default_width(200.0)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.add_space(theme::space::SM);
-                    self.draw_side_brand(ui);
-                    ui.separator();
-                    mobile::side_nav(ui, &mut self.tab);
-                });
-        }
+        self.draw_shell(ctx);
+        self.draw_overlays(ctx);
+        crate::platform::sync_clipboard(ctx);
+    }
+}
 
-        // ── 顶栏（状态胶囊 + 登录）────────────────────────────
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            self.draw_top_bar(ui, compact);
-        });
-
-        // ── 底部：手机导航 / 桌面状态栏 ───────────────────────
-        if compact {
-            egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
-                mobile::bottom_nav(ui, &mut self.tab);
-            });
-        } else {
-            egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-                self.draw_status_bar(ui);
-            });
-        }
-
-        // ── 内容区 ────────────────────────────────────────────
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // 手机宽：工具页（设备信息/运行日志/路网/关于）是「我的」的二级页，
-            // 顶部给一条返回条；桌面宽由左侧分组侧栏直达，无需返回条。
-            if compact && self.tab >= 5 {
-                let title = mobile::page_label(self.tab);
-                if mobile::sub_page_header(ui, title) {
-                    self.tab = mobile::MOBILE_HOME;
-                }
-            }
-            match self.tab {
-                0 => self.draw_run(ui),
-                1 => self.draw_ai(ui),
-                2 => self.draw_records(ui),
-                3 => self.draw_data(ui),
-                4 => self.draw_user(ui),
-                5 => self.draw_device(ui),
-                6 => self.log.render(ui),
-                7 => self.draw_osm_page(ui),
-                _ => self.draw_about(ui),
-            }
-        });
-
+impl App {
+    /// 悬浮层：登录弹窗、提示弹窗、更新窗口。
+    ///
+    /// 与 `draw_shell` 分开，既方便单测按需驱动，也让骨架与悬浮层的绘制顺序显式可见。
+    fn draw_overlays(&mut self, ctx: &egui::Context) {
         self.draw_login_window(ctx);
 
         if let Some(p) = &self.popup {
@@ -214,11 +193,8 @@ impl eframe::App for App {
             }
         }
         self.draw_update_windows(ctx);
-        crate::platform::sync_clipboard(ctx);
     }
-}
 
-impl App {
     /// 桌面侧栏品牌区。
     fn draw_side_brand(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -286,6 +262,8 @@ impl App {
         let login_btn = |ui: &mut egui::Ui, clicked: &mut bool| {
             let btn = if logged {
                 theme::secondary_btn("登出")
+            } else if self.auth_expired {
+                theme::primary_btn("重新登录")
             } else {
                 theme::primary_btn("登录")
             };
@@ -324,6 +302,11 @@ impl App {
             if logged {
                 self.do_logout();
             } else {
+                // 账号或密码为空时先给出校验提示，再打开弹窗引导填写；
+                // 已保存凭据则直接进弹窗确认后提交。
+                if self.username.trim().is_empty() || self.password.is_empty() {
+                    self.status = "请填写账号和密码".into();
+                }
                 self.login_open = true;
             }
         }
@@ -341,11 +324,12 @@ impl App {
             )
         });
         let cheat_text = self.data_page.cheat.as_ref().map(|c| {
-            if c.is_clean() {
-                (components::Tone::Ok, "自查正常".to_string())
-            } else {
-                (components::Tone::Err, format!("已标记：{}", c.self_brief()))
-            }
+            let tone = match c.status() {
+                crate::api::cheat::Status::NoRecord => components::Tone::Ok,
+                crate::api::cheat::Status::Flagged => components::Tone::Err,
+                _ => components::Tone::Warn,
+            };
+            (tone, c.label().to_string())
         });
         let updating = self.update.checking || self.update.downloading;
         let version = crate::platform::version_name();
@@ -448,20 +432,88 @@ impl App {
         }
     }
 
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    /// 应用骨架：桌面侧栏 / 顶栏 / 手机底部导航 / 内容区。
+    fn draw_shell(&mut self, ctx: &egui::Context) {
+        // ── 桌面分组侧栏 ──────────────────────────────────────
+        let compact = mobile::is_compact(ctx.screen_rect().width());
+        if !compact {
+            egui::SidePanel::left("nav_panel")
+                .default_width(200.0)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.add_space(theme::space::SM);
+                    self.draw_side_brand(ui);
+                    ui.separator();
+                    mobile::side_nav(ui, &mut self.tab);
+                });
+        }
+
+        // ── 顶栏（状态胶囊 + 登录）────────────────────────────
+        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+            self.draw_top_bar(ui, compact);
+        });
+
+        // ── 底部：手机导航 / 桌面状态栏 ───────────────────────
+        if compact {
+            egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
+                mobile::bottom_nav(ui, &mut self.tab);
+            });
+        } else {
+            egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+                self.draw_status_bar(ui);
+            });
+        }
+
+        // ── 内容区 ────────────────────────────────────────────
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // 手机宽：工具页（设备信息/运行日志/路网/关于）是「我的」的二级页，
+            // 顶部给一条返回条；桌面宽由左侧分组侧栏直达，无需返回条。
+            if compact && self.tab >= 5 {
+                let title = mobile::page_label(self.tab);
+                if mobile::sub_page_header(ui, title) {
+                    self.tab = mobile::MOBILE_HOME;
+                }
+            }
+            match self.tab {
+                0 => self.draw_run(ui),
+                1 => self.draw_ai(ui),
+                2 => self.draw_records(ui),
+                3 => self.draw_data(ui),
+                4 => self.draw_user(ui),
+                5 => self.draw_device(ui),
+                6 => self.log.render(ui),
+                7 => self.draw_osm_page(ui),
+                _ => self.draw_about(ui),
+            }
+        });
+    }
+}
+
+impl App {
+    fn from_state(
+        ctx: &egui::Context,
+        identity: HeaderIdentity,
+        session: Session,
+        config: Config,
+    ) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let (net_tx, net_rx) = std::sync::mpsc::channel();
-        let font_loaded = fonts::install(&cc.egui_ctx);
-        theme::apply(&cc.egui_ctx);
-        let identity = model::load_identity();
+        let (preview_tx, preview_rx) = std::sync::mpsc::channel();
+        let font_loaded = fonts::install(ctx);
+        theme::apply(ctx);
         let device_buf = identity.clone();
-        let session = model::load_session();
-        let config = model::load_config();
         let username = config.username.clone();
         let password = config.password.clone();
         let remember = config.remember;
 
-        let mut app = Self {
+        let (auth_tx, auth_rx) = std::sync::mpsc::channel();
+        Self {
+            #[cfg(test)]
+            route_fixture: None,
+            session_epoch: 0,
+            auth_guard: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            auth_tx,
+            auth_rx,
             tx: tx.clone(),
             rx,
             log: log::LogStore::default(),
@@ -475,9 +527,11 @@ impl App {
             password,
             remember,
             login_busy: false,
+            auth_expired: false,
             login_open: false,
             run_busy: false,
             ai_busy: false,
+            ai_submit_active: false,
             records_busy: false,
             data_busy: false,
             user_busy: false,
@@ -505,7 +559,9 @@ impl App {
                 map: map::MapState::default(),
                 preview: None,
                 preview_stale: true,
+                preview_inputs: None,
                 map_fitted: false,
+                ..Default::default()
             },
             ai_page: ai::AiPage {
                 days: 1,
@@ -524,7 +580,19 @@ impl App {
             },
             net_tx,
             net_rx,
-        };
+            preview_tx,
+            preview_rx,
+            run_control: Arc::new(crate::task_control::Control::default()),
+        }
+    }
+
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut app = Self::from_state(
+            &cc.egui_ctx,
+            model::load_identity(),
+            model::load_session(),
+            model::load_config(),
+        );
         if app.font_loaded.is_none() {
             app.log
                 .push("未找到中文字体（msyh/simhei/simsun），界面中文可能显示为方块");
@@ -547,8 +615,9 @@ impl App {
             app.refresh_records();
             app.refresh_user_page();
             app.refresh_ai_list();
-            app.refresh_fence();
-            app.refresh_points();
+            if app.config.osm_path.is_empty() {
+                app.refresh_points();
+            }
         }
         // 已配置 OSM 路网则启动时后台加载
         if !app.config.osm_path.is_empty() {
@@ -561,15 +630,44 @@ impl App {
     /// 后台任务（线程 + 日志 channel）。
     pub fn spawn_job<F>(&self, f: F)
     where
-        F: FnOnce(Sender<String>) + Send + 'static,
+        F: FnOnce(JobSender) + Send + 'static,
     {
-        let tx = self.tx.clone();
+        let tx = JobSender {
+            tx: self.tx.clone(),
+            auth: None,
+        };
         std::thread::spawn(move || f(tx));
     }
 
-    pub fn logger(tx: Sender<String>) -> impl FnMut(&str) {
+    pub fn spawn_session_job<F>(&self, f: F)
+    where
+        F: FnOnce(JobSender) + Send + 'static,
+    {
+        let tx = JobSender {
+            tx: self.tx.clone(),
+            auth: Some(crate::api::client::AuthContext {
+                epoch: self.session_epoch,
+                rejected: self.auth_guard.clone(),
+                notify: self.auth_tx.clone(),
+            }),
+        };
+        std::thread::spawn(move || f(tx));
+    }
+
+    fn renew_session_jobs(&mut self) {
+        self.data_page.cheat = None;
+        self.data_page.cheat_error = None;
+        self.data_page.cheat_checking = false;
+        self.session_epoch = self.session_epoch.wrapping_add(1);
+        self.auth_guard = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    }
+
+    pub fn logger(tx: JobSender) -> impl FnMut(&str) {
         move |s: &str| {
             tx.send(s.to_string()).ok();
         }
     }
 }
+
+#[cfg(test)]
+mod layout_tests;

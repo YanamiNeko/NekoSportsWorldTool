@@ -1,14 +1,14 @@
-# Noto Sans SC font asset
+# Noto Sans SC 字体资源
 
-- File: `NotoSansSC-VF.ttf`
-- Internal family/full name: Noto Sans SC
-- Internal version: 2.04 (241114210130)
-- Copyright metadata: Copyright 2014-2021 Adobe, with Reserved Font Name `Source`
-- License metadata: SIL Open Font License 1.1
-- Upstream project: https://github.com/notofonts/noto-cjk
-- Upstream license: https://github.com/notofonts/noto-cjk/blob/main/LICENSE
-- SHA-256: `763146584CF0710223441356B4395E279021B0806C196614377A7A0174AE074A`
+- 文件：`NotoSansSC-VF.ttf`
+- 字体族 / 全名：Noto Sans SC
+- 内部版本：2.04（241114210130）
+- 版权信息：Copyright 2014-2021 Adobe，保留字体名 `Source`
+- 许可信息：SIL Open Font License 1.1
+- 上游项目：https://github.com/notofonts/noto-cjk
+- 上游许可：https://github.com/notofonts/noto-cjk/blob/main/LICENSE
+- SHA-256：`763146584CF0710223441356B4395E279021B0806C196614377A7A0174AE074A`
 
-The unmodified file was copied from the locally installed Windows font at
-`C:\Windows\Fonts\NotoSansSC-VF.ttf`. Its embedded name table reports the
-family, version, copyright, and OFL information listed above.
+该文件未经任何修改，直接复制自本机已安装的 Windows 字体
+`C:\Windows\Fonts\NotoSansSC-VF.ttf`。其内嵌的 name 表记录了上面列出的
+字体族、版本、版权与 OFL 许可信息。

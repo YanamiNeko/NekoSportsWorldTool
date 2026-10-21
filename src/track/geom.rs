@@ -2,7 +2,7 @@
 //!
 //! round 封装、RNG、打卡点 Catmull-Rom 拟合环 + 弧长表 + 弧长插值。
 
-use chrono::{Local, TimeZone};
+use chrono::{FixedOffset, TimeZone};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
@@ -199,10 +199,15 @@ pub fn wgs84_to_bd09(lat: f64, lng: f64) -> (f64, f64) {
     gcj02_to_bd09(g_lat, g_lng)
 }
 
-pub fn fmt_gain_time(ms: i64) -> String {
-    Local
+pub fn fmt_cst(ms: i64, format: &str) -> String {
+    FixedOffset::east_opt(8 * 3600)
+        .unwrap()
         .timestamp_millis_opt(ms)
         .single()
-        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|t| t.format(format).to_string())
         .unwrap_or_default()
+}
+
+pub fn fmt_gain_time(ms: i64) -> String {
+    fmt_cst(ms, "%Y-%m-%d %H:%M:%S")
 }

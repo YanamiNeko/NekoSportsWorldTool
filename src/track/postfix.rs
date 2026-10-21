@@ -1,29 +1,21 @@
 //! 轨迹后处理：
-//! 结尾断崖（最后正常点压速 1.2-2.6km/h、时间延伸 6-14s）、起终点哨兵
+//! 收尾减速（保留原有结束时间）、起终点哨兵
 //! （索引1 type=5 全零 / 末点 type=6 / 首点 type∈{0,7}）、后半段 type=1/2 散布、
 //! 索引2 avgSpeed 边界修正、首点速度取首个非零值。
 
-use super::geom::{fmt_gain_time, round_to, Rng};
+use super::geom::{round_to, Rng};
 use super::model::GenPoint;
 
 pub fn apply_post_fixes(locs: &mut [GenPoint], rng: &mut Rng, start_ms: i64) {
-    // 结尾断崖：最后正常点压速 + 时间自然延伸 6-14s
+    // 仅调整末点速度；不要使末点越过总时长或早于尾部异常点。
     if locs.len() >= 4 {
-        let mut ci = locs.len() - 1;
-        while ci > 0 && locs[ci].ptype == -1 {
-            ci -= 1;
-        }
+        let ci = locs.len() - 1;
         if ci > 1 {
-            let stop_t = locs[ci].totalTime + rng.randint(6, 14);
-            locs[ci].totalTime = stop_t;
-            locs[ci].validTime = stop_t;
             // 收尾减速仍须落在有效配速窗口内（2.0-2.6 m/s ≈ 7.2-9.4 km/h）
             let stop_ms = round_to(rng.uniform(2.0, 2.6), 4);
             locs[ci].speed = round_to(stop_ms * 3.6, 4);
             locs[ci].avgSpeed = stop_ms;
             locs[ci].bdS = round_to(rng.uniform(0.05, 0.15), 3);
-            locs[ci].gainTime = fmt_gain_time(start_ms + stop_t * 1000);
-            locs[ci].gainTimeMs = start_ms + stop_t * 1000;
             // totalDis 保持（App 过滤条件 totalDis>0）
         }
     }
@@ -51,23 +43,28 @@ pub fn apply_post_fixes(locs: &mut [GenPoint], rng: &mut Rng, start_ms: i64) {
         // 后半段散布 type=1/2/8（67-99% 行程区间；type=8 真人低频出现）
         let from = (locs.len() as f64 * 0.67) as usize;
         for i in from..locs.len().saturating_sub(2) {
-            if rng.random() < 0.06 {
+            if locs[i].ptype != -1 && rng.random() < 0.06 {
                 locs[i].ptype = rng.choice(&[1, 1, 2, 8]);
                 locs[i].locType = 1;
             }
         }
     }
     // 边界修正①：索引2 首个真实点 avgSpeed 不跨哨兵计算，并保持在有效窗口内
-    if locs.len() > 3 {
+    if locs.len() > 3 && locs[2].ptype != -1 {
         let p2 = &mut locs[2];
-        p2.avgSpeed = round_to(p2.totalDis / 1.0f64.max(p2.totalTime as f64), 4)
-            .clamp(crate::track::generator::SPEED_FLOOR, crate::track::generator::SPEED_CEIL);
+        p2.avgSpeed = round_to(p2.totalDis / 1.0f64.max(p2.totalTime as f64), 4).clamp(
+            crate::track::generator::SPEED_FLOOR,
+            crate::track::generator::SPEED_CEIL,
+        );
         p2.speed = round_to(p2.avgSpeed * 3.6, 4);
     }
     // 首点 = 起点：totalTime=0、type∈{0,7}、速度取首个非零值
     if !locs.is_empty() {
         locs[0].totalTime = 0;
         locs[0].validTime = 0;
+        locs[0].totalDis = 0.0;
+        locs[0].validDis = 0.0;
+        locs[0].steps = 0;
         locs[0].state = 1;
         locs[0].ptype = rng.choice(&[0, 0, 0, 7]);
         locs[0].locType = 1;
@@ -81,6 +78,41 @@ pub fn apply_post_fixes(locs: &mut [GenPoint], rng: &mut Rng, start_ms: i64) {
         }
         if locs[0].speed == 0.0 {
             locs[0].speed = round_to(rng.uniform(7.0, 13.0), 4);
+        }
+    }
+    for p in locs.iter_mut() {
+        p.gainTimeMs = start_ms + p.totalTime * 1000;
+        p.gainTime = super::geom::fmt_gain_time(p.gainTimeMs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn post_processing_preserves_exception_type_and_speed_limits() {
+        let track = crate::track::generator::build(
+            1200.0,
+            600,
+            7,
+            (39.9, 116.4),
+            0,
+            &[(39.9, 116.4), (39.901, 116.401)],
+        );
+        for seed in 0..64 {
+            let mut points = track.locations.clone();
+            let late = (points.len() as f64 * 0.8) as usize;
+            for index in [2, late] {
+                points[index].ptype = -1;
+                points[index].avgSpeed = 1.0;
+                points[index].speed = 3.6;
+            }
+            apply_post_fixes(&mut points, &mut Rng::new(seed), 0);
+            for index in [2, late] {
+                assert_eq!(points[index].ptype, -1);
+                assert_eq!(points[index].avgSpeed, 1.0);
+                assert_eq!(points[index].speed, 3.6);
+            }
         }
     }
 }

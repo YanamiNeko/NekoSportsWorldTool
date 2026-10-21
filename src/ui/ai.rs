@@ -242,11 +242,12 @@ impl App {
         let (mode_label, score_label, secs, per_min, consume) = ai_display(mode);
         let identity = self.identity.clone();
         let session = self.session.clone().unwrap_or_default();
+        self.ai_submit_active = true;
         self.ai_busy = true;
         self.status = "AI 成绩提交中…".into();
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            let mut client = tx.client(identity, Some(session));
             let payload =
                 match crate::api::flow::run_ai_submit(&mut client, sport_id, mode, &mut log) {
                     Ok(biz) => {
@@ -274,11 +275,12 @@ impl App {
     fn run_ai_batch(&mut self, plan: AiBatchPlan) {
         let identity = self.identity.clone();
         let session = self.session.clone().unwrap_or_default();
+        self.ai_submit_active = true;
         self.ai_busy = true;
         self.status = "批量补签进行中…".into();
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            let mut client = tx.client(identity, Some(session));
             let total = plan.sport_ids.len() as i64 * plan.days * plan.per_day;
             let mut ok = 0i64;
             let mut done = 0i64;

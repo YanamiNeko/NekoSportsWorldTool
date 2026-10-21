@@ -1,8 +1,8 @@
 //! 后台任务与消息处理：IP 获取 / 登录 / 刷新 / 消息协议分发。
 
 use super::{
-    App, AI_DETAIL, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, LOGIN_DONE, POINTS_DONE, RANK,
-    RECORDS, RUN_DETAIL, SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER,
+    App, AI_DETAIL, AI_LIST, AI_RECORDS, CHEAT, IP, LOGIN_DONE, RANK, RECORDS, RUN_DETAIL,
+    SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER,
 };
 use crate::api::model;
 use crate::track::generate_road::RouteMode;
@@ -17,6 +17,8 @@ impl App {
             || self.records_busy
             || self.data_busy
             || self.user_busy
+            || self.osm_page.busy
+            || self.run_page.preview_busy
     }
 
     /// 检查更新；manual=true 时切到关于页并显示状态。
@@ -80,56 +82,210 @@ impl App {
         });
     }
 
-    /// 后台拉取电子围栏并落盘（供预览裁剪/居中复用），完成后触发预览刷新。
-    /// 仅在真实道路路由模式下才需要围栏，避免经典模式用户也进入该端点请求指纹。
-    pub(crate) fn refresh_fence(&self) {
-        if self.run_page.route_mode != RouteMode::Road {
-            return;
-        }
-        let Some(session) = self.session.clone() else {
-            return;
-        };
-        let identity = self.identity.clone();
-        self.spawn_job(move |tx| {
-            let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
-            match crate::api::fence::fetch_geo_fence(&mut client) {
-                Ok(f) => {
-                    let _ = crate::api::model::save_fence_cache(&f);
-                    log(&format!("√ [fence] 电子围栏已缓存 {} 个", f.len()));
-                    tx.send(FENCE_DONE.to_string()).ok();
-                }
-                Err(e) => log(&format!("⚠ [fence] 电子围栏获取失败: {e}")),
-            }
-        });
-    }
-
     /// 后台拉取实时点位并落盘（供路线预览使用），完成后触发预览刷新。
     /// 复用 fetch_points 的 TTL 缓存，仅在 Road 模式且锚点已配置时拉取。
-    pub(crate) fn refresh_points(&self) {
+    pub(crate) fn refresh_points(&mut self) {
+        self.refresh_school_route(false);
+    }
+
+    pub(crate) fn refresh_school_route(&mut self, force: bool) {
         if self.run_page.route_mode != RouteMode::Road {
             return;
         }
         let Some(session) = self.session.clone() else {
-            return;
-        };
-        let identity = self.identity.clone();
-        if identity.has_unconfigured_default_location() {
-            return;
-        }
-        let Ok(anchor) = identity.anchor_coordinate() else {
-            return;
-        };
-        self.spawn_job(move |tx| {
-            let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
-            match crate::api::points::fetch_points(&mut client, anchor, &mut log) {
-                Ok(pts) => {
-                    log(&format!("√ [points] 点位已缓存 {} 个（供路线预览）", pts.len()));
-                    tx.send(POINTS_DONE.to_string()).ok();
-                }
-                Err(e) => log(&format!("⚠ [points] 点位获取失败: {e}")),
+            if !self.config.osm_path.is_empty() {
+                self.load_osm_async(self.config.osm_path.clone());
+            } else {
+                self.osm_page.status = "请先登录，才能获取学校路网".into();
             }
+            return;
+        };
+        // Metadata refresh must not discard an already parsed manual map.
+        let manual_network = if !self.config.osm_path.is_empty() {
+            self.network.clone()
+        } else {
+            None
+        };
+        let request_id = self.begin_network_load();
+        self.network = manual_network.clone();
+        let identity = self.identity.clone();
+        let anchor = identity.anchor_coordinate().ok();
+        let preview_anchor = anchor.filter(|_| !identity.has_unconfigured_default_location());
+        let scope = Some((
+            session.uid,
+            session.unid.clone(),
+            anchor,
+            session.token.clone(),
+        ));
+        let path = self.config.osm_path.clone();
+        let selection = self.config.school_campus.clone();
+        let control = self.osm_page.cancel.clone();
+        let net_tx = self.net_tx.clone();
+        #[cfg(test)]
+        let route_fixture = self.route_fixture.clone();
+        self.osm_page.status = "正在获取学校点位、围栏及路网…".into();
+        self.spawn_session_job(move |tx| {
+            let mut log = App::logger(tx.clone());
+            let mut client = tx.client(identity, Some(session));
+            #[cfg(test)]
+            if let Some((host, data_dir)) = route_fixture {
+                client.set_test_host(host);
+                crate::platform::TEST_DATA_DIR.with(|p| *p.borrow_mut() = Some(data_dir));
+            }
+            let mut loaded = manual_network;
+            let mut inputs = None;
+            let mut campuses = Vec::new();
+            let mut selected_key = String::new();
+            let stage = |message: &str| {
+                let _ = tx.send(format!("__ROAD_STAGE__{request_id}|{message}"));
+            };
+            let result = (|| {
+                control.check()?;
+                if !path.trim().is_empty() && loaded.is_none() {
+                    let net =
+                        std::sync::Arc::new(crate::track::generate_road::load_network_path(&path)?);
+                    loaded = Some(net.clone());
+                    let _ = net_tx.send(super::osm::NetworkLoad {
+                        pending: true,
+                        warning: "本地路网已读取；正在获取学校围栏与点位…".into(),
+                        offline: false,
+                        request_id,
+                        campuses: vec![],
+                        selected_key: String::new(),
+                        scope: scope.clone(),
+                        inputs: None,
+                        result: Ok(net),
+                    });
+                }
+                stage("获取当前学校围栏…");
+                let response = crate::api::fence::fetch_geo_fence_response(&mut client)?;
+                campuses = crate::api::campus::catalog(&response);
+                let school = client.login.as_ref().ok_or("未登录")?.unid.clone();
+                let campus = crate::api::campus::chosen(&campuses, selection.as_ref(), &school)
+                    .or_else(|| {
+                        campuses.iter().find(|c| {
+                            preview_anchor.is_some_and(|anchor| {
+                                c.polygons.iter().any(|p| {
+                                    route_planner::point_in_polygon(
+                                        &p.iter()
+                                            .map(|&(a, b)| route_planner::Coord::new(b, a))
+                                            .collect::<Vec<_>>(),
+                                        route_planner::Coord::new(
+                                            anchor.longitude,
+                                            anchor.latitude,
+                                        ),
+                                    )
+                                })
+                            })
+                        })
+                    })
+                    .or_else(|| campuses.first())
+                    .cloned();
+                let fences = campus
+                    .as_ref()
+                    .map(|c| c.polygons.clone())
+                    .unwrap_or_default();
+                let run_area_id = if let Some(campus) = &campus {
+                    selected_key = campus.key.clone();
+                    campus.run_area_id(response.area.run_area_id)?
+                } else {
+                    (response.area.run_area_id >= 0).then(|| response.area.run_area_id.to_string())
+                };
+                control.check()?;
+                stage("下载或读取学校路网…");
+                if loaded.is_none() && campus.is_some() {
+                    loaded = Some(std::sync::Arc::new(
+                        crate::api::school_roads::load_for_school_cancellable(
+                            &path, &school, &fences, force, &control, &mut log,
+                        )?,
+                    ));
+                }
+                control.check()?;
+                if let Some(network) = &loaded {
+                    let _ = net_tx.send(super::osm::NetworkLoad {
+                        pending: true,
+                        warning: "路网已读取；正在刷新路线点位…".into(),
+                        offline: false,
+                        request_id,
+                        campuses: campuses.clone(),
+                        selected_key: selected_key.clone(),
+                        scope: scope.clone(),
+                        inputs: None,
+                        result: Ok(network.clone()),
+                    });
+                }
+                // Preview metadata is optional for displaying the road graph.
+                let anchor =
+                    preview_anchor.ok_or("请在设备信息页配置当前城市和定位锚点，再刷新路线点位")?;
+                stage("获取当前学校策略与路线点位…");
+                let policy = crate::api::policy::fetch_policy(&mut client)?;
+                control.check()?;
+                let pts = crate::api::points::fetch_points_ext(
+                    &mut client,
+                    anchor,
+                    run_area_id,
+                    &mut log,
+                )?;
+                if pts.is_empty() || crate::api::points::points_bd(&pts).len() != pts.len() {
+                    return Err("点位为空或坐标无效".into());
+                }
+                let route_points = crate::api::points::route_points(&policy.must_points, &pts);
+                if loaded.is_none() {
+                    stage("按学校真实点位获取附近路网…");
+                    loaded = Some(std::sync::Arc::new(
+                        crate::api::school_roads::load_for_route_cancellable(
+                            &path,
+                            &school,
+                            &fences,
+                            &route_points,
+                            force,
+                            &control,
+                            &mut log,
+                        )?,
+                    ));
+                }
+                let session = client.login.as_ref().ok_or("未登录")?;
+                inputs = Some(super::run::PreviewInputs {
+                    uid: session.uid,
+                    unid: session.unid.clone(),
+                    anchor,
+                    points: route_points,
+                    fences: fences.clone(),
+                    loaded_ms: crate::crypto::envelope::now_ms(),
+                });
+                control.check()?;
+                if path.is_empty() {
+                    let area_name = campus
+                        .as_ref()
+                        .map(|c| c.name.as_str())
+                        .unwrap_or("点位附近道路（无学校边界）");
+                    let label = session
+                        .profile
+                        .get("campusName")
+                        .and_then(|v| v.as_str())
+                        .map(|school| format!("{school} / {area_name}"))
+                        .unwrap_or_else(|| area_name.to_owned());
+                    crate::api::school_roads::save_context(
+                        &session.unid,
+                        &label,
+                        &fences,
+                        &inputs.as_ref().unwrap().points,
+                    );
+                }
+                Ok(())
+            })();
+            let (result, warning) = finish_road_load(loaded, result);
+            let _ = net_tx.send(super::osm::NetworkLoad {
+                pending: false,
+                warning,
+                offline: false,
+                request_id,
+                campuses,
+                selected_key,
+                scope,
+                inputs,
+                result,
+            });
         });
     }
 
@@ -186,11 +342,17 @@ impl App {
         };
         self.config.remember = remember;
         let _ = model::save_config(&self.config);
+        self.renew_session_jobs();
+        // Retire requests using the old token before a login worker can save a new session.
+        self.osm_page.cancel.cancel();
+        self.osm_page.request_id = self.osm_page.request_id.wrapping_add(1);
+        self.osm_page.busy = false;
+        self.run_page.preview_cancel.cancel();
         self.login_busy = true;
         self.status = format!("登录中（{username}）…");
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, None);
+            let mut client = tx.client(identity, None);
             let msg = match crate::api::login::login(&mut client, &username, &password, &mut log) {
                 Ok(sess) => {
                     log(&format!(
@@ -222,9 +384,13 @@ impl App {
     }
 
     pub(crate) fn do_logout(&mut self) {
+        self.renew_session_jobs();
         let identity = self.identity.clone();
         let session = self.session.clone();
         self.session = None;
+        self.auth_expired = false;
+        self.begin_network_load();
+        self.osm_page.busy = false;
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
             if let Some(sess) = session {
@@ -243,14 +409,14 @@ impl App {
         let identity = self.identity.clone();
         self.ai_busy = true;
         self.status = "AI 列表拉取中…".into();
-        self.spawn_job(move |tx| {
+        self.spawn_session_job(move |tx| {
             let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            let mut client = tx.client(identity, Some(session));
             let payload = match crate::api::flow::run_ai_list(&mut client, &mut log) {
                 Ok(list) => serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
                 Err(e) => {
                     log(&format!("× AI 列表拉取失败: {e}"));
-                    "[]".to_string()
+                    serde_json::json!({"fetchError": e}).to_string()
                 }
             };
             tx.send(format!("{AI_LIST}{payload}")).ok();
@@ -265,14 +431,14 @@ impl App {
         let identity = self.identity.clone();
         self.records_busy = true;
         self.status = "记录拉取中…".into();
-        self.spawn_job(move |tx| {
+        self.spawn_session_job(move |tx| {
             let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            let mut client = tx.client(identity, Some(session));
             let payload = match crate::api::flow::run_records(&mut client, &mut log) {
                 Ok(rows) => serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()),
                 Err(e) => {
                     log(&format!("× 记录拉取失败: {e}"));
-                    "[]".to_string()
+                    serde_json::json!({"fetchError": e}).to_string()
                 }
             };
             tx.send(format!("{RECORDS}{payload}")).ok();
@@ -287,9 +453,9 @@ impl App {
         };
         let identity = self.identity.clone();
         self.user_busy = true;
-        self.spawn_job(move |tx| {
+        self.spawn_session_job(move |tx| {
             let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            let mut client = tx.client(identity, Some(session));
             let info = crate::api::user::fetch_my_info(&mut client, &mut log);
             let payload = serde_json::json!({
                 "profile": info.profile,
@@ -297,8 +463,9 @@ impl App {
                 "personal_semester": info.personal_semester,
                 "summary": info.summary,
                 "completed": info.completed,
+                "errors": info.errors,
             });
-            log("√ [user] 我的页数据已更新");
+            log(&info.refresh_message());
             tx.send(format!("{USER}{payload}")).ok();
             tx.send(format!("{USER}done")).ok();
         });
@@ -311,15 +478,21 @@ impl App {
         };
         let identity = self.identity.clone();
         self.records_page.detail_loading = true;
-        self.spawn_job(move |tx| {
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+        #[cfg(test)]
+        let detail_test_host = self.route_fixture.as_ref().map(|(host, _)| host.clone());
+        self.spawn_session_job(move |tx| {
+            let mut client = tx.client(identity, Some(session));
+            #[cfg(test)]
+            if let Some(host) = detail_test_host {
+                client.set_test_host(host);
+            }
             match crate::api::records::fetch_detail(&mut client, rrid) {
                 Ok(d) => {
                     let payload = serde_json::to_string(&d).unwrap_or_default();
                     tx.send(format!("{RUN_DETAIL}{payload}")).ok();
                 }
                 Err(e) => {
-                    let payload = serde_json::json!({ "statusInfo": format!("详情拉取失败：{e}") });
+                    let payload = serde_json::json!({ "rrid": rrid, "statusInfo": format!("详情拉取失败：{e}") });
                     tx.send(format!("{RUN_DETAIL}{payload}")).ok();
                 }
             }
@@ -333,8 +506,8 @@ impl App {
         };
         let identity = self.identity.clone();
         self.records_page.ai_detail_loading = true;
-        self.spawn_job(move |tx| {
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+        self.spawn_session_job(move |tx| {
+            let mut client = tx.client(identity, Some(session));
             let payload = match crate::api::ai::fetch_record_detail(&mut client, id) {
                 Ok(d) => d.to_string(),
                 Err(e) => serde_json::json!({ "fetchError": e }).to_string(),
@@ -351,16 +524,19 @@ impl App {
         };
         let identity = self.identity.clone();
         self.records_busy = true;
-        self.spawn_job(move |tx| {
+        self.spawn_session_job(move |tx| {
             let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            let mut client = tx.client(identity, Some(session));
             // 先拉项目列表
             let list = match crate::api::ai::fetch_list(&mut client) {
                 Ok(l) => l,
                 Err(e) => {
                     log(&format!("× [ai] 项目列表拉取失败: {e}"));
-                    tx.send(format!("{AI_RECORDS}{{\"groups\":[],\"total\":0}}"))
-                        .ok();
+                    tx.send(format!(
+                        "{AI_RECORDS}{}",
+                        serde_json::json!({"fetchError": e})
+                    ))
+                    .ok();
                     return;
                 }
             };
@@ -377,7 +553,15 @@ impl App {
                         }
                         total += page.total_count;
                     }
-                    Err(e) => log(&format!("× [ai] {} 拉取失败: {e}", sport.name)),
+                    Err(e) => {
+                        log(&format!("× [ai] {} 拉取失败: {e}", sport.name));
+                        tx.send(format!(
+                            "{AI_RECORDS}{}",
+                            serde_json::json!({"fetchError": e})
+                        ))
+                        .ok();
+                        return;
+                    }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
@@ -392,14 +576,19 @@ impl App {
 
     /// 学期 + 违规自查（登录 / 跑步提交成功后自动调用）。
     pub fn refresh_data_page(&mut self) {
+        if self.data_page.cheat_checking { return; }
         let Some(session) = self.session.clone() else {
+            self.status = "请先登录".into();
             return;
         };
+        self.data_page.cheat_checking = true;
+        self.data_page.cheat_error = None;
+        self.data_page.cheat = None;
         let identity = self.identity.clone();
         self.data_busy = true;
-        self.spawn_job(move |tx| {
+        self.spawn_session_job(move |tx| {
             let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            let mut client = tx.client(identity, Some(session));
             match crate::api::semester::query(&mut client, &mut log) {
                 Ok(r) => {
                     if let Some(s) = r.summary {
@@ -418,17 +607,21 @@ impl App {
                 }
                 Err(e) => {
                     log(&format!("× [semester] 拉取失败: {e}"));
-                    tx.send(format!("{SEMESTER}{{}}")).ok();
+                    tx.send(format!(
+                        "{SEMESTER}{}",
+                        serde_json::json!({"fetchError": e})
+                    ))
+                    .ok();
                 }
             }
             match crate::api::cheat::query(&mut client, 1, &mut log) {
                 Ok(r) => {
-                    let payload = serde_json::json!({ "self": r.self_info, "list": r.list });
+                    let payload = serde_json::to_value(&r).expect("CheatReport is serializable");
                     tx.send(format!("{CHEAT}{}", payload)).ok();
                 }
                 Err(e) => {
                     log(&format!("× [cheat] 检查失败: {e}"));
-                    tx.send(format!("{CHEAT}{{\"self\":null,\"list\":[]}}"))
+                    tx.send(format!("{CHEAT}{}", serde_json::json!({"fetchError": e})))
                         .ok();
                 }
             }
@@ -436,23 +629,27 @@ impl App {
     }
 
     pub fn refresh_cheat_only(&mut self) {
+        if self.data_page.cheat_checking { return; }
         let Some(session) = self.session.clone() else {
             self.status = "请先登录".into();
             return;
         };
+        self.data_page.cheat_checking = true;
+        self.data_page.cheat_error = None;
+        self.data_page.cheat = None;
         let identity = self.identity.clone();
         self.data_busy = true;
-        self.spawn_job(move |tx| {
+        self.spawn_session_job(move |tx| {
             let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            let mut client = tx.client(identity, Some(session));
             match crate::api::cheat::query(&mut client, 1, &mut log) {
                 Ok(r) => {
-                    let payload = serde_json::json!({ "self": r.self_info, "list": r.list });
+                    let payload = serde_json::to_value(&r).expect("CheatReport is serializable");
                     tx.send(format!("{CHEAT}{}", payload)).ok();
                 }
                 Err(e) => {
                     log(&format!("× [cheat] 检查失败: {e}"));
-                    tx.send(format!("{CHEAT}{{\"self\":null,\"list\":[]}}"))
+                    tx.send(format!("{CHEAT}{}", serde_json::json!({"fetchError": e})))
                         .ok();
                 }
             }
@@ -468,9 +665,9 @@ impl App {
         let identity = self.identity.clone();
         let kind = kind.to_string();
         self.data_busy = true;
-        self.spawn_job(move |tx| {
+        self.spawn_session_job(move |tx| {
             let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            let mut client = tx.client(identity, Some(session));
             let res: Result<Vec<crate::api::rank::RankRow>, String> = (|| {
                 match kind.as_str() {
                     "main" => {
@@ -503,7 +700,9 @@ impl App {
                 Ok(r) => r,
                 Err(e) => {
                     log(&format!("× [rank] 查询失败: {e}"));
-                    Vec::new()
+                    tx.send(format!("{RANK}{}", serde_json::json!({"fetchError": e})))
+                        .ok();
+                    return;
                 }
             };
             log(&format!("[rank] {} 行", rows.len()));
@@ -513,5 +712,40 @@ impl App {
             ))
             .ok();
         });
+    }
+}
+
+// Once map data is available, a metadata failure must not turn it into a map-load failure.
+fn finish_road_load(
+    loaded: Option<std::sync::Arc<route_planner::RoadGraph>>,
+    metadata: Result<(), String>,
+) -> (
+    Result<std::sync::Arc<route_planner::RoadGraph>, String>,
+    String,
+) {
+    match (loaded, metadata) {
+        (Some(net), Ok(())) => (Ok(net), String::new()),
+        (Some(net), Err(error)) => (
+            Ok(net),
+            format!("路线预览暂不可用：{error}；请在跑步页刷新围栏与点位"),
+        ),
+        (None, Err(error)) => (Err(error), String::new()),
+        (None, Ok(())) => (Err("路网数据为空".into()), String::new()),
+    }
+}
+
+#[cfg(test)]
+mod road_load_tests {
+    use super::*;
+    #[test]
+    fn metadata_failure_keeps_loaded_roads_but_download_failure_stays_an_error() {
+        let net = std::sync::Arc::new(route_planner::RoadGraph::new());
+        for error in ["定位未配置", "策略请求失败", "点位请求失败", "围栏请求失败"]
+        {
+            let (result, warning) = finish_road_load(Some(net.clone()), Err(error.into()));
+            assert!(std::sync::Arc::ptr_eq(&result.unwrap(), &net));
+            assert!(warning.contains(error));
+        }
+        assert!(finish_road_load(None, Err("下载失败".into())).0.is_err());
     }
 }

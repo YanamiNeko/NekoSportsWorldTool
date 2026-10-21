@@ -61,6 +61,16 @@ fn days_ago_label(days_ago: i64) -> String {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct PreviewInputs {
+    pub uid: i64,
+    pub unid: String,
+    pub anchor: crate::location::Coordinate,
+    pub points: Vec<(f64, f64)>,
+    pub fences: Vec<Vec<(f64, f64)>>,
+    pub loaded_ms: i64,
+}
+
 #[derive(Default)]
 pub struct RunPage {
     pub dist_min: f32,
@@ -85,8 +95,18 @@ pub struct RunPage {
     pub preview: Option<crate::track::generate_road::RoadPlan>,
     /// 预览是否过期（参数变更后置真）
     pub preview_stale: bool,
+    pub preview_inputs: Option<PreviewInputs>,
+    pub check: Option<route_planner::check::Check>,
+    pub progress: f32,
+    pub preview_busy: bool,
+    pub preview_cancel: std::sync::Arc<crate::task_control::Control>,
+    pub preview_key: String,
+    pub preview_changed_at: Option<std::time::Instant>,
+    pub preview_status: String,
     /// 地图视野是否已适配
     pub map_fitted: bool,
+    /// Request whose WGS84 base map currently owns the viewport; None means BD09 preview.
+    pub base_map_request: Option<u64>,
 }
 
 /// 一次提交的确定方案（进入页面/参数变更时抽样生成）。
@@ -107,7 +127,7 @@ pub struct RunPlan {
     /// 秒
     pub dur: i64,
     pub start_ms: i64,
-    /// 本次方案的随机种子（预览与提交共用，保证所见即所得）
+    /// 本次方案的随机种子（预览与提交共用；提交时仍须重新校验策略和点位）
     pub seed: u64,
 }
 
@@ -388,14 +408,13 @@ impl App {
                     ui.checkbox(&mut page.face_check, "faceCheck=1");
                 });
             });
-
             components::card_titled(ui, "路线与标记", |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("路线算法：");
                     ui.selectable_value(&mut page.route_mode, RouteMode::Legacy, "经典打卡点环");
                     ui.selectable_value(&mut page.route_mode, RouteMode::Road, "真实道路路由");
                     if page.route_mode == RouteMode::Road && need_osm {
-                        ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
+                        ui.colored_label(theme::warn(), "（正在按学校获取，可到路网页查看）");
                     }
                 });
             });
@@ -403,7 +422,6 @@ impl App {
 
         // 切换到真实道路路由时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
         if self.run_page.route_mode == RouteMode::Road && prev_route != RouteMode::Road {
-            self.refresh_fence();
             self.refresh_points();
         }
 
@@ -454,6 +472,19 @@ impl App {
 
         self.draw_run_map(ui);
 
+        ui.add_space(8.0);
+        if self.run_busy
+            && ui
+                .add_enabled(
+                    self.run_control.cancellable(),
+                    egui::Button::new("取消准备/轨迹生成"),
+                )
+                .clicked()
+        {
+            if self.run_control.cancel() {
+                self.status = "已请求取消；等待当前请求/计算结束，取消后不会进入记录提交".into();
+            }
+        }
         let enabled = !self.run_busy && self.session.is_some();
         let btn = if self.run_busy {
             theme::primary_btn("提交中…")
@@ -506,12 +537,35 @@ impl App {
 
     fn draw_run_map(&mut self, ui: &mut egui::Ui) {
         if self.run_page.route_mode != RouteMode::Road {
+            ui.label("经典模式仅按点位拟合，不包含建筑避让；需要沿道路行进时请选择真实道路模式。");
             return;
         }
+        if ui
+            .add_enabled(!self.osm_page.busy, egui::Button::new("刷新路线点位与围栏"))
+            .clicked()
+        {
+            self.refresh_points();
+        }
+        if !self.osm_page.status.is_empty() {
+            ui.label(&self.osm_page.status);
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("查看路网与校区").clicked() {
+                self.tab = 7;
+            }
+            if self.identity.has_unconfigured_default_location()
+                && ui.button("设置定位锚点").clicked()
+            {
+                self.tab = 5;
+            }
+        });
         let Some(net) = self.network.clone() else {
             ui.colored_label(
                 theme::warn(),
-                "未加载 OSM 路网，无法预览（请先到「路网」页导入）",
+                &format!(
+                    "学校路网尚未就绪：{}。可点击刷新，或到路网页自动获取。",
+                    self.osm_page.status
+                ),
             );
             return;
         };
@@ -519,38 +573,99 @@ impl App {
             return;
         };
 
-        if self.run_page.preview_stale {
+        let inputs = self
+            .run_page
+            .preview_inputs
+            .as_ref()
+            .filter(|input| {
+                self.osm_page.offline
+                    || (self
+                        .session
+                        .as_ref()
+                        .map(|s| s.uid == input.uid && s.unid == input.unid)
+                        .unwrap_or(false)
+                        && self
+                            .identity
+                            .anchor_coordinate()
+                            .map(|a| a == input.anchor)
+                            .unwrap_or(false)
+                        && (0..crate::api::model::POINTS_TTL_MS)
+                            .contains(&(crate::crypto::envelope::now_ms() - input.loaded_ms)))
+            })
+            .cloned();
+        let Some(inputs) = inputs else {
             self.run_page.preview = None;
-            self.run_page.map_fitted = false;
-            self.run_page.preview_stale = false;
-            // 点位缓存按锚点隔离（main 的串城市防护）；锚点无效时视为无缓存
-            let cached = self
-                .identity
-                .anchor_coordinate()
-                .ok()
-                .and_then(crate::api::model::load_points_cache_for);
-            if let Some((_ts, pts)) = cached {
-                let pts_bd = crate::api::points::points_bd(&pts);
-                if !pts_bd.is_empty() {
-                    let fences = crate::api::model::load_fence_cache().unwrap_or_default();
-                    match crate::track::generate_road::plan_road_view(
-                        &net,
-                        &pts_bd,
-                        plan.dist * 1000.0,
-                        plan.seed,
-                        &fences,
-                    ) {
-                        Ok(p) => self.run_page.preview = Some(p),
-                        Err(e) => self.status = format!("路线预览失败：{e}"),
-                    }
-                } else {
-                    self.status = "无打卡点缓存，提交后可回显轨迹".into();
-                }
+            self.run_page.check = None;
+            let message = if self.osm_page.busy {
+                "正在刷新学校围栏、策略与点位，请查看上方进度。"
+            } else if self.session.is_none() && !self.osm_page.offline {
+                "本地地图已加载；请先登录，再刷新路线点位与围栏。"
+            } else if self.identity.has_unconfigured_default_location() && !self.osm_page.offline {
+                "本地地图已加载；请设置定位锚点，再刷新路线点位与围栏。"
+            } else if self.run_page.preview_inputs.is_some() {
+                "路线数据已过期或账号/定位已改变，请刷新路线点位与围栏。"
             } else {
-                self.status = "无打卡点缓存，提交后可回显轨迹".into();
-            }
+                "地图已加载，但路线数据未就绪。请查看上方原因并刷新路线点位与围栏。"
+            };
+            ui.colored_label(theme::warn(), message);
+            self.draw_run_base_map(ui, &net);
+            return;
+        };
+        // A base map uses WGS84, while route inputs and previews use BD09.
+        if self.run_page.base_map_request.take().is_some() {
+            self.run_page.map_fitted = false;
+        }
+        self.prepare_preview(ui, net.clone(), &inputs, &plan);
+
+        if inputs.fences.is_empty() {
+            ui.colored_label(
+                theme::warn(),
+                "学校边界未提供：按道路闭环重复里程，无法确认路线始终在校内。",
+            );
         }
 
+        if let Some(check) = &self.run_page.check {
+            ui.label(format!(
+                "路线检查：{} 个道路连通分量；按当前顺序完整闭环最短距离 {}",
+                check.components,
+                check
+                    .minimum_m
+                    .map(|m| format!("{m:.0} 米"))
+                    .unwrap_or("未知".into())
+            ));
+            for issue in &check.issues {
+                ui.colored_label(theme::warn(), &issue.message);
+            }
+        }
+        if let Some(p) = &self.run_page.preview {
+            ui.label(format!(
+                "总距离 {:.2} km · 预计 {} 圈（返回起点计一圈，含末圈）",
+                plan.dist,
+                p.laps.len()
+            ));
+            ui.label(format!(
+                "点位顺序：{}",
+                (1..=p.checkpoints.len())
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" → ")
+            ));
+            ui.collapsing("每圈长度", |ui| {
+                for (i, length) in p.laps.iter().enumerate() {
+                    ui.label(format!(
+                        "第 {} 圈：{:.1} 米{}",
+                        i + 1,
+                        length,
+                        if i + 1 == p.laps.len() {
+                            "（可能为末圈）"
+                        } else {
+                            ""
+                        }
+                    ));
+                }
+            });
+            ui.add(egui::Slider::new(&mut self.run_page.progress, 0.0..=1.0).text("沿路线进度"));
+        }
         if self.run_page.preview.is_some() {
             super::map::legend(
                 ui,
@@ -591,6 +706,10 @@ impl App {
                     bounds.extend(p.checkpoints.iter().copied());
                 }
             }
+            if bounds.is_empty() {
+                bounds.extend(inputs.fences.iter().flatten().copied());
+                bounds.extend(inputs.points.iter().copied());
+            }
             if !bounds.is_empty() {
                 self.run_page.map.fit(canvas, &bounds);
                 self.run_page.map_fitted = true;
@@ -599,7 +718,11 @@ impl App {
 
         if let Some(p) = &self.run_page.preview {
             let road = egui::Color32::from_rgb(200, 208, 204);
-            for e in &p.edges {
+            for e in p.edges.iter().step_by(if self.run_page.map.scale < 0.1 {
+                (p.edges.len() / 4000).max(1)
+            } else {
+                1
+            }) {
                 self.run_page
                     .map
                     .draw_polyline(&painter, canvas, e, road, 1.0);
@@ -646,6 +769,20 @@ impl App {
                     4.5,
                 );
             }
+            if let Some(pos) = crate::track::route_view::position(
+                &p.route,
+                &p.arcs,
+                plan.dist * 1000. * self.run_page.progress as f64,
+            ) {
+                self.run_page.map.draw_point(
+                    &painter,
+                    canvas,
+                    pos.0,
+                    pos.1,
+                    egui::Color32::from_rgb(170, 20, 200),
+                    7.0,
+                );
+            }
             let label = if p.length_m > 0.0 {
                 let loops = plan.dist * 1000.0 / p.length_m;
                 if loops > 1.15 {
@@ -688,10 +825,89 @@ impl App {
             );
         }
 
+        if self.run_page.preview.is_none() {
+            for f in &inputs.fences {
+                self.run_page.map.draw_polygon(
+                    &painter,
+                    canvas,
+                    f,
+                    egui::Color32::from_rgb(180, 118, 0),
+                    2.0,
+                );
+            }
+            for &(lat, lon) in &inputs.points {
+                self.run_page
+                    .map
+                    .draw_point(&painter, canvas, lat, lon, egui::Color32::YELLOW, 4.);
+            }
+        }
+        if let Some(check) = &self.run_page.check {
+            for issue in &check.issues {
+                if let Some(pos) = issue.position {
+                    self.run_page.map.draw_point(
+                        &painter,
+                        canvas,
+                        pos.lat,
+                        pos.lon,
+                        egui::Color32::RED,
+                        7.,
+                    );
+                    painter.text(
+                        self.run_page.map.to_screen(canvas, pos.lat, pos.lon),
+                        egui::Align2::LEFT_BOTTOM,
+                        issue
+                            .point
+                            .map(|i| format!("点位 {}", i + 1))
+                            .unwrap_or("距离不足".into()),
+                        egui::FontId::proportional(12.),
+                        egui::Color32::RED,
+                    );
+                }
+            }
+        }
+        self.run_page.map.interact(ui, canvas);
+    }
+
+    fn draw_run_base_map(&mut self, ui: &mut egui::Ui, net: &route_planner::RoadGraph) {
+        ui.label("基础地图：道路与建筑已加载，路线尚未生成。可拖拽和滚轮缩放。");
+        super::map::legend(
+            ui,
+            &[
+                ("道路", egui::Color32::from_rgb(190, 200, 196)),
+                ("建筑", egui::Color32::from_rgb(214, 182, 158)),
+            ],
+        );
+        let (response, painter) = ui.allocate_painter(
+            egui::vec2(ui.available_width().max(200.), 240.),
+            egui::Sense::drag(),
+        );
+        let canvas = response.rect;
+        if self.run_page.base_map_request != Some(self.osm_page.request_id) {
+            let mut bounds: Vec<_> = net
+                .graph
+                .node_weights()
+                .map(|n| (n.coord.lat, n.coord.lon))
+                .collect();
+            bounds.extend(net.buildings.iter().flatten().map(|p| (p.lat, p.lon)));
+            self.run_page.map.fit(canvas, &bounds);
+            self.run_page.base_map_request = Some(self.osm_page.request_id);
+            self.run_page.map_fitted = false;
+        }
+        painter.rect_filled(
+            canvas,
+            egui::Rounding::ZERO,
+            egui::Color32::from_rgb(250, 252, 251),
+        );
+        self.run_page.map.draw_network(&painter, canvas, net);
         self.run_page.map.interact(ui, canvas);
     }
 
     fn start_run(&mut self) {
+        if self.run_busy { return; }
+        if self.run_page.route_mode == RouteMode::Road && self.network.is_none() {
+            self.status = "请先加载路网并刷新路线点位".into();
+            return;
+        }
         // 参数变更时补齐方案；提交直接使用预计算值
         self.run_page.ensure_plan();
         let page = &mut self.run_page;
@@ -738,11 +954,13 @@ impl App {
             }
         };
         self.run_busy = true;
+        self.run_control = std::sync::Arc::new(crate::task_control::Control::default());
+        let control = self.run_control.clone();
         self.status = "跑步提交中…".into();
         let seed = plan.seed;
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
+            let mut client = tx.client(identity, Some(session));
             let params = crate::api::flow::RunParams {
                 dist,
                 dur,
@@ -753,15 +971,28 @@ impl App {
                 seed,
                 route_mode,
             };
-            let payload = match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
+            let payload = match crate::api::flow::run_full_flow_cancellable(
+                &mut client,
+                &params,
+                &mut |s| {
+                    if s.starts_with('[') && control.check().is_ok() {
+                        let _ = tx.send(format!("__RUN_STAGE__{s}"));
+                    }
+                    log(s);
+                },
+                &control,
+            ) {
                 Ok(out) => {
                     log(&format!(
                         "全链完成 rrid={} obs={}/2 verify={} uuid={}",
-                        out.result.rrid, out.obs_ok, out.detail_ok, out.result.uuid
+                        out.result.rrid,
+                        out.obs_ok,
+                        out.verification.label(),
+                        out.result.uuid
                     ));
                     serde_json::json!({
                         "ok": true, "rrid": out.result.rrid,
-                        "obs_ok": out.obs_ok, "verify": out.detail_ok,
+                        "obs_ok": out.obs_ok, "verification": out.verification,
                         "uuid": out.result.uuid,
                         "dist": out.result.total_dis, "dur": out.result.total_time,
                         "steps": out.result.total_steps, "avg_step_freq": out.result.avg_step_freq,
@@ -771,7 +1002,7 @@ impl App {
                 }
                 Err(e) => {
                     log(&format!("跑步提交失败: {e}"));
-                    serde_json::json!({ "ok": false, "message": e })
+                    serde_json::json!({ "ok": false, "message": crate::road_status::explain(&e) })
                 }
             };
             tx.send(format!("__RUN_DONE__{payload}")).ok();
@@ -942,16 +1173,18 @@ mod tests {
         p.regen_plan();
         let plan = p.plan.clone().unwrap();
 
-        let today = now.date_naive();
-        let want = Local
-            .with_ymd_and_hms(today.year(), today.month(), today.day(), 23, 59, 0)
-            .single()
-            .unwrap()
-            .timestamp_millis();
-        let now_ms = crate::crypto::envelope::now_ms();
-        assert_eq!(
-            plan.start_ms,
-            want.min(now_ms),
+        // Generation reads the clock between these two observations; requiring
+        // equality to a later millisecond makes this test intermittently fail.
+        let expected_at = |at: chrono::DateTime<Local>| {
+            Local
+                .with_ymd_and_hms(at.year(), at.month(), at.day(), 23, 59, 0)
+                .single()
+                .unwrap()
+                .timestamp_millis()
+                .min(at.timestamp_millis())
+        };
+        assert!(
+            (expected_at(now)..=expected_at(Local::now())).contains(&plan.start_ms),
             "指定时刻未按 min(填入, 现在) 处理"
         );
         assert_start_not_future(&plan);

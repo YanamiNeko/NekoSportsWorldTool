@@ -31,6 +31,22 @@ impl Default for MapState {
 }
 
 impl MapState {
+    pub fn world_bounds(&self, rect: Rect) -> (route_planner::Coord, route_planner::Coord) {
+        let x = |screen: f32| {
+            self.center.1
+                + (screen - rect.center().x - self.offset.x) as f64
+                    / (self.scale as f64 * MET_PER_DEG_LNG)
+        };
+        let y = |screen: f32| {
+            self.center.0
+                - (screen - rect.center().y - self.offset.y) as f64
+                    / (self.scale as f64 * MET_PER_DEG_LAT)
+        };
+        (
+            route_planner::Coord::new(x(rect.left()), y(rect.bottom())),
+            route_planner::Coord::new(x(rect.right()), y(rect.top())),
+        )
+    }
     /// 依据一组点（lat, lon）自动适配视野。
     pub fn fit(&mut self, rect: Rect, pts: &[(f64, f64)]) {
         if pts.len() < 2 {
@@ -86,7 +102,7 @@ impl MapState {
                 .map(|p| rect.contains(p))
                 .unwrap_or(false);
             let dragging = hover && i.pointer.primary_down() && i.pointer.is_decidedly_dragging();
-            (dragging, i.raw_scroll_delta.y)
+            (dragging, if hover { i.raw_scroll_delta.y } else { 0.0 })
         });
         if drag {
             let d = ui.input(|i| i.pointer.delta());
@@ -108,6 +124,22 @@ impl MapState {
         width: f32,
     ) {
         if pts.len() < 2 {
+            return;
+        }
+        let (a, b) = self.world_bounds(rect);
+        let (mut minlat, mut maxlat, mut minlon, mut maxlon) = (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for &(lat, lon) in pts {
+            minlat = minlat.min(lat);
+            maxlat = maxlat.max(lat);
+            minlon = minlon.min(lon);
+            maxlon = maxlon.max(lon);
+        }
+        if maxlon < a.lon || minlon > b.lon || maxlat < a.lat || minlat > b.lat {
             return;
         }
         let ps: Vec<Pos2> = pts
@@ -148,6 +180,51 @@ impl MapState {
         let c = self.to_screen(rect, lat, lon);
         painter.circle_filled(c, radius, color);
     }
+
+    /// Draw the unmodified WGS84 OSM graph, without school API data or route planning.
+    pub fn draw_network(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        net: &route_planner::RoadGraph,
+    ) {
+        let road_color = Color32::from_rgb(190, 200, 196);
+        let (min, max) = self.world_bounds(rect);
+        let visible = net.visible_edges(min, max);
+        let stride = if self.scale < 0.1 {
+            (visible.len() / 4000).max(1)
+        } else {
+            1
+        };
+        for edge in visible.iter().step_by(stride) {
+            self.draw_polyline(
+                painter,
+                rect,
+                &[(edge[0].lat, edge[0].lon), (edge[1].lat, edge[1].lon)],
+                road_color,
+                1.0,
+            );
+        }
+        if stride > 1 {
+            painter.text(
+                rect.left_top() + egui::vec2(6., 6.),
+                egui::Align2::LEFT_TOP,
+                "缩小视野：道路显示已简化",
+                egui::FontId::proportional(12.),
+                road_color,
+            );
+        }
+        for building in &net.buildings {
+            let points: Vec<_> = building.iter().map(|c| (c.lat, c.lon)).collect();
+            self.draw_polygon(
+                painter,
+                rect,
+                &points,
+                Color32::from_rgb(214, 182, 158),
+                1.0,
+            );
+        }
+    }
 }
 
 /// 收集一组折线/环的所有点，用于 fit。
@@ -163,7 +240,7 @@ pub fn collect_bounds(edges: &[Vec<(f64, f64)>]) -> Vec<(f64, f64)> {
 
 /// 地图图例：颜色方块 + 说明文字。
 pub fn legend(ui: &mut egui::Ui, items: &[(&str, Color32)]) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("图例：");
         for (label, color) in items {
             let (rect, _) = ui.allocate_exact_size(Vec2::new(10.0, 10.0), egui::Sense::hover());

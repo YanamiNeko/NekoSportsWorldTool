@@ -75,16 +75,41 @@ pub struct RoadGraph {
     pub meter_per_lng: f64,
     /// 建筑外环（度）。
     pub buildings: Vec<Vec<Coord>>,
+    /// 校园边界，工作坐标系；非空时禁止平滑/采样切出边界。
+    pub boundaries: Vec<Vec<Coord>>,
     index: RTree<Seg>,
 }
 
 impl RoadGraph {
+    /// Drawing-only spatial query. Routing always retains the complete graph.
+    pub fn visible_edges(&self, min: Coord, max: Coord) -> Vec<[Coord; 2]> {
+        let a = self.to_m(min);
+        let b = self.to_m(max);
+        let bounds = AABB::from_corners(
+            [a[0].min(b[0]), a[1].min(b[1])],
+            [a[0].max(b[0]), a[1].max(b[1])],
+        );
+        let mut seen = std::collections::HashSet::new();
+        self.index
+            .locate_in_envelope_intersecting(&bounds)
+            .filter_map(|e| {
+                let key = (
+                    e.from.index().min(e.to.index()),
+                    e.from.index().max(e.to.index()),
+                );
+                seen.insert(key)
+                    .then(|| [self.node_coord(e.from), self.node_coord(e.to)])
+            })
+            .collect()
+    }
+
     pub fn new() -> Self {
         RoadGraph {
             graph: DiGraph::new(),
             anchor: Coord::new(0.0, 0.0),
             meter_per_lng: MET_PER_DEG_LNG_EQ,
             buildings: Vec::new(),
+            boundaries: Vec::new(),
             index: RTree::new(),
         }
     }

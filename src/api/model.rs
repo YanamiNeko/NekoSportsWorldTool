@@ -46,6 +46,8 @@ impl Session {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub school_campus: Option<super::campus::Selection>,
+    #[serde(default)]
     pub username: String,
     #[serde(default)]
     pub password: String,
@@ -108,6 +110,7 @@ fn default_update_check() -> String {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            school_campus: None,
             username: String::new(),
             password: String::new(),
             remember: false,
@@ -388,20 +391,45 @@ mod storage_tests {
 /// 点位缓存：{ts_ms, points}，TTL 300s（服务端限流 10603：5 分钟 3 次）。
 pub const POINTS_TTL_MS: i64 = 300_000;
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PointsCacheScope {
+    pub uid: i64,
+    pub unid: String,
+    pub run_area_id: Option<String>,
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PointsCache {
     ts: i64,
     anchor: crate::location::Coordinate,
+    scope: PointsCacheScope,
     points: Vec<serde_json::Value>,
 }
 
-/// 只返回与本次锚点相同的缓存。旧版未记录锚点的缓存会自然失效，避免串城市。
+impl PointsCache {
+    fn matches(
+        &self,
+        anchor: crate::location::Coordinate,
+        scope: &PointsCacheScope,
+        now: i64,
+    ) -> bool {
+        self.scope == *scope
+            && self.anchor.is_near(anchor, 0.0001)
+            && !self.points.is_empty()
+            && now
+                .checked_sub(self.ts)
+                .is_some_and(|age| (0..POINTS_TTL_MS).contains(&age))
+    }
+}
+
+/// 旧版未记录账号、学校、区域的缓存自然失效；拒绝过期或来自未来的缓存。
 pub fn load_points_cache_for(
     anchor: crate::location::Coordinate,
+    scope: &PointsCacheScope,
 ) -> Option<(i64, Vec<serde_json::Value>)> {
     let v: serde_json::Value = read_json("points_cache.json")?;
     let cache: PointsCache = serde_json::from_value(v).ok()?;
-    if !cache.anchor.is_near(anchor, 0.0001) {
+    if !cache.matches(anchor, scope, crate::crypto::envelope::now_ms()) {
         return None;
     }
     let ts = cache.ts;
@@ -411,11 +439,13 @@ pub fn load_points_cache_for(
 
 pub fn save_points_cache(
     anchor: crate::location::Coordinate,
+    scope: &PointsCacheScope,
     points: &[serde_json::Value],
 ) -> Result<(), String> {
     let doc = PointsCache {
         ts: crate::crypto::envelope::now_ms(),
         anchor,
+        scope: scope.clone(),
         points: points.to_vec(),
     };
     write_json("points_cache.json", &doc)
@@ -429,8 +459,41 @@ mod points_cache_tests {
         let cache = PointsCache {
             ts: 1,
             anchor: crate::location::Coordinate::new(39.9, 116.4, 0.0).unwrap(),
-            points: vec![],
+            scope: PointsCacheScope {
+                uid: 1,
+                unid: "school".into(),
+                run_area_id: None,
+            },
+            points: vec![serde_json::json!({"lat":39.9,"lon":116.4})],
         };
+        assert!(cache.matches(cache.anchor, &cache.scope, 1));
+        assert!(cache.matches(cache.anchor, &cache.scope, POINTS_TTL_MS));
+        assert!(!cache.matches(cache.anchor, &cache.scope, POINTS_TTL_MS + 1));
+        assert!(!cache.matches(cache.anchor, &cache.scope, 0));
+        for scope in [
+            PointsCacheScope {
+                uid: 2,
+                ..cache.scope.clone()
+            },
+            PointsCacheScope {
+                unid: "other".into(),
+                ..cache.scope.clone()
+            },
+            PointsCacheScope {
+                run_area_id: Some("42".into()),
+                ..cache.scope.clone()
+            },
+        ] {
+            assert!(!cache.matches(cache.anchor, &scope, 1));
+        }
+        assert!(!cache.matches(
+            crate::location::Coordinate::new(38.9, 121.5, 0.0).unwrap(),
+            &cache.scope,
+            1
+        ));
+        let mut old = serde_json::to_value(&cache).unwrap();
+        old.as_object_mut().unwrap().remove("scope");
+        assert!(serde_json::from_value::<PointsCache>(old).is_err());
         let decoded: PointsCache =
             serde_json::from_value(serde_json::to_value(cache).unwrap()).unwrap();
         assert!(decoded.anchor.is_near(
@@ -442,18 +505,4 @@ mod points_cache_tests {
             0.0001
         ));
     }
-}
-
-/// 围栏缓存：拉取成功后落盘，UI 预览无网时兜底。
-pub fn load_fence_cache() -> Option<Vec<Vec<(f64, f64)>>> {
-    let v: serde_json::Value = read_json("fence_cache.json")?;
-    serde_json::from_value(v.get("fences")?.clone()).ok()
-}
-
-pub fn save_fence_cache(fences: &[Vec<(f64, f64)>]) -> Result<(), String> {
-    let doc = serde_json::json!({
-        "ts": crate::crypto::envelope::now_ms(),
-        "fences": fences,
-    });
-    write_json("fence_cache.json", &doc)
 }

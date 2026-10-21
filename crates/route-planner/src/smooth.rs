@@ -46,7 +46,9 @@ fn corner_fillet(
     let cross = dir_in[0] * dir_out[1] - dir_in[1] * dir_out[0];
     let dot = dir_in[0] * dir_out[0] + dir_in[1] * dir_out[1];
     let delta = cross.atan2(dot);
-    if delta.abs() < threshold_rad {
+    // A reversal has no finite tangent fillet: tan(pi/2) would cut halfway
+    // along the incoming edge and silently skip the turnaround checkpoint.
+    if delta.abs() < threshold_rad || std::f64::consts::PI - delta.abs() < 1e-6 {
         return None;
     }
     let d = (radius * (delta.abs() / 2.0).tan())
@@ -67,6 +69,18 @@ fn corner_fillet(
 struct Smoothed {
     pts: Vec<[f64; 2]>,
     k: Vec<f64>,
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[test]
+    fn reversal_preserves_turnaround_checkpoint() {
+        let pts = [[0.0, 0.0], [100.0, 0.0], [0.0, 0.0]];
+        let route = smooth_polyline(&pts, 6.0, 0.1);
+        assert!(route.pts.contains(&pts[1]));
+        assert_eq!(route.pts.last(), Some(&pts[2]));
+    }
 }
 
 fn push_line(out: &mut Smoothed, from: [f64; 2], to: [f64; 2]) {

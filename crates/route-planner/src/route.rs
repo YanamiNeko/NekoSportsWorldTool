@@ -15,6 +15,8 @@ use crate::graph::{angle_diff, bearing, dist, Coord, RoadGraph};
 
 #[derive(Clone, Debug)]
 pub struct RouteOptions {
+    /// Plan one closed checkpoint circuit; callers repeat it for extra mileage.
+    pub repeat_checkpoint_loop: bool,
     /// 最大向心加速度 m/s²（弯道限速）。
     pub a_c_max: f64,
     /// 转弯切角阈值（度）。
@@ -32,6 +34,7 @@ pub struct RouteOptions {
 impl Default for RouteOptions {
     fn default() -> Self {
         RouteOptions {
+            repeat_checkpoint_loop: false,
             a_c_max: 2.5,
             turn_threshold_deg: 30.0,
             min_radius_m: 6.0,
@@ -153,7 +156,9 @@ fn directional_walk(
         if candidates.is_empty() {
             // 死胡同：允许折返一次
             if let Some(prev) = prev_node {
-                candidates.push((prev, 1e6));
+                if g.graph.find_edge(current, prev).is_some() {
+                    candidates.push((prev, 1e6));
+                }
             }
         }
         if candidates.is_empty() {
@@ -268,6 +273,32 @@ pub fn plan_loop(
         cur = t;
     }
 
+    if opts.repeat_checkpoint_loop {
+        let mut path = vec![start];
+        let mut current = start;
+        for target in must_pass.iter().copied().chain(std::iter::once(start)) {
+            let segment =
+                shortest_path(g, current, target).ok_or("点位无法形成可返回起点的道路闭环")?;
+            path.extend(segment.into_iter().skip(1));
+            current = target;
+        }
+        if path.len() < 2 {
+            // One distinct checkpoint still needs a real, returnable road circuit.
+            let neighbor = g
+                .graph
+                .neighbors(start)
+                .filter(|n| *n != start)
+                .filter_map(|n| shortest_path(g, n, start).map(|home| (n, home)))
+                .min_by(|(a, _), (b, _)| {
+                    dist_nodes(g, start, *a).total_cmp(&dist_nodes(g, start, *b))
+                })
+                .ok_or("点位附近没有可返回起点的道路")?;
+            path.push(neighbor.0);
+            path.extend(neighbor.1.into_iter().skip(1));
+        }
+        return Ok(path);
+    }
+
     let mut best: Option<Vec<NodeIndex>> = None;
     let mut best_key: Option<(f64, u32)> = None;
     for i in 0..RETRIES {
@@ -281,7 +312,12 @@ pub fn plan_loop(
             &mut rng,
             opts,
         );
-        if path.len() < 2 {
+        if path.len() < 2
+            || path.last() != Some(&start)
+            || !path
+                .windows(2)
+                .all(|p| g.graph.find_edge(p[0], p[1]).is_some())
+        {
             continue;
         }
         let (repeats, len) = repeat_cost(g, &path);
@@ -305,4 +341,35 @@ pub fn plan_loop(
 /// 节点路径 → 度系折线坐标（供 UI/平滑使用）。
 pub fn path_coords(g: &RoadGraph, path: &[NodeIndex]) -> Vec<Coord> {
     path.iter().map(|&n| g.node_coord(n)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn repeat_loop_requires_a_return_path_even_for_a_single_checkpoint() {
+        let mut g = RoadGraph::new();
+        let a = g.add_node(Coord::new(116.4, 39.9));
+        let b = g.add_node(Coord::new(116.401, 39.9));
+        g.compute_anchor();
+        let edge = crate::graph::EdgeData {
+            way_id: 1,
+            oneway: true,
+            highway: "footway".into(),
+            maxspeed_kmh: None,
+            length_m: 85.,
+        };
+        g.add_edge(a, b, edge.clone());
+        let opts = RouteOptions {
+            repeat_checkpoint_loop: true,
+            ..Default::default()
+        };
+        assert!(plan_loop(&g, a, &[b], &[], 5000., 1, &opts).is_err());
+        assert!(plan_loop(&g, a, &[a], &[], 5000., 1, &opts).is_err());
+        g.add_edge(b, a, edge);
+        assert_eq!(
+            plan_loop(&g, a, &[a], &[], 5000., 1, &opts).unwrap(),
+            vec![a, b, a]
+        );
+    }
 }

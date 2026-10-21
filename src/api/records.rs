@@ -45,7 +45,7 @@ pub fn fetch_records(client: &mut ApiClient) -> Result<Vec<RecordRow>, String> {
     Ok(arr
         .iter()
         .map(|r| RecordRow {
-            rrid: r.get("rrid").and_then(|v| v.as_i64()).unwrap_or(0),
+            rrid: r.get("rrid").and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok())).unwrap_or(0),
             total_dis: r.get("totalDis").and_then(|v| v.as_f64()).unwrap_or(0.0),
             total_time: r.get("totalTime").and_then(|v| v.as_i64()).unwrap_or(0),
             start_time: r.get("startTime").and_then(|v| v.as_i64()).unwrap_or(0),
@@ -111,6 +111,11 @@ pub struct ReasonItem {
 /// 拉取单条详情并解析为结构体。
 pub fn fetch_detail(client: &mut ApiClient, rrid: i64) -> Result<RunDetail, String> {
     let raw = fetch_one_record(client, rrid)?;
+    if let Some(id) = raw.get("rrid") {
+        if id.as_i64().or_else(|| id.as_str()?.parse().ok()) != Some(rrid) {
+            return Err("详情返回的记录编号与请求不一致，请刷新重试".into());
+        }
+    }
     let reasons: Vec<ReasonItem> = raw
         .get("reasonList")
         .and_then(|v| v.as_array())
@@ -124,7 +129,7 @@ pub fn fetch_detail(client: &mut ApiClient, rrid: i64) -> Result<RunDetail, Stri
         })
         .unwrap_or_default();
     Ok(RunDetail {
-        rrid: raw.get("rrid").and_then(|v| v.as_i64()).unwrap_or(rrid),
+        rrid,
         uuid: raw.get("uuid").and_then(|v| v.as_str()).unwrap_or("").into(),
         sport_type: raw.get("sportType").and_then(|v| v.as_i64()).unwrap_or(0),
         total_time: raw.get("totalTime").and_then(|v| v.as_f64()).unwrap_or(0.0) as i64,

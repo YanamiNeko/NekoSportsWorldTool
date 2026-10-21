@@ -1,67 +1,35 @@
 //! 跑步提交：POST /api/v70260/runnings/save/record。
 //! Android 身份 + runes/runef 头；body 31+ 字段 + signature/originalSign。
 
-use super::client::{check_business, ureq_err, ApiClient};
-use super::model::HOST;
+use super::client::{check_business, ApiClient};
 use crate::crypto::decrypt::{decrypt_response, derive_paes_key};
-use crate::crypto::envelope::{
-    build_envelope, build_envelope_ts, rsa_public_key, OuterOrder,
-};
+use crate::crypto::envelope::{build_envelope, build_envelope_ts, rsa_public_key, OuterOrder};
 use crate::crypto::header::{build_android_header, HeaderIdentity, UA_ANDROID};
 use crate::crypto::sign::{original_sign, signature};
 use crate::track::calorie::{avg_power, official_kcal};
 use crate::track::geom::round_to;
 use crate::track::model::{GenPoint, Track};
 use crate::track::wire::validate_five_point_wrapper;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 pub const RECORD_PATH: &str = "/api/v70260/runnings/save/record";
 
-/// Android 10s 窗（id 种子 60000）。
-fn android_tensec(track: &Track, start_ms: i64, kind: &str) -> Vec<Value> {
-    let locs = &track.locations;
-    let total_time = track.totalTime;
-    let mut out = Vec::new();
-    let rid_seed = 60000i64;
-    let mut w = 10i64;
-    while w <= total_time {
-        let lo = w - 10;
-        let hi = w.min(total_time);
-        let mut d_lo = 0.0f64;
-        let mut s_lo = 0i64;
-        let mut d_hi = 0.0f64;
-        let mut s_hi = 0i64;
-        for p in locs {
-            let tt = p.totalTime;
-            if tt <= lo {
-                d_lo = p.totalDis;
-                s_lo = p.steps;
-            }
-            if tt <= hi {
-                d_hi = p.totalDis;
-                s_hi = p.steps;
-            }
+/// Record pace uses thousandths of a minute/km; OBS laps use seconds/km.
+fn pace_speed_value(seconds: i64, meters: f64) -> i64 {
+    let distance = (meters * 100.0).ceil() / 100.0;
+    (seconds as f64 / 60.0 / (distance / 1000.0) * 1000.0).round() as i64
+}
+
+fn submit_windows(track: &Track) -> (Vec<Value>, Vec<Value>) {
+    let (mut speed, mut steps) = crate::track::wire::build_windows(track, 0);
+    // Submit IDs and queue numbers differ from the OBS wire format; metrics do not.
+    for values in [&mut speed, &mut steps] {
+        for (i, value) in values.iter_mut().enumerate() {
+            value["id"] = Value::from(60000 + i as i64);
+            value["queueNum"] = Value::from(i);
         }
-        let dist = round_to((d_hi - d_lo).max(0.0), 4);
-        let steps_n = (s_hi - s_lo).max(0);
-        let begin = start_ms + lo * 1000;
-        let end = start_ms + hi * 1000;
-        let qn = w / 10 - 1;
-        if kind == "speed" {
-            out.push(json!({
-                "beginTime": begin, "distance": dist, "endTime": end,
-                "flag": start_ms, "id": rid_seed + qn, "queueNum": qn, "state": 0,
-            }));
-        } else {
-            out.push(json!({
-                "avgDiff": 0.0, "beginTime": begin, "endTime": end,
-                "flag": start_ms, "id": rid_seed + qn, "maxDiff": 0.0,
-                "minDiff": 1000.0, "queueNum": qn, "state": 0, "stepsNum": steps_n,
-            }));
-        }
-        w += 10;
     }
-    out
+    (speed, steps)
 }
 
 /// bdA 正差分累计。
@@ -105,11 +73,79 @@ pub struct SubmitResult {
 }
 
 /// 提交跑步记录（sportType=1 自由跑 + 实时五点）。
-pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnMut(&str)) -> Result<SubmitResult, String> {
+pub fn submit_record(
+    client: &mut ApiClient,
+    p: &SubmitParams,
+    log: &mut dyn FnMut(&str),
+) -> Result<SubmitResult, String> {
+    client.ensure_session_valid()?;
+    let session = client.login.as_ref().ok_or("未登录")?;
+    if session.uid != p.uid || session.unid.parse::<i64>().ok() != Some(p.selected_unid) {
+        return Err("提交账号或学校与当前会话不一致".into());
+    }
+    p.track.validate_consistency()?;
+    validate_five_point_wrapper(&p.five_point_json)?;
+    let stop_ms = p.track.totalTime.checked_mul(1000)
+        .and_then(|n| p.track.startTime.checked_add(n)).ok_or("时间范围溢出")?;
+    let mut guard = super::submission_guard::Guard::open(p.uid, p.selected_unid)?;
+    if guard.has_pending() {
+        match super::records::fetch_records(client) {
+            Ok(rows) => {
+                for id in guard.reconcile(&rows)? { log(&format!("[record] 已核对先前记录 #{id}")); }
+            }
+            Err(e) => log(&format!("[record] 只读核对失败：{e}")),
+        }
+    }
+    let run_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
+    guard.begin(&run_uuid, p.track.startTime, stop_ms)?;
+    match send_record(client, p, run_uuid.clone(), log) {
+        Ok(result) => {
+            if let Err(e) = guard.accepted(&run_uuid, result.rrid) {
+                log(&format!("[record] 服务端已接收记录 #{}，但本地回执保存失败：{e}。请勿重复提交", result.rrid));
+            }
+            Ok(result)
+        }
+        Err(SubmitFailure::Rejected(error)) => {
+            guard.rejected(&run_uuid)?;
+            Err(format!("服务端明确拒绝本次提交：{error}"))
+        }
+        Err(SubmitFailure::Unknown(error)) => {
+            log("[record] 提交响应不确定，正在只读核对记录；不会再次发送提交请求");
+            match super::records::fetch_records(client) {
+                Ok(rows) => {
+                    let found = guard.reconcile(&rows)?;
+                    if let Some(id) = found.first() {
+                        return Err(format!("响应不确定，但已找到本次记录 #{id}。未重复提交，未补传 OBS；请到运动记录查看详情"));
+                    }
+                }
+                Err(e) => log(&format!("[record] 只读核对失败：{e}")),
+            }
+            Err(format!("提交结果未知：{error}。已保留本地请求回执并阻止再次提交；请到运动记录刷新核对，未查到不代表未入账"))
+        }
+    }
+}
+
+enum SubmitFailure { Rejected(String), Unknown(String) }
+impl From<String> for SubmitFailure {
+    fn from(error: String) -> Self { Self::Unknown(error) }
+}
+impl From<&str> for SubmitFailure {
+    fn from(error: &str) -> Self { Self::Unknown(error.into()) }
+}
+
+fn send_record(
+    client: &mut ApiClient,
+    p: &SubmitParams,
+    run_uuid: String,
+    log: &mut dyn FnMut(&str),
+) -> Result<SubmitResult, SubmitFailure> {
     let track = &p.track;
     let start_coordinate = track.validate_consistency()?;
-    if p.five_point_json.is_empty() { return Err("五点轨迹不能为空".into()); }
+    if p.five_point_json.is_empty() {
+        return Err("五点轨迹不能为空".into());
+    }
     validate_five_point_wrapper(&p.five_point_json)?;
+    let (speed_windows, step_windows) = submit_windows(track);
     let total_time = track.totalTime;
     let total_dis = track.totalDistance;
     let total_steps = track.totalSteps;
@@ -119,11 +155,9 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     let power = avg_power(p.weight, total_dis, total_time);
     let kcal = official_kcal(p.weight, total_time, total_dis);
 
-    let run_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
     let unid = p.selected_unid;
 
-    let dis_ceil = (total_dis * 100.0).ceil() / 100.0;
-    let speed = (round_to(total_time as f64 / dis_ceil * 50.0 / 3.0, 2) * 1024.0) as i64;
+    let speed = pace_speed_value(total_time, total_dis);
     let avg_step_freq = 1i64.max(round_to(total_steps as f64 / total_time as f64 * 60.0, 0) as i64);
 
     let mut body = Map::new();
@@ -140,10 +174,16 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     body.insert("selectedUnid".into(), Value::from(unid));
     body.insert("selRunTime".into(), Value::from(total_time));
     body.insert("selDistance".into(), Value::from(p.min_distance));
-    body.insert("totalDis".into(), Value::from(round_to(total_dis, 0) as i64));
+    body.insert(
+        "totalDis".into(),
+        Value::from(round_to(total_dis, 0) as i64),
+    );
     body.insert("speed".into(), Value::from(speed));
-    body.insert("validDis".into(), Value::from(round_to(total_dis, 0) as i64));
-    body.insert("validTime".into(), Value::from(total_time));
+    body.insert(
+        "validDis".into(),
+        Value::from(round_to(track.validDistance, 0) as i64),
+    );
+    body.insert("validTime".into(), Value::from(track.validTime));
     body.insert("complete".into(), Value::Bool(true));
     body.insert("unCompleteReason".into(), Value::from(0));
     body.insert("calorie".into(), Value::from(kcal));
@@ -151,10 +191,13 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     body.insert("avgStepFreq".into(), Value::from(avg_step_freq));
     body.insert("useMobilityTools".into(), Value::from(0));
     body.insert("faceCheck".into(), Value::from(p.face_check));
-    body.insert("totalAscent".into(), Value::from(round_to(ascent, 0) as i64));
+    body.insert(
+        "totalAscent".into(),
+        Value::from(round_to(ascent, 0) as i64),
+    );
     body.insert("avgPower".into(), Value::from(power));
-    body.insert("speedPerTenSec".into(), Value::Array(android_tensec(track, start_ms, "speed")));
-    body.insert("stepsPerTenSec".into(), Value::Array(android_tensec(track, start_ms, "steps")));
+    body.insert("speedPerTenSec".into(), Value::Array(speed_windows));
+    body.insert("stepsPerTenSec".into(), Value::Array(step_windows));
     body.insert("isUpload".into(), Value::Bool(false));
     body.insert("more".into(), Value::Bool(false));
     body.insert("latitude".into(), Value::from(start_coordinate.latitude));
@@ -162,7 +205,10 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     body.insert("maxRunTime".into(), Value::from(0));
     body.insert("minSteps".into(), Value::from(0));
     if !p.five_point_json.is_empty() {
-        body.insert("fivePointJson".into(), Value::String(p.five_point_json.clone()));
+        body.insert(
+            "fivePointJson".into(),
+            Value::String(p.five_point_json.clone()),
+        );
     }
     // Android 必现扩展字段
     body.insert("errorCode".into(), Value::from(0));
@@ -170,7 +216,10 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     body.insert("unauthorized".into(), Value::from(0));
     body.insert("themeId".into(), Value::from(0));
     body.insert("goalId".into(), Value::Null);
-    body.insert("address".into(), Value::String(p.address.trim().to_string()));
+    body.insert(
+        "address".into(),
+        Value::String(p.address.trim().to_string()),
+    );
 
     let body_val = Value::Object(body.clone());
     let sig = signature(&body_val, false);
@@ -191,14 +240,21 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
         device_name: "22081212C".into(),
         ..client.identity.clone()
     };
-    let (hp, hp_extra) = build_android_header(&android_identity, p.uid, &client_token(client), None);
+    let (hp, hp_extra) =
+        build_android_header(&android_identity, p.uid, &client_token(client), None);
     let header_env = build_envelope(&mut client.session, &hp, OuterOrder::Observed);
     let now = crate::crypto::envelope::now_ms();
-    let body_env = build_envelope_ts(&mut client.session, &body_plain, OuterOrder::Insert, now + 1);
+    let body_env = build_envelope_ts(
+        &mut client.session,
+        &body_plain,
+        OuterOrder::Insert,
+        now + 1,
+    );
 
     let runes = format!("{}{}", p.policy_ts, p.uid);
     let runef = format!("{}{}", run_uuid, start_ms);
-    let mut req = client.agent.post(&format!("{HOST}{RECORD_PATH}"));
+    client.ensure_session_valid()?;
+    let mut req = client.agent.post(&client.record_url());
     req = req
         .set("Content-Type", "application/json; charset=utf-8")
         .set("User-Agent", UA_ANDROID)
@@ -209,20 +265,36 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     for (k, v) in &hp_extra {
         req = req.set(k, v);
     }
-    let resp = req.send_string(&body_env.json).map_err(ureq_err)?;
+    let resp = req.send_string(&body_env.json).map_err(|error| {
+        let rejected = matches!(&error, ureq::Error::Status(401, _));
+        let message = client.handle_request_error(error);
+        if rejected { SubmitFailure::Rejected(message) } else { SubmitFailure::Unknown(message) }
+    })?;
     let status = resp.status();
     let raw = resp.into_string().unwrap_or_default();
-    log(&format!("[record] sportType=1 HTTP {status} len={}", raw.len()));
+    log(&format!(
+        "[record] sportType=1 HTTP {status} len={}",
+        raw.len()
+    ));
 
     let key = derive_paes_key(
-        &body_env.key_data[0], &body_env.key_data[1], &body_env.key_data[2], &body_env.key_data[3],
+        &body_env.key_data[0],
+        &body_env.key_data[1],
+        &body_env.key_data[2],
+        &body_env.key_data[3],
     );
     let dec = decrypt_response(raw.as_bytes(), &key, &rsa_public_key())
         .map_err(|e| format!("提交响应解密失败: {e}"))?;
-    let biz = check_business(&dec.business)?;
-    let rrid = super::client::get_field(&biz, "rrid").and_then(|v| v.as_i64()).unwrap_or(0);
+    let biz = check_business(&dec.business).map_err(|error| {
+        if dec.business.get("error").and_then(Value::as_i64).is_some_and(|code| code != 10000) {
+            SubmitFailure::Rejected(error)
+        } else { SubmitFailure::Unknown(error) }
+    })?;
+    let rrid = super::client::get_field(&biz, "rrid")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+        .unwrap_or(0);
     if rrid <= 0 {
-        return Err(format!("提交未返回 rrid: {}", truncate_json(&biz)));
+        return Err(format!("提交未返回 rrid: {}", truncate_json(&biz)).into());
     }
     log(&format!("√ 提交成功 rrid={rrid} uuid={run_uuid}"));
     Ok(SubmitResult {
@@ -241,10 +313,28 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
 }
 
 fn client_token(client: &ApiClient) -> String {
-    client.login.as_ref().map(|s| s.token.clone()).unwrap_or_default()
+    client
+        .login
+        .as_ref()
+        .map(|s| s.token.clone())
+        .unwrap_or_default()
 }
 
 fn truncate_json(v: &Value) -> String {
     let s = v.to_string();
     s.chars().take(240).collect()
+}
+
+#[cfg(test)]
+#[path = "submission_tests.rs"]
+mod submission_tests;
+
+#[cfg(test)]
+mod metric_tests {
+    use super::*;
+    #[test]
+    fn record_pace_has_decimal_protocol_scale() {
+        assert_eq!(pace_speed_value(600, 1000.0), 10000);
+        assert_eq!(pace_speed_value(720, 2000.0), 6000);
+    }
 }

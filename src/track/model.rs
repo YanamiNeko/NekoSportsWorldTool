@@ -2,8 +2,8 @@
 
 #![allow(non_snake_case)]
 
-use serde::Serialize;
 use crate::location::Coordinate;
+use serde::Serialize;
 
 #[derive(Serialize, Clone, Debug)]
 pub struct GenPoint {
@@ -80,13 +80,58 @@ impl Track {
         let first = self.locations.first().ok_or("轨迹不能为空".to_string())?;
         let coordinate = Coordinate::new(self.startLatitude, self.startLongitude, first.accuracy)?;
         let first_coordinate = Coordinate::new(first.gLat, first.gLng, first.accuracy)?;
-        if !coordinate.is_near(first_coordinate, 0.0000001) { return Err("轨迹首点与记录顶层坐标不一致".into()); }
+        if !coordinate.is_near(first_coordinate, 0.0000001) {
+            return Err("轨迹首点与记录顶层坐标不一致".into());
+        }
         Ok(coordinate)
     }
 
     pub fn validate_consistency(&self) -> Result<Coordinate, String> {
-        if self.totalTime <= 0 || self.totalDistance <= 0.0 { return Err("轨迹时长和距离必须为正数".into()); }
-        for point in &self.locations { Coordinate::new(point.gLat, point.gLng, point.accuracy)?; }
+        if self.totalTime <= 0
+            || !self.totalDistance.is_finite()
+            || self.totalDistance <= 0.0
+            || !self.validDistance.is_finite()
+        {
+            return Err("轨迹时长和距离必须为正数".into());
+        }
+        for point in &self.locations {
+            Coordinate::new(point.gLat, point.gLng, point.accuracy)?;
+            if !point.totalDis.is_finite()
+                || !point.validDis.is_finite()
+                || point.totalDis < 0.0
+                || point.validDis < 0.0
+                || point.validDis > point.totalDis
+                || point.totalTime < 0
+                || point.validTime < 0
+                || point.validTime > point.totalTime
+                || point.steps < 0
+            {
+                return Err("轨迹累计统计无效".into());
+            }
+        }
+        for pair in self.locations.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            if b.totalTime < a.totalTime
+                || b.totalDis < a.totalDis
+                || b.steps < a.steps
+                || b.validDis < a.validDis
+                || b.validTime < a.validTime
+            {
+                return Err("轨迹累计统计发生倒退".into());
+            }
+        }
+        let last = self.locations.last().ok_or("轨迹不能为空")?;
+        if self.totalTime != last.totalTime
+            || (self.totalDistance - last.totalDis).abs() > 1e-6
+            || self.totalSteps != last.steps
+            || self.validTime != last.validTime
+            || (self.validDistance - last.validDis).abs() > 1e-6
+        {
+            return Err("轨迹总量与终点统计不一致".into());
+        }
+        if self.speedPerTenSec.len() != self.stepsPerTenSec.len() {
+            return Err("距离与步数窗口数量不一致".into());
+        }
         self.start_coordinate()
     }
 }
@@ -95,10 +140,65 @@ impl Track {
 mod tests {
     use super::*;
     fn sample_track() -> Track {
-        let point = GenPoint { id: 1, flag: 1, lat: -1.0, lng: -1.0, gLat: 39.9, gLng: 116.4, speed: 1.0, avgSpeed: 1.0, radius: 3.0, accuracy: 3.0, ptype: 0, locType: 1, hasAltitude: true, totalTime: 1, totalDis: 1.0, validDis: 1.0, validTime: 1, steps: 1, stepDistance: 0.0, gainTime: String::new(), gainTimeMs: 1, queueNum: 0, coorType: "gcj02".into(), bdA: 1.0, bdD: 0.0, bdS: 1.0, bdG: 1, count: 1, dtr: 0.0, state: 0, locationId: String::new() };
-        Track { totalTime: 1, totalDistance: 1.0, validDistance: 1.0, validTime: 1, startTime: 1, startLatitude: 39.9, startLongitude: 116.4, locations: vec![point], totalSteps: 1, speedPerTenSec: vec![], stepsPerTenSec: vec![], segments: vec![] }
+        let point = GenPoint {
+            id: 1,
+            flag: 1,
+            lat: -1.0,
+            lng: -1.0,
+            gLat: 39.9,
+            gLng: 116.4,
+            speed: 1.0,
+            avgSpeed: 1.0,
+            radius: 3.0,
+            accuracy: 3.0,
+            ptype: 0,
+            locType: 1,
+            hasAltitude: true,
+            totalTime: 1,
+            totalDis: 1.0,
+            validDis: 1.0,
+            validTime: 1,
+            steps: 1,
+            stepDistance: 0.0,
+            gainTime: String::new(),
+            gainTimeMs: 1,
+            queueNum: 0,
+            coorType: "gcj02".into(),
+            bdA: 1.0,
+            bdD: 0.0,
+            bdS: 1.0,
+            bdG: 1,
+            count: 1,
+            dtr: 0.0,
+            state: 0,
+            locationId: String::new(),
+        };
+        Track {
+            totalTime: 1,
+            totalDistance: 1.0,
+            validDistance: 1.0,
+            validTime: 1,
+            startTime: 1,
+            startLatitude: 39.9,
+            startLongitude: 116.4,
+            locations: vec![point],
+            totalSteps: 1,
+            speedPerTenSec: vec![],
+            stepsPerTenSec: vec![],
+            segments: vec![],
+        }
     }
-    #[test] fn top_level_coordinate_is_derived_from_first_point() { assert!(sample_track().validate_consistency().is_ok()); let mut invalid = sample_track(); invalid.startLatitude = 38.9; assert!(invalid.validate_consistency().is_err()); }
-    #[test] fn empty_track_is_rejected() { let mut track = sample_track(); track.locations.clear(); assert!(track.validate_consistency().is_err()); }
+    #[test]
+    fn top_level_coordinate_is_derived_from_first_point() {
+        assert!(sample_track().validate_consistency().is_ok());
+        let mut invalid = sample_track();
+        invalid.startLatitude = 38.9;
+        assert!(invalid.validate_consistency().is_err());
+    }
+    #[test]
+    fn empty_track_is_rejected() {
+        let mut track = sample_track();
+        track.locations.clear();
+        assert!(track.validate_consistency().is_err());
+    }
 }
-

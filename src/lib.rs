@@ -3,10 +3,13 @@
 mod api;
 pub mod cli;
 mod crypto;
+mod diagnostics;
 pub mod location;
 pub mod platform;
-pub mod template;
 mod relaunch;
+mod road_status;
+mod task_control;
+pub mod template;
 mod textlog;
 mod track;
 mod update;

@@ -181,11 +181,16 @@ fn cmd_run(rest: &[&str]) -> i32 {
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {
             println!(
-                "跑步提交成功 rrid={} uuid={} obs={}/2 verify={}",
+                "记录提交成功 rrid={} uuid={}；OBS 上传={}/2；详情读取={}；服务端达标判定={}",
                 out.result.rrid,
                 out.result.uuid,
                 out.obs_ok,
-                if out.detail_ok { "通过" } else { "未通过" }
+                if out.verification.detail.is_some() {
+                    "成功"
+                } else {
+                    "失败"
+                },
+                out.verification.label()
             );
             0
         }
@@ -477,7 +482,13 @@ fn cmd_obs_sample(rest: &[&str]) -> i32 {
     );
     let sess = client.login.clone().unwrap_or_default();
     let uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
-    let obj = crate::track::wire::build_obs_object(&track, rrid, &uuid, sess.uid, &pts);
+    let obj = crate::track::wire::build_obs_object(
+        &track,
+        rrid,
+        &uuid,
+        sess.uid,
+        &crate::track::wire::five_point_wrapper(&pts, &track, &Default::default()),
+    );
     let out = get(&flags, "out").unwrap_or("obs_ours.json");
     let decoded = decode_gz_fields(&obj);
     std::fs::write(
@@ -633,12 +644,13 @@ fn cmd_cheat(rest: &[&str]) -> i32 {
     let mut log = logger();
     match crate::api::cheat::query(&mut client, page, &mut log) {
         Ok(r) => {
-            if r.is_clean() {
-                println!("自查：干净（self=null）");
-            } else {
-                println!("已被标记：{}", r.self_brief());
+            println!("自查：{}", r.label());
+            println!("检查时间：{}", crate::track::geom::fmt_cst(r.checked_at_ms, "%Y-%m-%d %H:%M:%S 北京时间"));
+            if r.status() == crate::api::cheat::Status::Flagged {
+                println!("服务端原因：{}；发生时间：{}", r.reason(), r.occurred_at());
+                if let Some(id) = r.record_id() { println!("关联跑步记录：{id}"); }
             }
-            println!("全校违规 {} 条", r.list.len());
+            println!("本页通报 {} 条（非全校总数）", r.list.len());
             for item in r.list.iter().take(20) {
                 println!(
                     "  {} | {} | {}",

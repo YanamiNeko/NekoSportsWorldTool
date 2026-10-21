@@ -1,12 +1,16 @@
 //! 轨迹层：生成器 / OBS 组装 / 官方卡路里。
 
 pub mod altitude;
+pub mod analysis;
 pub mod calorie;
 pub mod generate_road;
 pub mod generator;
 pub mod geom;
 pub mod model;
 pub mod postfix;
+pub mod route_view;
+mod school_track;
+pub mod stats;
 pub mod wire;
 
 #[cfg(test)]
@@ -82,8 +86,17 @@ mod tests {
     /// 模式 B（真实道路路由）：距离精确、哨兵/断崖语义与模式 A 一致。
     #[test]
     fn test_build_road_distribution() {
-        let pts = sample_points();
         let net = road_grid();
+        // Success fixture has checkpoints on roads; the off-road fixture is tested separately.
+        let pts: Vec<_> = net
+            .graph
+            .node_indices()
+            .step_by(10)
+            .map(|i| {
+                let c = net.node_coord(i);
+                (c.lat, c.lon)
+            })
+            .collect();
         let start = 1_788_958_186_123i64;
         let track = build_road(3300.0, 1220, 42, start, &pts, &pts[1..], &net).expect("build_road");
         assert!(
@@ -178,10 +191,9 @@ mod tests {
         }
     }
 
-    /// 10 秒窗均值配速全部落在有效窗口内（判定规则 2'21"-10'00"/km），且总距精确。
-    /// 逐点 avgSpeed 允许越界（真人爬坡期同样低于窗口，见 OBS 样本）。
+    /// 十秒窗忠实反映最终采样（含停顿），不通过拉伸统计伪造有效配速。
     #[test]
-    fn test_speeds_within_valid_pace_window() {
+    fn test_windows_match_final_track_across_seeds() {
         let pts = sample_points();
         let combos = [
             (1050.0, 480i64),
@@ -193,14 +205,21 @@ mod tests {
         for seed in 0..16u64 {
             for &(dist, dur) in &combos {
                 let t = build(dist, dur, seed, (38.9, 121.54), 1_788_958_186_123, &pts);
-                for (i, w) in t.speedPerTenSec.iter().enumerate() {
-                    let pace = 1000.0 / (w.value / 10.0); // 秒/km
-                    assert!(
-                        (141.0..=600.0).contains(&pace),
-                        "seed={seed} dist={dist} 窗{i} 配速 {}/km 越界",
-                        format_args!("{}:{:02}", pace as i64 / 60, (pace as i64) % 60)
-                    );
+                t.validate_consistency().unwrap();
+                let mut lo = 0;
+                for w in &t.speedPerTenSec {
+                    let hi = lo + w.time;
+                    let a = super::stats::counters_at(&t.locations, lo);
+                    let b = super::stats::counters_at(&t.locations, hi);
+                    assert!((w.value - (b.0 - a.0)).abs() < 1e-8);
+                    assert!((1..=10).contains(&w.time));
+                    lo = hi;
                 }
+                assert_eq!(lo, t.totalTime);
+                assert!(
+                    (t.speedPerTenSec.iter().map(|w| w.value).sum::<f64>() - t.totalDistance).abs()
+                        < 1e-5
+                );
                 assert!(
                     (t.totalDistance - dist).abs() < 2.0,
                     "seed={seed} dist={}: {}",
@@ -268,7 +287,7 @@ mod tests {
         }
     }
 
-    /// OBS 对象：10 键、gzip+base64 可解、run_data 27 键点集。
+    /// OBS 对象：10 键、gzip+base64 可解、run_data 28 键点集。
     #[test]
     fn test_obs_object_structure() {
         let pts: Vec<serde_json::Value> = sample_points()
@@ -290,7 +309,13 @@ mod tests {
             1_788_958_186_123,
             &sample_points(),
         );
-        let obj = build_obs_object(&track, 1320403809, "UUID-TEST", 13056447, &pts);
+        let obj = build_obs_object(
+            &track,
+            1320403809,
+            "UUID-TEST",
+            13056447,
+            &super::wire::five_point_wrapper(&pts, &track, &Default::default()),
+        );
         let keys: Vec<&str> = obj
             .as_object()
             .unwrap()
@@ -319,7 +344,7 @@ mod tests {
         let mut s = String::new();
         dec.read_to_string(&mut s).unwrap();
         assert_eq!(s, "1320403809");
-        // run_data 解包 → 27 键点集
+        // run_data 解包 → 28 键点集
         let raw = crate::crypto::envelope::b64_decode(obj["run_data"].as_str().unwrap()).unwrap();
         let mut dec = flate2::read::GzDecoder::new(&raw[..]);
         let mut s = String::new();
@@ -328,7 +353,7 @@ mod tests {
         assert_eq!(wrap["useZip"], false);
         let pts: Vec<serde_json::Value> =
             serde_json::from_str(wrap["allLocJson"].as_str().unwrap()).unwrap();
-        assert_eq!(pts[0].as_object().unwrap().len(), 27, "点键数必须 27");
+        assert_eq!(pts[0].as_object().unwrap().len(), 28, "点键数必须 28");
         // segment_json 是空串 gzip
         let raw =
             crate::crypto::envelope::b64_decode(obj["segment_json"].as_str().unwrap()).unwrap();
@@ -341,5 +366,71 @@ mod tests {
         assert_eq!(ks.len(), 2);
         assert!(ks[0].contains("run_data/"));
         assert!(ks[1].starts_with("run_data/1320/1320403809.json"));
+    }
+    #[test]
+    fn road_failure_does_not_ignore_distant_points_or_empty_fences() {
+        use super::generate_road::*;
+        assert!(load_network_path("").is_err());
+        let net = road_grid();
+        let c = net.node_coord(net.graph.node_indices().next().unwrap());
+        let pts = vec![(c.lat, c.lon), (c.lat + 1.0, c.lon + 1.0)];
+        assert!(build_road(3000.0, 1200, 7, 0, &pts, &pts, &net).is_err());
+        let clipped = apply_fences(
+            &net,
+            &[vec![(0.1, 0.1), (0.1, 0.2), (0.2, 0.2), (0.2, 0.1)]],
+        );
+        assert_eq!(clipped.graph.edge_count(), 0);
+        assert!(build_road(3000.0, 1200, 7, 0, &pts[..1], &pts[..1], &clipped).is_err());
+        let mut disconnected = net.clone();
+        let split_lon = c.lon + 0.003;
+        disconnected.graph.retain_edges(|g, e| {
+            let (a, b) = g.edge_endpoints(e).unwrap();
+            (g[a].coord.lon < split_lon) == (g[b].coord.lon < split_lon)
+        });
+        disconnected.rebuild_index();
+        let far = net.node_coord(net.graph.node_indices().last().unwrap());
+        let required = [(c.lat, c.lon), (far.lat, far.lon)];
+        assert!(build_road(3000.0, 1200, 7, 0, &required, &required, &disconnected).is_err());
+    }
+
+    #[test]
+    fn both_generators_bound_exception_geometry_and_speed() {
+        let net = road_grid();
+        let pts: Vec<_> = net
+            .graph
+            .node_indices()
+            .step_by(10)
+            .map(|i| {
+                let c = net.node_coord(i);
+                (c.lat, c.lon)
+            })
+            .collect();
+        for seed in 0..8 {
+            let classic = build(3300.0, 1220, seed, pts[0], 0, &pts);
+            let road = build_road(3300.0, 1220, seed, 0, &pts, &pts, &net).unwrap();
+            for track in [&classic, &road] {
+                track.validate_consistency().unwrap();
+                for (i, p) in track
+                    .locations
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.ptype == -1)
+                {
+                    assert!(p.radius <= 10.0);
+                    assert!(p.speed <= super::generator::MAX_EXCEPTION_GPS_SPEED_KMH);
+                    if i > 0 {
+                        let previous = &track.locations[i - 1];
+                        let dy = (p.gLat - previous.gLat) * MET_PER_DEG_LAT;
+                        let dx = (p.gLng - previous.gLng) * MET_PER_DEG_LNG;
+                        assert!(dx.hypot(dy) < 40.0, "exception jump: {}", dx.hypot(dy));
+                    }
+                }
+                assert_eq!(track.totalTime, track.locations.last().unwrap().totalTime);
+                assert!(track
+                    .locations
+                    .iter()
+                    .all(|p| p.gainTimeMs == track.startTime + p.totalTime * 1000));
+            }
+        }
     }
 }

@@ -43,6 +43,18 @@ pub fn compact_ui(ui: &egui::Ui) -> bool {
     is_compact(ui.available_width())
 }
 
+/// Phones use the page's outer scroll area; desktops retain bounded lists.
+pub fn list_area(ui: &mut egui::Ui, id: &str, height: f32, draw: impl FnOnce(&mut egui::Ui)) {
+    if compact_ui(ui) {
+        draw(ui);
+    } else {
+        egui::ScrollArea::vertical()
+            .id_salt(id)
+            .max_height(height)
+            .show(ui, draw);
+    }
+}
+
 pub fn row<R>(
     ui: &mut egui::Ui,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,

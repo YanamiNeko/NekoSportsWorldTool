@@ -4,6 +4,7 @@ nekosportsworldtool.log*
 *.log.old
 
 # 运行时数据（含会话/凭据，禁止入库）
+/submission_receipts/
 /session.json
 /config.json
 /identity.json

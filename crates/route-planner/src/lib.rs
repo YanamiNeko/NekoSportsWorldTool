@@ -11,6 +11,9 @@
 use petgraph::graph::NodeIndex;
 
 pub mod biomech;
+pub mod boundary;
+pub mod check;
+pub mod gpx;
 pub mod graph;
 pub mod kinematics;
 pub mod load;
@@ -90,8 +93,33 @@ pub fn plan_route_split(
         opts,
     )?;
     let coords = route::path_coords(&g, &path);
-    let points =
-        smooth::smooth_and_sample(&g, &coords, opts.min_radius_m, opts.turn_threshold_deg, 1.0);
+    let points = if g.boundaries.is_empty() {
+        smooth::smooth_and_sample(&g, &coords, opts.min_radius_m, opts.turn_threshold_deg, 1.0)
+    } else {
+        // Keep every road corner: smoothing may cut through a concave school boundary.
+        if !coords
+            .windows(2)
+            .all(|p| boundary::segment_inside(&g.boundaries, p[0], p[1]))
+        {
+            return Err("路线连线越出学校围栏".into());
+        }
+        let mut s = 0.0;
+        let mut out = Vec::new();
+        for (i, c) in coords.iter().enumerate() {
+            if i > 0 {
+                let a = g.to_m(coords[i - 1]);
+                let b = g.to_m(*c);
+                s += (b[0] - a[0]).hypot(b[1] - a[1]);
+            }
+            out.push(RoutePoint {
+                lon: c.lon,
+                lat: c.lat,
+                s,
+                curvature: 0.0,
+            });
+        }
+        out
+    };
     if points.is_empty() {
         return Err("路线平滑后为空".into());
     }

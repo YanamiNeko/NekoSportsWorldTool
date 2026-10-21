@@ -1101,6 +1101,18 @@ impl MonitorHandle {
     }
 
     pub fn scale_factor(&self) -> f64 {
+        // Patch (NekoSportsWorldTool): on some devices `AConfiguration`
+        // reports the default density (160 dpi) even though the display runs
+        // at a higher density, which makes egui render at 1x and look blurry.
+        // The host app publishes the authoritative `DisplayMetrics.density`
+        // through this environment variable; prefer it when present.
+        if let Ok(value) = std::env::var("NEKO_DISPLAY_DENSITY") {
+            if let Ok(density) = value.parse::<f64>() {
+                if density.is_finite() && (0.5..=8.0).contains(&density) {
+                    return density;
+                }
+            }
+        }
         self.app.config().density().map(|dpi| dpi as f64 / 160.0).unwrap_or(1.0)
     }
 

@@ -1,6 +1,6 @@
 //! 数据页：学期完成度 / 违规自查 / 排行榜。
 
-use super::{mobile, theme, App};
+use super::{components, mobile, theme, App};
 use crate::api::cheat::CheatReport;
 use crate::api::rank::RankRow;
 use crate::api::semester::SemesterSummary;
@@ -61,148 +61,148 @@ impl App {
     }
 
     fn draw_data_content(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-
         // ── 学期完成度 ──────────────────────────────────────────
-        egui::CollapsingHeader::new("学期完成度")
-            .default_open(true)
-            .show(ui, |ui| {
-                mobile::row(ui, |ui| {
-                    match &self.data_page.semester {
-                        Some(s) => {
-                            let km = |m: f64| format!("{:.2}", m / 1000.0);
-                            ui.label(format!("学期：{}", s.sname));
-                            ui.separator();
-                            ui.label(format!(
-                                "有效次数：{}/{}",
-                                s.semester_valid_count, s.semester_count
-                            ));
-                            ui.separator();
-                            ui.label(format!(
-                                "有效里程：{}/{} km（总 {} km）",
-                                km(s.semester_valid_dis),
-                                km(s.semester_dis),
-                                km(s.semester_dis)
-                            ));
-                        }
-                        None => {
-                            ui.label("未拉取");
-                        }
+        components::card_titled(ui, "学期完成度", |ui| {
+            mobile::row(ui, |ui| {
+                match &self.data_page.semester {
+                    Some(s) => {
+                        let km = |m: f64| format!("{:.2}", m / 1000.0);
+                        ui.label(format!("学期：{}", s.sname));
+                        ui.separator();
+                        ui.label(format!(
+                            "有效次数：{}/{}",
+                            s.semester_valid_count, s.semester_count
+                        ));
+                        ui.separator();
+                        ui.label(format!(
+                            "有效里程：{}/{} km（总 {} km）",
+                            km(s.semester_valid_dis),
+                            km(s.semester_dis),
+                            km(s.semester_dis)
+                        ));
                     }
-                    if ui
-                        .add_enabled(!self.data_busy, theme::primary_btn("刷新"))
-                        .clicked()
-                    {
-                        self.refresh_data_page();
+                    None => {
+                        ui.label("未拉取");
                     }
-                });
+                }
+                if ui
+                    .add_enabled(!self.data_busy, theme::primary_btn("刷新"))
+                    .clicked()
+                {
+                    self.refresh_data_page();
+                }
             });
+        });
 
         let mut open_record = None;
         // ── 违规自查 ────────────────────────────────────────────
-        egui::CollapsingHeader::new("违规自查")
-            .default_open(true)
-            .show(ui, |ui| {
-                mobile::row(ui, |ui| {
-                    if self.data_page.cheat_checking {
-                        ui.label("违规检查中…");
-                    } else if let Some(error) = &self.data_page.cheat_error {
-                        ui.colored_label(theme::err(), format!("检查失败：{error}"));
+        components::card_titled(ui, "违规自查", |ui| {
+            mobile::row(ui, |ui| {
+                if self.data_page.cheat_checking {
+                    ui.label("违规检查中…");
+                } else if let Some(error) = &self.data_page.cheat_error {
+                    ui.colored_label(theme::err(), format!("检查失败：{error}"));
+                }
+                match &self.data_page.cheat {
+                    Some(c) => {
+                        let color = match c.status() {
+                            crate::api::cheat::Status::NoRecord => theme::ok(),
+                            crate::api::cheat::Status::Flagged => theme::err(),
+                            _ => theme::warn(),
+                        };
+                        ui.colored_label(color, c.label());
+                        ui.separator();
+                        ui.label(format!("本页通报：{} 条（非全校总数）", c.list.len()));
+                        ui.toggle_value(&mut self.data_page.show_cheat_list, "查看列表");
                     }
-                    match &self.data_page.cheat {
-                        Some(c) => {
-                            let color = match c.status() {
-                                crate::api::cheat::Status::NoRecord => theme::ok(),
-                                crate::api::cheat::Status::Flagged => theme::err(),
-                                _ => theme::warn(),
-                            };
-                            ui.colored_label(color, c.label());
-                            ui.separator();
-                            ui.label(format!("本页通报：{} 条（非全校总数）", c.list.len()));
-                            ui.toggle_value(&mut self.data_page.show_cheat_list, "查看列表");
-                        }
-                        None => {
-                            if !self.data_page.cheat_checking && self.data_page.cheat_error.is_none() {
-                                ui.label("未检查");
-                            }
-                        }
-                    }
-                    if ui
-                        .add_enabled(!self.data_busy, theme::primary_btn("立即检查"))
-                        .clicked()
-                    {
-                        self.refresh_cheat_only();
-                    }
-                });
-                if let Some(c) = &self.data_page.cheat {
-                    ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
-                    if c.checked_at_ms > 0 {
-                        ui.label(format!("检查时间：{}", crate::track::geom::fmt_cst(c.checked_at_ms, "%Y-%m-%d %H:%M:%S 北京时间")));
-                    }
-                    ui.label("这是查询时的服务端状态，不代表后续记录一定有效。");
-                    if c.self_info.as_object().is_some_and(|o| !o.is_empty()) {
-                        ui.label(format!("服务端原因：{}", c.reason()));
-                        ui.label(format!("发生时间：{}", c.occurred_at()));
-                        if let Some(rrid) = c.record_id() {
-                            if ui.add_enabled(self.session.is_some(), egui::Button::new(format!("查看关联跑步记录 #{rrid}"))).clicked() {
-                                open_record = Some(rrid);
-                            }
-                        } else {
-                            ui.label("服务端未提供关联跑步记录");
+                    None => {
+                        if !self.data_page.cheat_checking && self.data_page.cheat_error.is_none() {
+                            ui.label("未检查");
                         }
                     }
                 }
-                if self.data_page.show_cheat_list {
-                    if let Some(c) = &self.data_page.cheat {
-                        mobile::list_area(ui, "cheat_list", 160.0, |ui| {
-                            if mobile::compact_ui(ui) {
-                                for r in &c.list {
-                                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                                        ui.label(format!(
-                                            "姓名：{}",
-                                            str_of(r, &["name", "userName", "studentName"])
-                                        ));
-                                        ui.label(format!(
-                                            "原因：{}",
-                                            str_of(r, &["reason", "punishReason", "cause", "type"])
-                                        ));
-                                        ui.label(format!(
-                                            "时间：{}",
-                                            time_of(r, &["createTime", "time", "date"])
-                                        ));
-                                        ui.label(format!("unid：{}", str_of(r, &["unid", "sid"])));
-                                    });
-                                    ui.add_space(4.0);
-                                }
-                            } else {
-                                egui::Grid::new("cheat_grid")
-                                    .num_columns(4)
-                                    .striped(true)
-                                    .show(ui, |ui| {
-                                        ui.strong("姓名");
-                                        ui.strong("原因");
-                                        ui.strong("时间");
-                                        ui.strong("unid");
-                                        ui.end_row();
-                                        for r in &c.list {
-                                            ui.label(str_of(
-                                                r,
-                                                &["name", "userName", "studentName"],
-                                            ));
-                                            ui.label(str_of(
-                                                r,
-                                                &["reason", "punishReason", "cause", "type"],
-                                            ));
-                                            ui.label(time_of(r, &["createTime", "time", "date"]));
-                                            ui.label(str_of(r, &["unid", "sid"]));
-                                            ui.end_row();
-                                        }
-                                    });
-                            }
-                        });
-                    }
+                if ui
+                    .add_enabled(!self.data_busy, theme::primary_btn("立即检查"))
+                    .clicked()
+                {
+                    self.refresh_cheat_only();
                 }
             });
+            if let Some(c) = &self.data_page.cheat {
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+                if c.checked_at_ms > 0 {
+                    ui.label(format!(
+                        "检查时间：{}",
+                        crate::track::geom::fmt_cst(c.checked_at_ms, "%Y-%m-%d %H:%M:%S 北京时间")
+                    ));
+                }
+                ui.label("这是查询时的服务端状态，不代表后续记录一定有效。");
+                if c.self_info.as_object().is_some_and(|o| !o.is_empty()) {
+                    ui.label(format!("服务端原因：{}", c.reason()));
+                    ui.label(format!("发生时间：{}", c.occurred_at()));
+                    if let Some(rrid) = c.record_id() {
+                        if ui
+                            .add_enabled(
+                                self.session.is_some(),
+                                egui::Button::new(format!("查看关联跑步记录 #{rrid}")),
+                            )
+                            .clicked()
+                        {
+                            open_record = Some(rrid);
+                        }
+                    } else {
+                        ui.label("服务端未提供关联跑步记录");
+                    }
+                }
+            }
+            if self.data_page.show_cheat_list {
+                if let Some(c) = &self.data_page.cheat {
+                    mobile::list_area(ui, "cheat_list", 160.0, |ui| {
+                        if mobile::compact_ui(ui) {
+                            for r in &c.list {
+                                egui::Frame::group(ui.style()).show(ui, |ui| {
+                                    ui.label(format!(
+                                        "姓名：{}",
+                                        str_of(r, &["name", "userName", "studentName"])
+                                    ));
+                                    ui.label(format!(
+                                        "原因：{}",
+                                        str_of(r, &["reason", "punishReason", "cause", "type"])
+                                    ));
+                                    ui.label(format!(
+                                        "时间：{}",
+                                        time_of(r, &["createTime", "time", "date"])
+                                    ));
+                                    ui.label(format!("unid：{}", str_of(r, &["unid", "sid"])));
+                                });
+                                ui.add_space(4.0);
+                            }
+                        } else {
+                            egui::Grid::new("cheat_grid")
+                                .num_columns(4)
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.strong("姓名");
+                                    ui.strong("原因");
+                                    ui.strong("时间");
+                                    ui.strong("unid");
+                                    ui.end_row();
+                                    for r in &c.list {
+                                        ui.label(str_of(r, &["name", "userName", "studentName"]));
+                                        ui.label(str_of(
+                                            r,
+                                            &["reason", "punishReason", "cause", "type"],
+                                        ));
+                                        ui.label(time_of(r, &["createTime", "time", "date"]));
+                                        ui.label(str_of(r, &["unid", "sid"]));
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+                    });
+                }
+            }
+        });
 
         if let Some(rrid) = open_record {
             self.tab = 2;
@@ -211,76 +211,75 @@ impl App {
             self.records_page.detail_raw = None;
             self.fetch_run_detail(rrid);
         }
+
         // ── 排行榜 ──────────────────────────────────────────────
-        egui::CollapsingHeader::new("排行榜")
-            .default_open(true)
-            .show(ui, |ui| {
-                mobile::row(ui, |ui| {
-                    egui::ComboBox::from_id_salt("rank_combo")
-                        .selected_text(RANK_OPTIONS[self.data_page.rank_sel])
-                        .show_ui(ui, |ui| {
-                            for (i, opt) in RANK_OPTIONS.iter().enumerate() {
-                                ui.selectable_value(&mut self.data_page.rank_sel, i, *opt);
-                            }
-                        });
-                    if ui
-                        .add_enabled(!self.data_busy, theme::primary_btn("查询"))
-                        .clicked()
-                    {
-                        let (kind, subtype) = self.data_page.selection();
-                        self.refresh_rank(kind, subtype);
-                    }
-                    if self.data_busy {
-                        ui.label("拉取中…");
-                    }
-                });
-                ui.add_space(4.0);
-                if self.data_page.rank_rows.is_empty() {
-                    ui.label("（无数据）");
-                } else {
-                    mobile::list_area(ui, "rank_list", 240.0, |ui| {
-                        if mobile::compact_ui(ui) {
-                            for r in &self.data_page.rank_rows {
-                                egui::Frame::group(ui.style()).show(ui, |ui| {
-                                    ui.strong(format!("#{}  {}", r.sort, r.name));
-                                    ui.label(format!(
-                                        "{:.2} km · {}",
-                                        r.length / 1000.0,
-                                        match r.gender {
-                                            1 => "男",
-                                            0 => "女",
-                                            _ => "-",
-                                        },
-                                    ));
-                                });
-                                ui.add_space(4.0);
-                            }
-                        } else {
-                            egui::Grid::new("rank_grid")
-                                .num_columns(4)
-                                .striped(true)
-                                .show(ui, |ui| {
-                                    ui.strong("名次");
-                                    ui.strong("姓名");
-                                    ui.strong("里程");
-                                    ui.strong("性别");
-                                    ui.end_row();
-                                    for r in &self.data_page.rank_rows {
-                                        ui.monospace(r.sort.to_string());
-                                        ui.label(&r.name);
-                                        ui.monospace(format!("{:.2} km", r.length / 1000.0));
-                                        ui.label(match r.gender {
-                                            1 => "男",
-                                            0 => "女",
-                                            _ => "-",
-                                        });
-                                        ui.end_row();
-                                    }
-                                });
+        components::card_titled(ui, "排行榜", |ui| {
+            mobile::row(ui, |ui| {
+                egui::ComboBox::from_id_salt("rank_combo")
+                    .selected_text(RANK_OPTIONS[self.data_page.rank_sel])
+                    .show_ui(ui, |ui| {
+                        for (i, opt) in RANK_OPTIONS.iter().enumerate() {
+                            ui.selectable_value(&mut self.data_page.rank_sel, i, *opt);
                         }
                     });
+                if ui
+                    .add_enabled(!self.data_busy, theme::primary_btn("查询"))
+                    .clicked()
+                {
+                    let (kind, subtype) = self.data_page.selection();
+                    self.refresh_rank(kind, subtype);
+                }
+                if self.data_busy {
+                    ui.label("拉取中…");
                 }
             });
+            ui.add_space(4.0);
+            if self.data_page.rank_rows.is_empty() {
+                ui.label("（无数据）");
+            } else {
+                mobile::list_area(ui, "rank_list", 240.0, |ui| {
+                    if mobile::compact_ui(ui) {
+                        for r in &self.data_page.rank_rows {
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.strong(format!("#{}  {}", r.sort, r.name));
+                                ui.label(format!(
+                                    "{:.2} km · {}",
+                                    r.length / 1000.0,
+                                    match r.gender {
+                                        1 => "男",
+                                        0 => "女",
+                                        _ => "-",
+                                    },
+                                ));
+                            });
+                            ui.add_space(4.0);
+                        }
+                    } else {
+                        egui::Grid::new("rank_grid")
+                            .num_columns(4)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.strong("名次");
+                                ui.strong("姓名");
+                                ui.strong("里程");
+                                ui.strong("性别");
+                                ui.end_row();
+                                for r in &self.data_page.rank_rows {
+                                    ui.monospace(r.sort.to_string());
+                                    ui.label(&r.name);
+                                    ui.monospace(format!("{:.2} km", r.length / 1000.0));
+                                    ui.label(match r.gender {
+                                        1 => "男",
+                                        0 => "女",
+                                        _ => "-",
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                });
+            }
+        });
     }
 }
 

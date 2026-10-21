@@ -467,7 +467,7 @@ fn run_base_map_draws_real_roads_and_buildings_without_route_metadata() {
                     w,
                     h,
                     vec![
-                        Event::PointerMoved(Pos2::new(w / 2., h - 55.)),
+                        Event::PointerMoved(Pos2::new(w / 2., h * 0.6)),
                         Event::MouseWheel {
                             unit: egui::MouseWheelUnit::Point,
                             delta: Vec2::new(0., -60.),

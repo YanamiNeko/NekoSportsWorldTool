@@ -23,6 +23,38 @@ fn frame(
     )
 }
 
+/// 与 `frame` 相同，但额外绘制悬浮层（登录弹窗 / 提示弹窗 / 更新窗口）。
+///
+/// 骨架与悬浮层在 `update` 里是两个独立步骤，只驱动 `draw_shell` 的用例看不到弹窗。
+fn frame_overlays(
+    app: &mut App,
+    ctx: &egui::Context,
+    width: f32,
+    height: f32,
+    events: Vec<Event>,
+) -> egui::FullOutput {
+    ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, height))),
+            events,
+            ..Default::default()
+        },
+        |ctx| {
+            app.draw_shell(ctx);
+            app.draw_overlays(ctx);
+        },
+    )
+}
+
+/// 跑若干帧悬浮层，让 `egui::Window` 算出自身尺寸并完成居中。
+fn settle_overlays(app: &mut App, ctx: &egui::Context, w: f32, h: f32) -> egui::FullOutput {
+    let mut output = frame_overlays(app, ctx, w, h, vec![]);
+    for _ in 0..4 {
+        output = frame_overlays(app, ctx, w, h, vec![]);
+    }
+    output
+}
+
 fn label_position(output: &egui::FullOutput, label: &str) -> Option<Pos2> {
     output.shapes.iter().find_map(|clipped| {
         if let egui::Shape::Text(text) = &clipped.shape {
@@ -35,9 +67,47 @@ fn label_position(output: &egui::FullOutput, label: &str) -> Option<Pos2> {
     })
 }
 
+/// 收集同名文本的全部可见位置，顺序与绘制顺序一致（后画的悬浮层在后面）。
+fn label_positions(output: &egui::FullOutput, label: &str) -> Vec<Pos2> {
+    output
+        .shapes
+        .iter()
+        .filter_map(|clipped| {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                let rect = Rect::from_min_size(text.pos, text.galley.size());
+                if text.galley.text() == label && clipped.clip_rect.contains(rect.center()) {
+                    return Some(rect.center());
+                }
+            }
+            None
+        })
+        .collect()
+}
+
 fn click(app: &mut App, ctx: &egui::Context, w: f32, h: f32, at: Pos2) {
     for pressed in [true, false] {
         frame(
+            app,
+            ctx,
+            w,
+            h,
+            vec![
+                Event::PointerMoved(at),
+                Event::PointerButton {
+                    pos: at,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+    }
+}
+
+/// 走悬浮层路径点击，用于操作弹窗内的控件。
+fn click_overlays(app: &mut App, ctx: &egui::Context, w: f32, h: f32, at: Pos2) {
+    for pressed in [true, false] {
+        frame_overlays(
             app,
             ctx,
             w,
@@ -147,46 +217,32 @@ fn compact_account_form_can_expand_and_scroll_to_login() {
         app.tab = 3;
         frame(&mut app, &ctx, w, h, vec![]);
         let output = frame(&mut app, &ctx, w, h, vec![]);
+        // 改版后账号 / 密码收纳进登录弹窗，顶栏只保留一个「登录」入口，
+        // 因此窄屏下也不再需要展开「账号与登录」折叠区。
         assert!(label_position(&output, "账号：").is_none());
-        click(
-            &mut app,
-            &ctx,
-            w,
-            h,
-            label_position(&output, "账号与登录").unwrap(),
+        let at = label_position(&output, "登录")
+            .or_else(|| label_position(&output, "重新登录"))
+            .unwrap_or_else(|| panic!("login entry must be visible at {w}x{h}"));
+        click(&mut app, &ctx, w, h, at);
+        assert!(app.login_open, "login dialog must open at {w}x{h}");
+        // 弹窗需要几帧才能算出自身尺寸并居中，稳定后再检查字段是否可见。
+        let dialog = settle_overlays(&mut app, &ctx, w, h);
+        assert!(
+            label_position(&dialog, "账号").is_some(),
+            "login dialog must expose the account field at {w}x{h}"
         );
-        let mut login = None;
-        for _ in 0..50 {
-            let output = frame(
-                &mut app,
-                &ctx,
-                w,
-                h,
-                vec![
-                    Event::PointerMoved(Pos2::new(w / 2.0, 110.0)),
-                    Event::MouseWheel {
-                        unit: egui::MouseWheelUnit::Point,
-                        delta: Vec2::new(0.0, -40.0),
-                        modifiers: Default::default(),
-                    },
-                ],
-            );
-            if let Some(pos) = label_position(&output, "登录") {
-                login = Some(pos);
-                break;
-            }
-        }
-        assert!(login.is_some(), "login must be reachable at {w}x{h}");
+        assert!(
+            label_position(&dialog, "密码").is_some(),
+            "login dialog must expose the password field at {w}x{h}"
+        );
+        // 顶栏、弹窗标题与提交按钮都写着「登录」，提交按钮位于弹窗底部，取 y 最大的一个。
+        let submit = label_positions(&dialog, "登录")
+            .into_iter()
+            .max_by(|a, b| a.y.total_cmp(&b.y))
+            .unwrap_or_else(|| panic!("login dialog must expose a submit button at {w}x{h}"));
         // Empty credentials exercise validation only, so this click stays offline.
         app.status = "before-login".into();
-        let output = frame(&mut app, &ctx, w, h, vec![]);
-        click(
-            &mut app,
-            &ctx,
-            w,
-            h,
-            label_position(&output, "登录").unwrap(),
-        );
+        click_overlays(&mut app, &ctx, w, h, submit);
         assert!(!app.login_busy);
         assert_ne!(app.status, "before-login");
     }
@@ -443,7 +499,7 @@ fn manual_osm_button_loads_without_login_and_draws_roads_with_visible_status() {
                 w,
                 h,
                 vec![
-                    Event::PointerMoved(Pos2::new(w / 2., h - 35.)),
+                    Event::PointerMoved(Pos2::new(w / 2., h * 0.6)),
                     Event::MouseWheel {
                         unit: egui::MouseWheelUnit::Point,
                         delta: Vec2::new(0., -60.),
@@ -930,3 +986,4 @@ fn run_page_distinguishes_active_refresh_from_idle_missing_data() {
         "本地地图已加载；请设置定位锚点，再刷新路线点位与围栏。",
     );
 }
+

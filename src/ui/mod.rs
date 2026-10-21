@@ -9,6 +9,7 @@
 
 pub mod about;
 pub mod ai;
+pub mod components;
 pub mod data;
 pub mod device;
 pub mod fonts;
@@ -29,6 +30,15 @@ use crate::api::model::{self, Config, HeaderIdentity, Session};
 use eframe::egui;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
+
+/// 长字符串（设备号等）截断为前 N 字符 + 省略号。
+fn short_id(id: &str) -> String {
+    let mut s: String = id.chars().take(8).collect();
+    if id.chars().count() > 8 {
+        s.push('…');
+    }
+    s
+}
 
 pub const IP: &str = "__IP_DONE__";
 pub const LOGIN_DONE: &str = "__LOGIN_DONE__";
@@ -99,6 +109,7 @@ pub struct App {
     pub remember: bool,
     pub login_busy: bool,
     pub auth_expired: bool,
+    pub login_open: bool,
     pub run_busy: bool,
     pub ai_busy: bool,
     pub ai_submit_active: bool,
@@ -146,6 +157,17 @@ impl eframe::App for App {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
 
         self.draw_shell(ctx);
+        self.draw_overlays(ctx);
+        crate::platform::sync_clipboard(ctx);
+    }
+}
+
+impl App {
+    /// 悬浮层：登录弹窗、提示弹窗、更新窗口。
+    ///
+    /// 与 `draw_shell` 分开，既方便单测按需驱动，也让骨架与悬浮层的绘制顺序显式可见。
+    fn draw_overlays(&mut self, ctx: &egui::Context) {
+        self.draw_login_window(ctx);
 
         if let Some(p) = &self.popup {
             let mut open = true;
@@ -171,190 +193,287 @@ impl eframe::App for App {
             }
         }
         self.draw_update_windows(ctx);
-        crate::platform::sync_clipboard(ctx);
     }
-}
 
-impl App {
-    fn draw_shell(&mut self, ctx: &egui::Context) {
-        // ── 顶栏 ────────────────────────────────────────────────
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.add_space(6.0);
-            let compact = mobile::compact_ui(ui);
-            let logged = self.session.is_some();
-            let btn_text = if logged {
-                "登出"
-            } else if self.auth_expired {
-                "重新登录"
-            } else {
-                "登录"
-            };
-            let mut login_clicked = false;
-            let draw_connection = |ui: &mut egui::Ui| {
-                ui.label("IP：");
-                if self.ip.is_empty() {
-                    ui.colored_label(theme::warn(), "获取中…");
-                } else if self.ip == "失败" {
-                    ui.colored_label(theme::err(), "失败");
-                } else {
-                    ui.monospace(&self.ip);
-                }
-                match &self.session {
-                    Some(s) => {
-                        ui.colored_label(theme::ok(), format!("● {}（uid={}）", s.name, s.uid));
-                    }
-                    None => {
-                        ui.colored_label(theme::err(), "● 未登录");
-                    }
-                }
-            };
-            if compact {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(if logged { "已登录" } else { "未登录" });
-                    if let Some(session) = &self.session {
-                        ui.label(&session.name);
-                    }
+    /// 桌面侧栏品牌区。
+    fn draw_side_brand(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            egui::Frame::none()
+                .fill(theme::ACCENT_500)
+                .rounding(egui::Rounding::same(theme::radius::SM))
+                .inner_margin(egui::Margin::same(theme::space::SM))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("N")
+                            .color(egui::Color32::WHITE)
+                            .strong(),
+                    );
                 });
-                egui::CollapsingHeader::new("账号与登录")
-                    .open(self.auth_expired.then_some(true))
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("compact_account")
-                            .max_height((ctx.screen_rect().height() * 0.3).min(200.0))
-                            .show(ui, |ui| {
-                                ui.label(format!("设备：{}", self.identity.device_id));
-                                ui.add_space(4.0);
-                                ui.label("账号：");
-                                mobile::text_edit(
-                                    ui,
-                                    "login_username",
-                                    &mut self.username,
-                                    crate::platform::InputKind::Text,
-                                    ui.available_width(),
-                                );
-                                ui.label("密码：");
-                                mobile::text_edit(
-                                    ui,
-                                    "login_password",
-                                    &mut self.password,
-                                    crate::platform::InputKind::Password,
-                                    ui.available_width(),
-                                );
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.checkbox(&mut self.remember, "记住密码");
-                                    login_clicked = ui
-                                        .add_enabled(!self.login_busy, theme::primary_btn(btn_text))
-                                        .clicked();
-                                });
-                            });
-                    });
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new("NekoSports")
+                        .size(theme::FONT_BODY)
+                        .strong()
+                        .color(theme::ACCENT_700),
+                );
+                ui.label(
+                    egui::RichText::new(format!("WorldTool · v{}", crate::platform::version_name()))
+                        .size(theme::FONT_SMALL)
+                        .color(theme::TEXT_FAINT),
+                );
+            });
+        });
+    }
+
+    /// 顶栏：登录态 / IP / 设备号三枚状态胶囊 + 登录（登出）按钮。
+    /// 手机宽拆成两行（胶囊一行、按钮一行），避免窄屏下按钮把胶囊挤成竖排。
+    fn draw_top_bar(&mut self, ui: &mut egui::Ui, compact: bool) {
+        ui.add_space(theme::space::SM);
+        let logged = self.session.is_some();
+        let name_text = match &self.session {
+            Some(s) => Some(format!("● {}（uid={}）", s.name, s.uid)),
+            None => None,
+        };
+        let ip_text = if self.ip.is_empty() {
+            None
+        } else if self.ip == "失败" {
+            Some("IP 失败".to_string())
+        } else {
+            Some(format!("IP {}", self.ip))
+        };
+        let device_text = format!("设备 {}", short_id(&self.identity.device_id));
+        let busy = self.login_busy;
+
+        let chip_identity = |ui: &mut egui::Ui| match &name_text {
+            Some(n) => components::chip(ui, n, components::Tone::Ok),
+            None => components::chip(ui, "● 未登录", components::Tone::Err),
+        };
+        let chip_ip = |ui: &mut egui::Ui| match &ip_text {
+            Some(t) => {
+                let tone = if t.starts_with("IP 失败") {
+                    components::Tone::Err
+                } else {
+                    components::Tone::Neutral
+                };
+                components::chip(ui, t, tone);
+            }
+            None => components::chip(ui, "IP 获取中", components::Tone::Warn),
+        };
+        let login_btn = |ui: &mut egui::Ui, clicked: &mut bool| {
+            let btn = if logged {
+                theme::secondary_btn("登出")
+            } else if self.auth_expired {
+                theme::primary_btn("重新登录")
             } else {
-                egui::Grid::new("top_row1")
-                    .num_columns(6)
-                    .spacing([10.0, 3.0])
+                theme::primary_btn("登录")
+            };
+            if ui.add_enabled(!busy, btn).clicked() {
+                *clicked = true;
+            }
+        };
+
+        let mut login_clicked = false;
+        if compact {
+            // 手机宽：第一行登录态 + IP，第二行设备号 + 登录按钮。
+            // 必须包在 horizontal 里，否则 with_layout 会吃掉整个面板的剩余高度。
+            ui.horizontal(|ui| {
+                chip_identity(ui);
+                chip_ip(ui);
+            });
+            ui.add_space(theme::space::XS);
+            ui.horizontal(|ui| {
+                components::chip(ui, &device_text, components::Tone::Neutral);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    login_btn(ui, &mut login_clicked);
+                });
+            });
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                chip_identity(ui);
+                chip_ip(ui);
+                components::chip(ui, &device_text, components::Tone::Neutral);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    login_btn(ui, &mut login_clicked);
+                });
+            });
+        }
+        ui.add_space(theme::space::SM);
+        if login_clicked {
+            if logged {
+                self.do_logout();
+            } else {
+                // 账号或密码为空时先给出校验提示，再打开弹窗引导填写；
+                // 已保存凭据则直接进弹窗确认后提交。
+                if self.username.trim().is_empty() || self.password.is_empty() {
+                    self.status = "请填写账号和密码".into();
+                }
+                self.login_open = true;
+            }
+        }
+    }
+
+    /// 桌面底部状态栏。
+    fn draw_status_bar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(theme::space::XS);
+        let log_len = self.log.len();
+        let status = self.status.clone();
+        let semester_text = self.data_page.semester.as_ref().map(|s| {
+            format!(
+                "学期 {}：有效 {}/{} 次",
+                s.sname, s.semester_valid_count, s.semester_count
+            )
+        });
+        let cheat_text = self.data_page.cheat.as_ref().map(|c| {
+            let tone = match c.status() {
+                crate::api::cheat::Status::NoRecord => components::Tone::Ok,
+                crate::api::cheat::Status::Flagged => components::Tone::Err,
+                _ => components::Tone::Warn,
+            };
+            (tone, c.label().to_string())
+        });
+        let updating = self.update.checking || self.update.downloading;
+        let version = crate::platform::version_name();
+        let mut check_clicked = false;
+
+        ui.horizontal_wrapped(|ui| {
+            components::chip(ui, &format!("日志 {} 行", log_len), components::Tone::Neutral);
+            if let Some(s) = &semester_text {
+                ui.label(egui::RichText::new(s).size(theme::FONT_SMALL).color(theme::TEXT_DIM));
+            }
+            if let Some((tone, text)) = &cheat_text {
+                components::chip(ui, text, *tone);
+            }
+            ui.separator();
+            ui.label(egui::RichText::new(&status).size(theme::FONT_SMALL).color(theme::TEXT_DIM));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(
+                        !updating,
+                        egui::Button::new(
+                            egui::RichText::new("检查更新").small().color(theme::text_dim()),
+                        ),
+                    )
+                    .clicked()
+                {
+                    check_clicked = true;
+                }
+                ui.label(
+                    egui::RichText::new(format!("v{}", version))
+                        .small()
+                        .color(theme::text_dim()),
+                );
+            });
+        });
+        ui.add_space(theme::space::XS);
+        if check_clicked {
+            self.check_update(true);
+        }
+    }
+
+    /// 登录弹窗。
+    fn draw_login_window(&mut self, ctx: &egui::Context) {
+        if !self.login_open {
+            return;
+        }
+        let mut open = true;
+        let busy = self.login_busy;
+        let mut submit = false;
+        let mut cancel = false;
+        egui::Window::new(egui::RichText::new("登录").strong())
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_width(280.0);
+                egui::Grid::new("login_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 8.0])
                     .show(ui, |ui| {
-                        draw_connection(ui);
-                        ui.label("设备：");
-                        ui.monospace(&self.identity.device_id);
-                        ui.end_row();
-                    });
-                ui.add_space(3.0);
-                egui::Grid::new("top_row2")
-                    .num_columns(5)
-                    .spacing([8.0, 3.0])
-                    .show(ui, |ui| {
-                        ui.label("账号：");
+                        ui.label("账号");
                         mobile::text_edit(
                             ui,
                             "login_username",
                             &mut self.username,
                             crate::platform::InputKind::Text,
-                            220.0,
+                            180.0,
                         );
-                        ui.label("密码：");
+                        ui.end_row();
+                        ui.label("密码");
                         mobile::text_edit(
                             ui,
                             "login_password",
                             &mut self.password,
                             crate::platform::InputKind::Password,
-                            200.0,
+                            180.0,
                         );
-                        ui.checkbox(&mut self.remember, "记住密码");
-                        login_clicked = ui
-                            .add_enabled(!self.login_busy, theme::primary_btn(btn_text))
-                            .clicked();
                         ui.end_row();
                     });
-            }
-            if login_clicked {
-                if logged {
-                    self.do_logout();
-                } else {
-                    self.do_login();
-                }
-            }
-            ui.add_space(4.0);
-        });
-
-        // ── 底部状态栏 ──────────────────────────────────────────
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            if mobile::compact_ui(ui) {
+                ui.checkbox(&mut self.remember, "记住密码");
+                ui.add_space(theme::space::SM);
                 ui.horizontal(|ui| {
-                    ui.add(egui::Label::new(&self.status).truncate());
-                });
-                return;
-            }
-            ui.horizontal_wrapped(|ui| {
-                ui.label(format!("日志 {} 行", self.log.len()));
-                ui.separator();
-                if let Some(s) = &self.data_page.semester {
-                    ui.label(format!(
-                        "学期 {}：有效 {}/{} 次",
-                        s.sname, s.semester_valid_count, s.semester_count
-                    ));
-                }
-                if let Some(c) = &self.data_page.cheat {
-                    ctx.request_repaint_after(std::time::Duration::from_secs(1));
-                    ui.label(c.label());
-                }
-                ui.separator();
-                ui.label(&self.status);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 超链接但不用链接样式，纯文本观感
-                    ui.hyperlink_to(
-                        egui::RichText::new("YanamiNeko").color(theme::text_dim()),
-                        "https://github.com/YanamiNeko",
-                    );
-                    ui.label(egui::RichText::new("Powered by").color(theme::text_dim()));
-                    ui.separator();
                     if ui
-                        .add_enabled(
-                            !(self.update.checking || self.update.downloading),
-                            egui::Button::new(
-                                egui::RichText::new("检查更新")
-                                    .small()
-                                    .color(theme::text_dim()),
-                            ),
-                        )
+                        .add_enabled(!busy, theme::primary_btn("登录"))
                         .clicked()
                     {
-                        self.check_update(true);
+                        submit = true;
                     }
-                    ui.label(
-                        egui::RichText::new(format!("v{}", crate::platform::version_name()))
-                            .small()
-                            .color(theme::text_dim()),
-                    );
+                    if ui.add(theme::ghost_btn("取消")).clicked() {
+                        cancel = true;
+                    }
                 });
             });
-            ui.add_space(2.0);
+        if !open || cancel {
+            self.login_open = false;
+        }
+        if submit {
+            self.login_open = false;
+            self.do_login();
+        }
+    }
+
+    /// 应用骨架：桌面侧栏 / 顶栏 / 手机底部导航 / 内容区。
+    fn draw_shell(&mut self, ctx: &egui::Context) {
+        // ── 桌面分组侧栏 ──────────────────────────────────────
+        let compact = mobile::is_compact(ctx.screen_rect().width());
+        if !compact {
+            egui::SidePanel::left("nav_panel")
+                .default_width(200.0)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.add_space(theme::space::SM);
+                    self.draw_side_brand(ui);
+                    ui.separator();
+                    mobile::side_nav(ui, &mut self.tab);
+                });
+        }
+
+        // ── 顶栏（状态胶囊 + 登录）────────────────────────────
+        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+            self.draw_top_bar(ui, compact);
         });
 
-        // ── 标签页 ──────────────────────────────────────────────
+        // ── 底部：手机导航 / 桌面状态栏 ───────────────────────
+        if compact {
+            egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
+                mobile::bottom_nav(ui, &mut self.tab);
+            });
+        } else {
+            egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+                self.draw_status_bar(ui);
+            });
+        }
+
+        // ── 内容区 ────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
-            mobile::tab_bar(ui, &mut self.tab);
-            ui.separator();
+            // 手机宽：工具页（设备信息/运行日志/路网/关于）是「我的」的二级页，
+            // 顶部给一条返回条；桌面宽由左侧分组侧栏直达，无需返回条。
+            if compact && self.tab >= 5 {
+                let title = mobile::page_label(self.tab);
+                if mobile::sub_page_header(ui, title) {
+                    self.tab = mobile::MOBILE_HOME;
+                }
+            }
             match self.tab {
                 0 => self.draw_run(ui),
                 1 => self.draw_ai(ui),
@@ -409,6 +528,7 @@ impl App {
             remember,
             login_busy: false,
             auth_expired: false,
+            login_open: false,
             run_busy: false,
             ai_busy: false,
             ai_submit_active: false,

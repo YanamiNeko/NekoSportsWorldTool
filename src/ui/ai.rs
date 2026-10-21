@@ -1,6 +1,6 @@
 //! AI 运动页：多项目选择 / 按分钟与按次 / 单次提交 / 批量补签。
 
-use super::{mobile, theme, App};
+use super::{components, mobile, theme, App};
 use crate::api::ai::AiMode;
 use eframe::egui;
 
@@ -33,22 +33,30 @@ impl App {
     }
 
     fn draw_ai_content(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-
-        // 项目多选
-        ui.label("项目（可多选）：");
-        egui::ScrollArea::horizontal().show(ui, |ui| {
-            ui.horizontal(|ui| {
+        // 卡片 1：选择项目（chip 多选）
+        components::card_titled(ui, "选择项目", |ui| {
+            let total = self.ai_page.list.len();
+            ui.horizontal_wrapped(|ui| {
                 for s in &self.ai_page.list {
                     let picked = self.ai_page.picked.contains(&s.id);
-                    let response = if mobile::compact_ui(ui) {
-                        ui.add_sized(
-                            [96.0, mobile::TOUCH_HEIGHT],
-                            egui::SelectableLabel::new(picked, &s.name),
-                        )
+                    let text = if picked {
+                        egui::RichText::new(&s.name).color(theme::ACCENT_700).strong()
                     } else {
-                        ui.selectable_label(picked, &s.name)
+                        egui::RichText::new(&s.name).color(theme::TEXT_DIM)
                     };
+                    let response = ui.add(
+                        egui::Button::new(text)
+                            .fill(if picked {
+                                theme::ACCENT_50
+                            } else {
+                                theme::SURFACE
+                            })
+                            .stroke(egui::Stroke::new(
+                                1.0_f32,
+                                if picked { theme::ACCENT_200 } else { theme::BORDER },
+                            ))
+                            .rounding(egui::Rounding::same(999.0)),
+                    );
                     if response.clicked() {
                         if picked {
                             self.ai_page.picked.retain(|&x| x != s.id);
@@ -58,84 +66,125 @@ impl App {
                     }
                 }
             });
+            ui.add_space(theme::space::SM);
+            ui.horizontal(|ui| {
+                if ui.small_button("全选").clicked() {
+                    self.ai_page.picked = self.ai_page.list.iter().map(|s| s.id).collect();
+                }
+                if ui.small_button("清空").clicked() {
+                    self.ai_page.picked.clear();
+                }
+                components::chip(
+                    ui,
+                    &format!("已选 {}/{}", self.ai_page.picked.len(), total),
+                    components::Tone::Info,
+                );
+            });
         });
 
-        ui.add_space(6.0);
-        mobile::row(ui, |ui| {
-            ui.radio_value(&mut self.ai_page.mode, 0, "按分钟");
-            ui.radio_value(&mut self.ai_page.mode, 1, "按次");
-        });
+        // 卡片 2：成绩参数 + 单发提交
+        components::card_titled(ui, "成绩参数", |ui| {
+            mobile::row(ui, |ui| {
+                ui.radio_value(&mut self.ai_page.mode, 0, "按分钟");
+                ui.radio_value(&mut self.ai_page.mode, 1, "按次");
+            });
 
-        egui::Grid::new("ai_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-            if self.ai_page.mode == 0 {
-                ui.label("时长（分钟）：");
-                mobile::drag_i64(ui, "ai_minutes", &mut self.config.ai_minutes, 1..=30, 1.0, "", " 分钟");
-                ui.end_row();
-            } else {
-                ui.label("个数：");
-                mobile::drag_i64(ui, "ai_reps", &mut self.config.ai_reps, 5..=1000, 5.0, "", " 个");
-                ui.end_row();
-            }
-            ui.label("补签天数（含今天）：");
-            mobile::drag_i64(ui, "ai_days", &mut self.ai_page.days, 1..=60, 1.0, "", " 天");
-            ui.end_row();
-            ui.label("每天次数：");
-            mobile::drag_i64(ui, "ai_per_day", &mut self.ai_page.per_day, 1..=10, 1.0, "", "");
-            ui.end_row();
-        });
-
-        ui.add_space(8.0);
-        let logged = self.session.is_some();
-        let one_enabled = !self.ai_busy && logged && !self.ai_page.list.is_empty();
-        mobile::row(ui, |ui| {
-            if ui.add_enabled(one_enabled, theme::primary_btn("提交成绩")).clicked() {
-                let sport_id = self
-                    .ai_page
-                    .list
-                    .get(self.ai_page.selected)
-                    .map(|s| s.id)
-                    .unwrap_or(0);
-                self.submit_ai_once(sport_id);
-            }
-            if self.ai_busy {
-                ui.label("提交中…");
-            }
-        });
-
-        self.draw_single_selector(ui);
-
-        // ── 批量补签 ────────────────────────────────────────────
-        ui.add_space(10.0);
-        ui.separator();
-        ui.label("批量补签（单线程顺序提交，每天随机时刻）");
-        let picked = self.ai_page.picked.clone();
-        let days = self.ai_page.days.max(1);
-        let per = self.ai_page.per_day.max(1);
-        let total = picked.len() as i64 * days * per;
-        mobile::row(ui, |ui| {
-            let batch_label = format!(
-                "批量提交（{}天 × {}次 × {}项 = {} 条）",
-                days,
-                per,
-                picked.len(),
-                total
-            );
-            let btn = theme::primary_btn(&batch_label);
-            let response = if mobile::compact_ui(ui) {
-                ui.add_enabled_ui(!self.ai_busy && logged && !picked.is_empty(), |ui| {
-                    ui.add_sized([ui.available_width(), mobile::TOUCH_HEIGHT], btn)
-                }).inner
-            } else {
-                ui.add_enabled(!self.ai_busy && logged && !picked.is_empty(), btn)
-            };
-            if response.clicked() {
-                self.ai_confirm = Some(AiBatchPlan {
-                    sport_ids: picked,
-                    days,
-                    per_day: per,
-                    mode: self.ai_mode(),
+            egui::Grid::new("ai_grid")
+                .num_columns(2)
+                .spacing([10.0, 6.0])
+                .show(ui, |ui| {
+                    if self.ai_page.mode == 0 {
+                        ui.label("时长（分钟）：");
+                        mobile::drag_i64(
+                            ui,
+                            "ai_minutes",
+                            &mut self.config.ai_minutes,
+                            1..=30,
+                            1.0,
+                            "",
+                            " 分钟",
+                        );
+                        ui.end_row();
+                    } else {
+                        ui.label("个数：");
+                        mobile::drag_i64(
+                            ui,
+                            "ai_reps",
+                            &mut self.config.ai_reps,
+                            5..=1000,
+                            5.0,
+                            "",
+                            " 个",
+                        );
+                        ui.end_row();
+                    }
+                    ui.label("补签天数（含今天）：");
+                    mobile::drag_i64(ui, "ai_days", &mut self.ai_page.days, 1..=60, 1.0, "", " 天");
+                    ui.end_row();
+                    ui.label("每天次数：");
+                    mobile::drag_i64(
+                        ui,
+                        "ai_per_day",
+                        &mut self.ai_page.per_day,
+                        1..=10,
+                        1.0,
+                        "",
+                        "",
+                    );
+                    ui.end_row();
                 });
-            }
+
+            self.draw_single_selector(ui);
+
+            let logged = self.session.is_some();
+            let one_enabled = !self.ai_busy && logged && !self.ai_page.list.is_empty();
+            mobile::row(ui, |ui| {
+                if ui
+                    .add_enabled(one_enabled, theme::primary_btn("提交成绩"))
+                    .clicked()
+                {
+                    let sport_id = self
+                        .ai_page
+                        .list
+                        .get(self.ai_page.selected)
+                        .map(|s| s.id)
+                        .unwrap_or(0);
+                    self.submit_ai_once(sport_id);
+                }
+                if self.ai_busy {
+                    ui.label("提交中…");
+                }
+            });
+        });
+
+        // 卡片 3：批量补签
+        components::card_titled(ui, "批量补签", |ui| {
+            let picked = self.ai_page.picked.clone();
+            let days = self.ai_page.days.max(1);
+            let per = self.ai_page.per_day.max(1);
+            let total = picked.len() as i64 * days * per;
+            let logged = self.session.is_some();
+            ui.label("单线程顺序提交，每天随机时刻");
+            mobile::row(ui, |ui| {
+                let batch_label = format!(
+                    "批量提交（{}天 × {}次 × {}项 = {} 条）",
+                    days,
+                    per,
+                    picked.len(),
+                    total
+                );
+                let btn = theme::primary_btn(&batch_label);
+                let response =
+                    ui.add_enabled(!self.ai_busy && logged && !picked.is_empty(), btn);
+                if response.clicked() {
+                    self.ai_confirm = Some(AiBatchPlan {
+                        sport_ids: picked,
+                        days,
+                        per_day: per,
+                        mode: self.ai_mode(),
+                    });
+                }
+            });
         });
 
         if let Some(plan) = self.ai_confirm.take() {
@@ -145,28 +194,28 @@ impl App {
             egui::Window::new(
                 egui::RichText::new("确认批量提交").strong().color(theme::text()),
             )
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .order(egui::Order::Foreground)
-                .show(ui.ctx(), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "将顺序提交 {} 条：{} 天 × 每天 {} 次 × {} 个项目",
-                            total, plan.days, plan.per_day, plan.sport_ids.len()
-                        ))
-                        .color(theme::text()),
-                    );
-                    ui.add_space(6.0);
-                    mobile::row(ui, |ui| {
-                        if ui.button("取消").clicked() {
-                            cancelled = true;
-                        }
-                        if ui.add(theme::primary_btn("确认提交")).clicked() {
-                            confirmed = true;
-                        }
-                    });
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "将顺序提交 {} 条：{} 天 × 每天 {} 次 × {} 个项目",
+                        total, plan.days, plan.per_day, plan.sport_ids.len()
+                    ))
+                    .color(theme::text()),
+                );
+                ui.add_space(6.0);
+                mobile::row(ui, |ui| {
+                    if ui.button("取消").clicked() {
+                        cancelled = true;
+                    }
+                    if ui.add(theme::primary_btn("确认提交")).clicked() {
+                        confirmed = true;
+                    }
                 });
+            });
             if confirmed {
                 self.run_ai_batch(plan);
             } else if cancelled {

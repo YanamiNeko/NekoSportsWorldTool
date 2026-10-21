@@ -3,7 +3,7 @@
 //! 桌面端替换 exe 后走 relaunch 重启；Android 端下载 APK 到私有目录后
 //! 交给系统安装器（platform::install_apk）。
 
-use super::{theme, App};
+use super::{components, mobile, theme, App};
 use crate::update::ReleaseInfo;
 use eframe::egui;
 
@@ -36,118 +36,127 @@ pub enum FinishAction {
 
 impl App {
     pub fn draw_about(&mut self, ui: &mut egui::Ui) {
-        ui.heading("NekoSportsWorldTool");
-        ui.add_space(6.0);
-        ui.label(format!("当前版本：v{}", crate::platform::version_name()));
-        let repo = if cfg!(target_os = "android") {
-            crate::update::REPO_FORK
-        } else {
-            crate::update::REPO_UPSTREAM
-        };
-        ui.hyperlink_to(
-            egui::RichText::new(format!("https://github.com/{repo}/releases")).color(theme::text_dim()),
-            format!("https://github.com/{repo}/releases"),
-        );
-        ui.add_space(4.0);
-        ui.colored_label(
-            theme::text_dim(),
-            "手动更新：下载对应平台的新程序文件；Windows 用户退出软件后，用新的 nekosportsworldtool.exe 替换旧文件。",
-        );
-        ui.colored_label(
-            theme::text_dim(),
-            "请保留 config.json、identity.json、points_cache.json 等配置文件，不要删除或修改。",
-        );
-        ui.add_space(10.0);
+        // ── 关于本程序 ──────────────────────────────────────────
+        components::card_titled(ui, "关于本程序", |ui| {
+            ui.label(
+                egui::RichText::new("NekoSportsWorldTool")
+                    .size(theme::FONT_SUBTITLE)
+                    .strong()
+                    .color(theme::TEXT),
+            );
+            ui.label(format!("当前版本：v{}", crate::platform::version_name()));
+            let repo = if cfg!(target_os = "android") {
+                crate::update::REPO_FORK
+            } else {
+                crate::update::REPO_UPSTREAM
+            };
+            ui.hyperlink_to(
+                egui::RichText::new(format!("https://github.com/{repo}/releases"))
+                    .color(theme::text_dim()),
+                format!("https://github.com/{repo}/releases"),
+            );
+            ui.add_space(theme::space::XS);
+            components::notice(
+                ui,
+                components::Tone::Neutral,
+                "手动更新：下载对应平台的新程序文件；Windows 用户退出软件后，用新的 nekosportsworldtool.exe 替换旧文件。",
+            );
+            components::notice(
+                ui,
+                components::Tone::Neutral,
+                "请保留 config.json、identity.json、points_cache.json 等配置文件，不要删除或修改。",
+            );
+        });
 
         // ── 检查 / 版本信息 ────────────────────────────────────
-        ui.horizontal(|ui| {
-            let busy = self.update.checking || self.update.downloading;
-            if ui.add_enabled(!busy, theme::primary_btn("检查更新")).clicked() {
-                self.check_update(true);
+        components::card_titled(ui, "检查更新", |ui| {
+            mobile::row(ui, |ui| {
+                let busy = self.update.checking || self.update.downloading;
+                if ui.add_enabled(!busy, theme::primary_btn("检查更新")).clicked() {
+                    self.check_update(true);
+                }
+                if self.update.checking {
+                    ui.colored_label(theme::text_dim(), "检查中…");
+                } else if self.update.up_to_date {
+                    ui.colored_label(theme::ok(), "√ 已是最新版本");
+                }
+            });
+            if let Some(e) = &self.update.check_error {
+                ui.colored_label(theme::err(), format!("× {e}"));
             }
-            if self.update.checking {
-                ui.colored_label(theme::text_dim(), "检查中…");
-            } else if self.update.up_to_date {
-                ui.colored_label(theme::ok(), "√ 已是最新版本");
-            }
-        });
-        if let Some(e) = &self.update.check_error {
-            ui.colored_label(theme::err(), format!("× {e}"));
-        }
-        if let Some(rel) = &self.update.latest {
-            ui.add_space(6.0);
-            ui.label(format!(
-                "最新版本：{}（{:.1} MB，{}）",
-                rel.tag,
-                rel.asset_size as f64 / 1024.0 / 1024.0,
-                rel.repo
-            ));
-            if !rel.title.is_empty() {
-                ui.colored_label(theme::text_dim(), &rel.title);
-            }
-            let notes: Vec<&str> = rel.notes.lines().take(12).collect();
-            if !notes.is_empty() {
-                ui.add_space(4.0);
-                egui::ScrollArea::vertical()
-                    .id_salt("about_notes")
-                    .max_height(160.0)
-                    .show(ui, |ui| {
-                        for line in notes {
-                            ui.label(egui::RichText::new(line).small().color(theme::text_dim()));
+            if let Some(rel) = &self.update.latest {
+                ui.add_space(theme::space::SM);
+                ui.label(format!(
+                    "最新版本：{}（{:.1} MB，{}）",
+                    rel.tag,
+                    rel.asset_size as f64 / 1024.0 / 1024.0,
+                    rel.repo
+                ));
+                if !rel.title.is_empty() {
+                    ui.colored_label(theme::text_dim(), &rel.title);
+                }
+                let notes: Vec<&str> = rel.notes.lines().take(12).collect();
+                if !notes.is_empty() {
+                    ui.add_space(theme::space::XS);
+                    egui::ScrollArea::vertical()
+                        .id_salt("about_notes")
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            for line in notes {
+                                ui.label(egui::RichText::new(line).small().color(theme::text_dim()));
+                            }
+                        });
+                }
+                ui.add_space(theme::space::SM);
+                if self.update.downloading {
+                    self.draw_download_progress(ui);
+                } else if self.update.finish.is_none() {
+                    if ui.add(theme::primary_btn("立即更新")).clicked() {
+                        if self.any_busy() {
+                            self.status = "有任务进行中，请稍后再试".into();
+                        } else {
+                            let rel = rel.clone();
+                            self.update.confirm = Some(rel);
                         }
-                    });
-            }
-            ui.add_space(6.0);
-            if self.update.downloading {
-                self.draw_download_progress(ui);
-            } else if self.update.finish.is_none() {
-                if ui.button("立即更新").clicked() {
-                    if self.any_busy() {
-                        self.status = "有任务进行中，请稍后再试".into();
-                    } else {
-                        let rel = rel.clone();
-                        self.update.confirm = Some(rel);
                     }
                 }
             }
-        }
-        if self.update.downloading && self.update.latest.is_none() {
-            self.draw_download_progress(ui);
-        }
-        if let Some(fin) = self.update.finish.clone() {
-            ui.add_space(6.0);
-            match fin {
-                FinishAction::Restart { tag } => {
-                    ui.colored_label(theme::ok(), format!("√ 已更新到 {tag}，重启后生效"));
-                }
-                FinishAction::InstallApk { tag } => {
-                    ui.colored_label(theme::ok(), format!("√ 已下载 {tag}，请在弹窗中安装"));
+            if self.update.downloading && self.update.latest.is_none() {
+                self.draw_download_progress(ui);
+            }
+            if let Some(fin) = self.update.finish.clone() {
+                ui.add_space(theme::space::SM);
+                match fin {
+                    FinishAction::Restart { tag } => {
+                        ui.colored_label(theme::ok(), format!("√ 已更新到 {tag}，重启后生效"));
+                    }
+                    FinishAction::InstallApk { tag } => {
+                        ui.colored_label(theme::ok(), format!("√ 已下载 {tag}，请在弹窗中安装"));
+                    }
                 }
             }
-        }
-
-        ui.add_space(14.0);
-        ui.separator();
+        });
 
         // ── 启动检查模式 ───────────────────────────────────────
-        ui.label("启动时检查更新：");
-        ui.horizontal(|ui| {
-            for (m, label) in
-                [("silent", "静默检查（发现新版才提示）"), ("ask", "每次询问"), ("off", "关闭")]
-            {
-                let selected = self.config.update_check == m;
-                if ui.radio(selected, label).clicked() {
-                    self.config.update_check = m.to_string();
-                    if crate::api::model::save_config(&self.config).is_ok() {
-                        self.status = "已保存启动检查设置".into();
+        components::card_titled(ui, "启动时检查更新", |ui| {
+            mobile::row(ui, |ui| {
+                for (m, label) in
+                    [("silent", "静默检查（发现新版才提示）"), ("ask", "每次询问"), ("off", "关闭")]
+                {
+                    let selected = self.config.update_check == m;
+                    if ui.radio(selected, label).clicked() {
+                        self.config.update_check = m.to_string();
+                        if crate::api::model::save_config(&self.config).is_ok() {
+                            self.status = "已保存启动检查设置".into();
+                        }
                     }
                 }
-            }
+            });
+            ui.colored_label(
+                theme::text_dim(),
+                "协议变更时旧版本可能异常，建议保持开启",
+            );
         });
-        ui.colored_label(
-            theme::text_dim(),
-            "协议变更时旧版本可能异常，建议保持开启",
-        );
     }
 
     fn draw_download_progress(&self, ui: &mut egui::Ui) {

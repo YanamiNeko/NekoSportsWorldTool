@@ -111,7 +111,35 @@ impl App {
             if self.handle_fetch_error(&msg) {
                 continue;
             }
-            if let Some(v) = msg.strip_prefix("__ROAD_STAGE__") {
+            if let Some(payload) = msg.strip_prefix("__RUN_PREVIEW_DONE__") {
+                self.run_busy = false;
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+                    if value["ok"].as_bool() == Some(true) {
+                        self.status = "检查通过，未提交运动记录".into();
+                        if value["mode"].as_str()==Some("free") {
+                            let key=value["key"].as_str().unwrap_or("");
+                            if key==self.free_preview_key() {
+                                self.run_page.free_checked_key=key.into();
+                                self.run_page.free_checked_path=serde_json::from_value(value["path"].clone()).unwrap_or_default();
+                            } else {
+                                self.status="预览已完成，但参数已变化，请重新检查".into();
+                            }
+                        }
+                        self.popup = Some(PopupInfo {
+                            title: "仅检查/预览完成".into(),
+                            lines: vec![
+                                "已读取学校策略并验证本地路线，未提交或上传运动记录。".into(),
+                                format!("距离 {} 米；时长 {} 秒；{} 个采样点", value["distance"], value["duration"], value["samples"]),
+                                if value["uses_real_roads"].as_bool()==Some(true) { "路线来源：真实道路；含地图中提供的建筑数据。" } else { "路线来源：本地几何仿真，未包含道路与建筑数据。" }.into(),
+                                "服务端是否接收及最终计分尚未验证。".into(),
+                            ],
+                        });
+                    } else {
+                        self.status = format!("检查失败：{}", value["message"].as_str().unwrap_or("未知错误"));
+                        self.log.push(&self.status);
+                    }
+                }
+            } else if let Some(v) = msg.strip_prefix("__ROAD_STAGE__") {
                 if let Some((id, stage)) = v.split_once('|') {
                     if self.osm_page.busy
                         && id.parse::<u64>().ok() == Some(self.osm_page.request_id)
@@ -617,7 +645,10 @@ fn run_popup(v: &serde_json::Value) -> PopupInfo {
             }
         ));
         lines.push(format!("服务端达标判定：{}", verification.label()));
-        if let Some(error) = verification.error {
+        if let Some(status) = verification.status_summary() {
+            lines.push(status);
+        }
+        if let Some(error) = &verification.error {
             lines.push(format!("详情错误：{error}"));
         }
         if let Some(list) = verification
@@ -626,14 +657,17 @@ fn run_popup(v: &serde_json::Value) -> PopupInfo {
             .and_then(|d| d.get("reasonList"))
             .and_then(|v| v.as_array())
         {
+            if !list.is_empty() {
+                lines.push(crate::api::flow::REASON_LIST_NOTE.into());
+            }
             for r in list {
                 let label = match r.get("complete").and_then(|v| v.as_bool()) {
-                    Some(true) => "达标",
-                    Some(false) => "未达标",
+                    Some(true) => "通过",
+                    Some(false) => "未通过",
                     None => "未知",
                 };
                 lines.push(format!(
-                    "判定：{} {}",
+                    "明细（参考）：{} {}",
                     label,
                     r["reason"].as_str().unwrap_or("")
                 ));
@@ -710,5 +744,29 @@ mod result_tests {
         assert!(second.contains("详情读取：失败"));
         assert!(second.contains("服务端达标判定：未知"));
         assert!(!second.contains("点位未经过"));
+    }
+    #[test]
+    fn accepted_run_with_failed_point_checks_keeps_the_overall_grade() {
+        let verification = crate::api::flow::Verification::from_result(Ok(json!({
+            "complete":true,"status":0,"statusInfo":"恭喜您完成了跑步",
+            "reasonList":[{"complete":false,"reason":"经过必经点位"},
+                {"complete":false,"reason":"至少通过2个普通点位"}]
+        })));
+        let popup = run_popup(&json!({"rrid":1,"obs_ok":2,"verification":verification}));
+        let text = popup.lines.join("\n");
+        assert!(text.contains("服务端达标判定：达标"));
+        assert!(text.contains("服务端状态（status=0）：恭喜您完成了跑步"));
+        assert!(text.contains(crate::api::flow::REASON_LIST_NOTE));
+        assert!(text.contains("明细（参考）：未通过 经过必经点位"));
+        assert!(!text.contains("服务端达标判定：未达标"));
+    }
+    #[test]
+    fn popup_shows_validity_status_separately_from_completion() {
+        let verification = crate::api::flow::Verification::from_result(Ok(json!({
+            "complete":true,"status":1,"statusInfo":"本次成绩无效"
+        })));
+        let text = run_popup(&json!({"verification":verification})).lines.join("\n");
+        assert!(text.contains("服务端达标判定：达标"));
+        assert!(text.contains("服务端状态（status=1）：本次成绩无效"));
     }
 }

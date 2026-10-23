@@ -486,7 +486,8 @@ impl App {
             if let Some(host) = detail_test_host {
                 client.set_test_host(host);
             }
-            match crate::api::records::fetch_detail(&mut client, rrid) {
+            // Preserve status, optional completion, and the original checklist fields.
+            match crate::api::records::fetch_one_record(&mut client, rrid) {
                 Ok(d) => {
                     let payload = serde_json::to_string(&d).unwrap_or_default();
                     tx.send(format!("{RUN_DETAIL}{payload}")).ok();

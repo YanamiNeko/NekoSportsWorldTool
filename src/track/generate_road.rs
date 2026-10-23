@@ -20,7 +20,7 @@ use route_planner::{
     KinParams, RoadGraph, Route, RouteOptions, Sdf,
 };
 
-/// 路线算法模式（二选一）。
+/// 路线算法模式。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum RouteMode {
     /// 经典打卡点环（Catmull-Rom）。
@@ -28,13 +28,24 @@ pub enum RouteMode {
     Legacy,
     /// 真实道路拓扑路由。
     Road,
+    /// 学校策略允许时，在定位锚点附近生成无需打卡点的路线。
+    Free,
 }
 
 impl RouteMode {
     pub fn from_str(s: &str) -> Self {
         match s {
             "road" => RouteMode::Road,
+            "free" => RouteMode::Free,
             _ => RouteMode::Legacy,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Road => "road",
+            Self::Free => "free",
         }
     }
 }
@@ -283,10 +294,6 @@ pub fn build_road(
     if dur <= 0 || !dist.is_finite() || dist <= 0.0 {
         return Err("距离和时长必须为正数".into());
     }
-    let mut rng = Rng::new(seed);
-    let dur_f = dur as f64;
-    let avg_v = dist / dur_f;
-    let a_c_max = 2.5;
     let mut required = route_bd.to_vec();
     for p in must_bd {
         if !required.contains(p) {
@@ -300,7 +307,29 @@ pub fn build_road(
         route_bd.iter().map(|q| q.0).sum::<f64>() / n_pts as f64,
         route_bd.iter().map(|q| q.1).sum::<f64>() / n_pts as f64,
     );
-    let (dense, arcs) = route_ring(&route, c_lat, c_lng);
+    build_on_route(dist, dur, seed, start_ms, &route, (c_lat, c_lng), net, &required)
+}
+
+/// Shared motion kernel for road routing and free-run geometry.
+pub(super) fn build_on_route(
+    dist: f64,
+    dur: i64,
+    seed: u64,
+    start_ms: i64,
+    route: &Route,
+    center: (f64, f64),
+    net: &RoadGraph,
+    required: &[(f64, f64)],
+) -> Result<Track, String> {
+    if dur <= 0 || !dist.is_finite() || dist <= 0.0 || route.points.len() < 2 || route.length_m <= 0.0 {
+        return Err("距离、时长或路线无效".into());
+    }
+    let mut rng = Rng::new(seed);
+    let dur_f = dur as f64;
+    let avg_v = dist / dur_f;
+    let a_c_max = 2.5;
+    let (c_lat, c_lng) = center;
+    let (dense, arcs) = route_ring(route, c_lat, c_lng);
 
     // 时间网格（同经典模式）
     let mut times = Vec::new();
@@ -324,7 +353,7 @@ pub fn build_road(
     };
     let speed_seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let w = pace_profile(
-        &route,
+        route,
         avg_v,
         &dts,
         dist,
@@ -562,7 +591,7 @@ pub fn build_road(
         locs = super::school_track::preserve_corners(
             locs,
             &positions,
-            &route,
+            route,
             &net.boundaries,
             start_ms,
         )?;
@@ -585,7 +614,7 @@ pub fn build_road(
     };
     super::stats::rebuild(&mut track);
     track.validate_consistency()?;
-    for point in route_bd.iter().chain(must_bd.iter()) {
+    for point in required {
         if !super::wire::passes_point(&track, *point) {
             return Err("最终道路轨迹未经过全部点位，请调整距离或路网".into());
         }

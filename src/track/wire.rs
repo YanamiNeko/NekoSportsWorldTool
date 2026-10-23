@@ -136,6 +136,15 @@ pub fn five_point_wrapper(points: &[Value], track: &Track, area: &RunAreaMeta) -
 
 /// 校验提交用五点轨迹仍是同一次点位请求产生的有效数据。
 pub fn validate_five_point_wrapper(wrapper: &str) -> Result<(), String> {
+    validate_point_wrapper(wrapper, false)
+}
+
+/// Free runs carry an explicitly empty checkpoint array, never locally invented IDs.
+pub fn validate_free_run_wrapper(wrapper: &str) -> Result<(), String> {
+    validate_point_wrapper(wrapper, true)
+}
+
+fn validate_point_wrapper(wrapper: &str, free_run: bool) -> Result<(), String> {
     let outer: Value =
         serde_json::from_str(wrapper).map_err(|e| format!("五点轨迹 JSON 无效: {e}"))?;
     let raw = outer
@@ -144,6 +153,9 @@ pub fn validate_five_point_wrapper(wrapper: &str) -> Result<(), String> {
         .ok_or("五点轨迹缺少 fivePointJson")?;
     let points: Vec<Value> =
         serde_json::from_str(raw).map_err(|e| format!("五点轨迹数组无效: {e}"))?;
+    if free_run {
+        return if points.is_empty() { Ok(()) } else { Err("无打卡点自由跑不能携带打卡点".into()) };
+    }
     if points.is_empty() {
         return Err("五点轨迹不能为空".into());
     }
@@ -168,6 +180,15 @@ mod validation_tests {
     fn rejects_empty_or_malformed_five_point_payload() {
         assert!(validate_five_point_wrapper("{}").is_err());
         assert!(validate_five_point_wrapper(r#"{"fivePointJson":"[]"}"#).is_err());
+    }
+
+    #[test]
+    fn only_free_run_accepts_empty_checkpoint_arrays() {
+        let empty = r#"{"fivePointJson":"[]"}"#;
+        assert!(validate_free_run_wrapper(empty).is_ok());
+        assert!(validate_five_point_wrapper(empty).is_err());
+        assert!(validate_free_run_wrapper("{}").is_err());
+        assert!(validate_free_run_wrapper(r#"{"fivePointJson":"[{}]"}"#).is_err());
     }
 
     #[test]

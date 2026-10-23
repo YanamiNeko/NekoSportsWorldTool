@@ -6,6 +6,50 @@ mod route_refresh_tests;
 #[path = "violation_tests.rs"]
 mod violation_tests;
 
+#[test]
+fn accepted_run_detail_keeps_failed_point_checks_as_reference_items() {
+    for (w, h) in [(360.0, 760.0), (1100.0, 900.0)] {
+        let ctx = egui::Context::default();
+        let mut app = App::from_state(&ctx, HeaderIdentity::default(), Session::default(), Config::default());
+        app.tab = 2;
+        app.records_page.detail_rrid = Some(42);
+        app.records_page.detail_raw = Some(serde_json::json!({
+            "rrid":42,"complete":true,"status":0,"statusInfo":"恭喜您完成了跑步",
+            "totalTime":1325.0,
+            "reasonList":[{"complete":false,"type":2,"reason":"经过必经点位"}]
+        }));
+        scroll_to_label(&mut app, &ctx, w, h, "服务端达标判定");
+        scroll_to_label(&mut app, &ctx, w, h, "达标");
+        scroll_to_label(&mut app, &ctx, w, h, "22:05");
+        scroll_to_label(&mut app, &ctx, w, h, "检查明细（服务端原始子项）");
+        scroll_to_label(&mut app, &ctx, w, h, "未通过（参考项）");
+        scroll_to_label(&mut app, &ctx, w, h, "经过必经点位");
+    }
+}
+
+#[test]
+fn free_run_mode_is_visible_clickable_and_persisted_without_a_school_map() {
+    for (w, h) in [(360.0, 760.0), (1100.0, 900.0)] {
+        let root = std::env::temp_dir().join(format!("free-run-ui-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        crate::platform::TEST_DATA_DIR.with(|p| *p.borrow_mut() = Some(root.clone()));
+        let ctx = egui::Context::default();
+        let mut app = App::from_state(&ctx, HeaderIdentity {
+            city:"测试城市".into(), anchor_lat:39.9, anchor_lon:116.4, ..Default::default()
+        }, Session::default(), Config::default());
+        let at = scroll_to_label(&mut app, &ctx, w, h, "自由跑（无打卡点）");
+        click(&mut app, &ctx, w, h, at);
+        assert_eq!(app.run_page.route_mode, crate::track::generate_road::RouteMode::Free);
+        assert_eq!(model::load_config().route_mode, "free");
+        assert!(app.network.is_none());
+        assert!(!app.osm_page.busy);
+        let _ = scroll_to_label(&mut app, &ctx, w, h, "仅检查/预览（不提交）");
+        assert_eq!(crate::track::generate_road::RouteMode::from_str(&model::load_config().route_mode), crate::track::generate_road::RouteMode::Free);
+        crate::platform::TEST_DATA_DIR.with(|p| *p.borrow_mut() = None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 fn frame(
     app: &mut App,
     ctx: &egui::Context,

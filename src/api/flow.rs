@@ -28,6 +28,7 @@ pub struct RunParams {
     pub seed: u64,
     /// 路线算法模式。
     pub route_mode: RouteMode,
+    pub free_use_roads: bool,
 }
 
 pub struct RunOutcome {
@@ -47,20 +48,9 @@ impl Verification {
     pub fn from_result(result: Result<Value, String>) -> Self {
         match result {
             Ok(detail) => {
-                // An explicit failure wins over a contradictory top-level flag.
-                let failed = detail
-                    .get("reasonList")
-                    .and_then(Value::as_array)
-                    .map(|rows| {
-                        rows.iter()
-                            .any(|r| r.get("complete").and_then(Value::as_bool) == Some(false))
-                    })
-                    .unwrap_or(false);
-                let complete = if failed {
-                    Some(false)
-                } else {
-                    detail.get("complete").and_then(Value::as_bool)
-                };
+                // reasonList can include failed point checks even when the server
+                // accepts the run. Preserve its overall decision, including unknown.
+                let complete = detail.get("complete").and_then(Value::as_bool);
                 Self {
                     complete,
                     detail: Some(detail),
@@ -81,7 +71,24 @@ impl Verification {
             None => "未知",
         }
     }
+
+    /// Validity/review status is separate from the overall completion flag.
+    pub fn status_summary(&self) -> Option<String> {
+        let detail = self.detail.as_ref()?;
+        let code = detail.get("status").filter(|v| !v.is_null());
+        let info = detail.get("statusInfo").and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        match (code, info) {
+            (Some(code), Some(info)) => Some(format!("服务端状态（status={code}）：{info}")),
+            (Some(code), None) => Some(format!("服务端状态：status={code}")),
+            (None, Some(info)) => Some(format!("服务端状态：{info}")),
+            (None, None) => None,
+        }
+    }
 }
+
+pub const REASON_LIST_NOTE: &str =
+    "检查明细为服务端原始子项，不用于重新计算总判定；点位要求以学校策略为准。";
 
 fn sleep_secs(s: u64) {
     std::thread::sleep(std::time::Duration::from_secs(s));
@@ -101,19 +108,18 @@ pub fn run_full_flow(
     )
 }
 
-pub fn run_full_flow_cancellable(
+/// Build and validate a complete plan without submitting a record or uploading OBS.
+pub fn prepare_run(
     client: &mut ApiClient,
     params: &RunParams,
     log: &mut dyn FnMut(&str),
     control: &crate::task_control::Control,
-) -> Result<RunOutcome, String> {
+) -> Result<SubmitParams, String> {
     control.check()?;
     if !params.dist.is_finite() || params.dist <= 0.0 || params.dur <= 0 {
         return Err("距离和时长必须为正数".into());
     }
     let sess: Session = client.login.clone().ok_or("未登录")?;
-
-    super::submission_guard::preflight(client, params.start_ms, params.dur, log)?;
 
     // ① policy
     log("[policy] 拉取跑步策略…");
@@ -139,16 +145,23 @@ pub fn run_full_flow_cancellable(
     };
 
     // ② 实时点位（拒绝本地样本兜底）
-    log("[points] 拉取实时点位…");
+    log(if params.route_mode == RouteMode::Free { "[free] 核对自由跑条件…" } else { "[points] 拉取实时点位…" });
     if client.identity.has_unconfigured_default_location() {
         return Err("请先在设备信息页填写本次跑步所在城市和定位锚点，不能使用大连默认配置".into());
     }
     let anchor: Coordinate = client.identity.anchor_coordinate()?;
     let area_id = (fences.area.run_area_id >= 0).then(|| fences.area.run_area_id.to_string());
-    let pts = points::fetch_points_ext(client, anchor, area_id, log)?;
-    if pts.is_empty() {
-        return Err("实时点位为空 —— 拒绝本地样本兜底".into());
-    }
+    let pts = if params.route_mode == RouteMode::Free {
+        pol.validate_free_run(params.dist, !fences.polygons.is_empty())?;
+        log(if params.free_use_roads { "[free] 学校策略允许自由跑；按定位获取道路，不请求打卡点" } else { "[free] 学校策略允许自由跑；使用本地几何仿真，不请求打卡点" });
+        Vec::new()
+    } else {
+        let points = points::fetch_points_ext(client, anchor, area_id, log)?;
+        if points.is_empty() {
+            return Err("实时点位为空 —— 拒绝本地样本兜底".into());
+        }
+        points
+    };
     log(&format!("√ [points] {} 个点位", pts.len()));
     for p in pts.iter().take(5) {
         log(&format!(
@@ -223,6 +236,23 @@ pub fn run_full_flow_cancellable(
             start_ms,
             &route_pts,
         ),
+        RouteMode::Free => {
+            if params.free_use_roads {
+                let config = super::model::load_config();
+                let mut net = super::school_roads::load_for_free_run_cancellable(
+                    &config.osm_path, &sess.unid, &fences.polygons,
+                    (anchor.latitude,anchor.longitude), control, log,
+                )?;
+                crate::track::generate_road::align_network(&mut net);
+                let net = crate::track::generate_road::apply_fences(&net,&fences.polygons);
+                log(&format!("[free] 真实地图：{} 个道路节点、{} 个建筑轮廓",net.graph.node_count(),net.buildings.len()));
+                crate::track::free_run::build_on_roads(params.dist,params.dur,params.seed,
+                    (anchor.latitude,anchor.longitude),start_ms,&net)?
+            } else {
+                crate::track::generator::build_free(params.dist,params.dur,params.seed,
+                    (anchor.latitude,anchor.longitude),start_ms)?
+            }
+        },
     };
     control.check()?;
     if let Some(range) = params.manual_altitude_range {
@@ -251,6 +281,9 @@ pub fn run_full_flow_cancellable(
 
     // ④ 五点 wrapper（跑完态）
     track.validate_consistency()?;
+    if params.route_mode == RouteMode::Free {
+        validate_free_run_fences(&track, &fences.polygons)?;
+    }
     for point in &pol.must_points {
         if !crate::track::wire::passes_point(&track, *point) {
             return Err("最终轨迹未经过策略必经点，请调整路线".into());
@@ -258,9 +291,6 @@ pub fn run_full_flow_cancellable(
     }
     let five = five_point_wrapper(&pts, &track, &fences.area);
 
-    // ⑤ 提交（sportType=1）
-    control.begin_submit()?;
-    log("[record] 提交跑步记录（已进入提交，不能撤回）…");
     let sp = SubmitParams {
         track,
         uid: sess.uid,
@@ -271,8 +301,52 @@ pub fn run_full_flow_cancellable(
         weight: if sess.weight > 0.0 { sess.weight } else { 68.0 },
         face_check: params.face_check,
         five_point_json: five,
+        free_run: params.route_mode == RouteMode::Free,
         address: client.identity.city.clone(),
     };
+    if sp.free_run {
+        crate::track::wire::validate_free_run_wrapper(&sp.five_point_json)?;
+    } else {
+        crate::track::wire::validate_five_point_wrapper(&sp.five_point_json)?;
+    }
+    control.check()?;
+    Ok(sp)
+}
+
+fn validate_free_run_fences(
+    track: &crate::track::model::Track,
+    fences: &[Vec<(f64, f64)>],
+) -> Result<(), String> {
+    if fences.is_empty() {
+        return Ok(());
+    }
+    let polygons: Vec<Vec<route_planner::Coord>> = fences.iter().map(|ring| {
+        ring.iter().map(|&(lat, lon)| route_planner::Coord::new(lon, lat)).collect()
+    }).collect();
+    let path: Vec<_> = track.locations.iter().map(|p| route_planner::Coord::new(p.gLng, p.gLat)).collect();
+    if path.iter().any(|&p| !route_planner::boundary::contains(&polygons, p))
+        || path.windows(2).any(|p| !route_planner::boundary::segment_inside(&polygons, p[0], p[1]))
+    {
+        return Err("自由跑路线超出学校围栏，请调整定位锚点或使用道路路由".into());
+    }
+    Ok(())
+}
+
+pub fn run_full_flow_cancellable(
+    client: &mut ApiClient,
+    params: &RunParams,
+    log: &mut dyn FnMut(&str),
+    control: &crate::task_control::Control,
+) -> Result<RunOutcome, String> {
+    control.check()?;
+    if !params.dist.is_finite() || params.dist <= 0.0 || params.dur <= 0 {
+        return Err("距离和时长必须为正数".into());
+    }
+    let sess = client.login.clone().ok_or("未登录")?;
+    super::submission_guard::preflight(client, params.start_ms, params.dur, log)?;
+    let sp = prepare_run(client, params, log, control)?;
+    control.begin_submit()?;
+    log("[record] 提交跑步记录（已进入提交，不能撤回）…");
     let result = submit_record(client, &sp, log)?;
     sleep_secs(1);
 
@@ -310,6 +384,14 @@ pub fn run_full_flow_cancellable(
         },
         verification.label()
     ));
+    if let Some(status) = verification.status_summary() {
+        log(&format!("[verify] {status}"));
+    }
+    if verification.detail.as_ref().and_then(|d| d.get("reasonList"))
+        .and_then(Value::as_array).is_some_and(|rows| !rows.is_empty())
+    {
+        log(&format!("[verify] {REASON_LIST_NOTE}"));
+    }
     if let Some(error) = &verification.error {
         log(&format!("⚠ [verify] {error}"));
     }
@@ -380,7 +462,32 @@ mod verification_tests {
         let contradictory = Verification::from_result(Ok(
             json!({"complete": true, "reasonList": [{"complete": false}]}),
         ));
-        assert_eq!(contradictory.complete, Some(false));
+        assert_eq!(contradictory.complete, Some(true));
+    }
+    #[test]
+    fn overall_completion_preserves_server_decision_independently_of_reasons() {
+        for (overall, reasons, expected) in [
+            (json!(true), json!([{"complete":false,"type":2,"reason":"经过必经点位"},
+                {"complete":false,"type":3,"reason":"至少通过2个普通点位"}]), Some(true)),
+            (json!(false), json!([{"complete":true}]), Some(false)),
+            (Value::Null, json!([{"complete":false}]), None),
+            (Value::Null, json!([{"complete":true}]), None),
+        ] {
+            let raw = json!({"complete":overall,"status":0,"reasonList":reasons});
+            let verification = Verification::from_result(Ok(raw.clone()));
+            assert_eq!(verification.complete, expected);
+            assert_eq!(verification.detail, Some(raw));
+        }
+    }
+    #[test]
+    fn a_completed_run_does_not_hide_an_invalidity_status() {
+        let verification = Verification::from_result(Ok(json!({
+            "complete":true,"status":1,"statusInfo":"检测到跑步数据异常，本次成绩无效"
+        })));
+        assert_eq!(verification.label(), "达标");
+        assert_eq!(verification.status_summary().as_deref(),
+            Some("服务端状态（status=1）：检测到跑步数据异常，本次成绩无效"));
+        assert_eq!(Verification::from_result(Ok(json!({"complete":true}))).status_summary(), None);
     }
     #[test]
     fn consecutive_results_do_not_share_details() {
@@ -392,3 +499,7 @@ mod verification_tests {
         assert_eq!(second.error.as_deref(), Some("offline"));
     }
 }
+
+#[cfg(test)]
+#[path = "free_run_tests.rs"]
+mod free_run_tests;

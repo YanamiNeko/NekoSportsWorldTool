@@ -4,6 +4,7 @@ pub mod altitude;
 pub mod analysis;
 pub mod calorie;
 pub mod generate_road;
+pub mod free_run;
 pub mod generator;
 pub mod geom;
 pub mod model;

@@ -118,6 +118,42 @@ fn download(query: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+fn map_url(query: &str) -> Result<String,String> {
+    let bbox=query.split("way[highway](").nth(1).and_then(|v| v.split(')').next()).ok_or("地图请求范围无效")?;
+    let values=bbox.split(',').map(str::parse::<f64>).collect::<Result<Vec<_>,_>>().map_err(|_| "地图请求范围无效")?;
+    if values.len()!=4 || values.iter().any(|n| !n.is_finite())
+        || values[0]>=values[2] || values[1]>=values[3]
+        || (values[2]-values[0])*(values[3]-values[1])>0.01 {
+        return Err("地图下载范围过大或无效，请导入本地 OSM 文件".into());
+    }
+    Ok(format!("https://api.openstreetmap.org/api/0.6/map?bbox={},{},{},{}",values[1],values[0],values[3],values[2]))
+}
+
+/// A bounded public map request; no account or session credentials leave this process.
+pub fn load_for_free_run_cancellable(
+    path:&str, school:&str, fences:&[Vec<(f64,f64)>], anchor:(f64,f64),
+    control:&crate::task_control::Control, log:&mut dyn FnMut(&str),
+) -> Result<RoadGraph,String> {
+    control.check()?;
+    if !path.trim().is_empty() {
+        let net=crate::track::generate_road::load_network_path(path)?;
+        control.check()?;
+        return Ok(net);
+    }
+    log("[free-map] 获取定位附近的 OpenStreetMap 道路和建筑，不请求学校打卡点");
+    cached_route_network(&cache_dir(),school,fences,&[anchor],false,crate::crypto::envelope::now_ms(),|query| {
+        control.check()?;
+        let response=ureq::AgentBuilder::new().timeout(Duration::from_secs(30)).build()
+            .get(&map_url(query)?)
+            .set("User-Agent","NekoSportsWorldTool/0.3.0 (free-run-map)")
+            .call().map_err(|error| format!("定位附近地图获取失败：{error}；可导入本地 OSM 文件"))?;
+        let mut bytes=Vec::new();
+        response.into_reader().take(MAX_BYTES+1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+        control.check()?;
+        Ok(bytes)
+    },log)
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Cache {
     key: String,
@@ -404,6 +440,14 @@ pub fn load_for_route_cancellable(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_map_url_uses_wgs_bbox_order_and_rejects_unbounded_downloads() {
+        let url=map_url("[out:xml];(way[highway](39.8,116.3,39.804,116.304););out body;").unwrap();
+        assert_eq!(url,"https://api.openstreetmap.org/api/0.6/map?bbox=116.3,39.8,116.304,39.804");
+        for query in ["", "way[highway](0,0,10,10)","way[highway](2,3,1,4)","way[highway](nan,0,1,1)"] {
+            assert!(map_url(query).is_err());
+        }
+    }
     fn fixture() -> (Vec<Vec<(f64, f64)>>, Vec<u8>) {
         let fences = vec![vec![
             (39.899, 116.399),

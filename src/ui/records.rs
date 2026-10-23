@@ -527,6 +527,7 @@ fn draw_ai_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
 }
 
 fn draw_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
+    let verification = crate::api::flow::Verification::from_result(Ok(raw.clone()));
     let g = |k: &str| -> String {
         match raw.get(k) {
             Some(serde_json::Value::String(s)) if !s.is_empty() => s.clone(),
@@ -535,9 +536,12 @@ fn draw_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
         }
     };
     let f = |k: &str| -> f64 { raw.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) };
-    let i = |k: &str| -> i64 { raw.get(k).and_then(|v| v.as_i64()).unwrap_or(0) };
+    let i = |k: &str| -> i64 {
+        raw.get(k).and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|n| n as i64))).unwrap_or(0)
+    };
 
     let mut items: Vec<(&str, String)> = vec![
+                ("服务端达标判定", verification.label().into()),
                 ("距离", format!("{:.2} km", f("totalDis") / 1000.0)),
                 ("有效里程", format!("{:.2} km", f("validDis") / 1000.0)),
                 ("时长", {
@@ -559,7 +563,7 @@ fn draw_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
                     if hi > 0.0 { format!("{:.2} ~ {:.2} m/s", lo, hi) } else { "-".into() }
                 }),
                 ("地址", g("address")),
-                ("状态", g("statusInfo")),
+                ("状态", verification.status_summary().unwrap_or_default()),
             ];
     let st_ms = i("startTime");
     if st_ms > 0 {
@@ -596,19 +600,22 @@ fn draw_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
         });
     }
 
-    // 达标判定
+    // Keep the raw checklist visible without recomputing the server's decision.
     if let Some(list) = raw.get("reasonList").and_then(|x| x.as_array()) {
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("达标判定").strong().color(theme::text()));
+        ui.label(egui::RichText::new("检查明细（服务端原始子项）").strong().color(theme::text()));
+        ui.label(egui::RichText::new(crate::api::flow::REASON_LIST_NOTE).color(theme::text_dim()));
         for r in list {
-            let ok = r.get("complete").and_then(|x| x.as_bool()).unwrap_or(false);
+            let ok = r.get("complete").and_then(|x| x.as_bool());
             let reason = r.get("reason").and_then(|x| x.as_str()).unwrap_or("");
             mobile::row(ui, |ui| {
-                if ok {
-                    ui.colored_label(theme::ok(), "√");
-                } else {
-                    ui.colored_label(theme::err(), "×");
-                }
+                let (color, label) = match ok {
+                    Some(true) => (theme::ok(), "通过"),
+                    Some(false) if verification.complete == Some(true) => (theme::text_dim(), "未通过（参考项）"),
+                    Some(false) => (theme::err(), "未通过"),
+                    None => (theme::text_dim(), "未知"),
+                };
+                ui.colored_label(color, label);
                 ui.label(reason);
             });
         }

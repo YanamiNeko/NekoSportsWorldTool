@@ -158,7 +158,7 @@ fn params() -> SubmitParams {
     SubmitParams {
         five_point_json: json!({"fivePointJson":json!([{"lat":39.9,"lon":116.4,"glat":39.9,"glon":116.4}]).to_string()}).to_string(),
         track, uid:42, selected_unid:77, policy:1, policy_ts:123, min_distance:1000,
-        weight:68., face_check:0, address:"offline fixture".into(),
+        weight:68., face_check:0, address:"offline fixture".into(), free_run:false,
     }
 }
 fn error(result: Result<SubmitResult, String>) -> String {
@@ -166,6 +166,19 @@ fn error(result: Result<SubmitResult, String>) -> String {
         Ok(_) => panic!("unexpected success"),
         Err(e) => e,
     }
+}
+
+#[test]
+fn free_run_empty_checkpoints_reach_only_the_loopback_record_endpoint() {
+    let _fixture = Fixture::new();
+    let (host, task) = server(vec![Reply::Record(json!({"error":10000,"data":{"rrid":"42"}}))]);
+    let mut p = params();
+    p.free_run = true;
+    p.policy = 0;
+    p.track = crate::track::generator::build_free(1000.0, 400, 42, (39.9,116.4), 1_700_000_000_000).unwrap();
+    p.five_point_json = crate::track::wire::five_point_wrapper(&[], &p.track, &Default::default());
+    assert_eq!(submit_record(&mut client(&host), &p, &mut |_| {}).unwrap().rrid, 42);
+    assert_eq!(task.join().unwrap(), vec![RECORD_PATH]);
 }
 #[test]
 fn successful_post_then_same_plan_only_sends_once() {

@@ -13,6 +13,7 @@ pub fn dispatch(args: Vec<String>) -> i32 {
         "logout" => cmd_logout(),
         "run" => cmd_run(&rest),
         "template" => cmd_template(&rest),
+        "diagnose-route" => cmd_diagnose_route(),
         "ai" => cmd_ai(&rest),
         "ai-list" => cmd_ai_list(),
         "records" => cmd_records(),
@@ -40,6 +41,55 @@ pub fn dispatch(args: Vec<String>) -> i32 {
 
 fn usage() {
     super::usage();
+}
+
+/// Fetch route metadata only; never generate or submit a sports record.
+fn cmd_diagnose_route() -> i32 {
+    let result = (|| -> Result<(), String> {
+        let identity = model::load_identity();
+        let anchor = identity.anchor_coordinate()?;
+        if identity.has_unconfigured_default_location() {
+            return Err("当前城市或定位锚点尚未配置".into());
+        }
+        println!("位置校验通过");
+        let session = model::load_session();
+        if !session.is_logged_in() {
+            return Err("本地没有登录会话".into());
+        }
+        let school = session.unid.clone();
+        let config = model::load_config();
+        let mut client = ApiClient::new(identity, Some(session));
+        println!("阶段：读取学校围栏");
+        let response = crate::api::fence::fetch_geo_fence_response(&mut client)?;
+        let campuses = crate::api::campus::catalog(&response);
+        println!("围栏 {} 个，可选校区 {} 个", response.polygons.len(), campuses.len());
+        let selected = crate::api::campus::chosen(&campuses, config.school_campus.as_ref(), &school)
+            .or_else(|| campuses.first());
+        println!("阶段：读取学校策略");
+        let policy = crate::api::policy::fetch_policy(&mut client)?;
+        println!("策略读取成功，最低距离 {} 米，策略必经点 {} 个", policy.min_distance, policy.must_points.len());
+        if crate::track::generate_road::RouteMode::from_str(&config.route_mode) == crate::track::generate_road::RouteMode::Free {
+            policy.validate_free_run(config.dist_min as f64 * 1000.0, !response.polygons.is_empty())?;
+            println!("自由跑条件检查通过，无需请求打卡点；完整本地预览可使用 run --route free --dry-run");
+            return Ok(());
+        }
+        let area = match selected {
+            Some(campus) => campus.run_area_id(response.area.run_area_id)?,
+            None => (response.area.run_area_id >= 0).then(|| response.area.run_area_id.to_string()),
+        };
+        println!("阶段：获取路线点位");
+        let pts = crate::api::points::fetch_points_ext(&mut client, anchor, area, &mut logger())?;
+        println!("点位获取成功：{} 个", pts.len());
+        println!("诊断完成，未生成或提交运动记录");
+        Ok(())
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("诊断失败：{error}");
+            1
+        }
+    }
 }
 
 fn cmd_login(rest: &[&str]) -> i32 {
@@ -177,7 +227,32 @@ fn cmd_run(rest: &[&str]) -> i32 {
         manual_altitude_range,
         seed,
         route_mode,
+        free_use_roads: get(&flags,"free-roads").map(|v| v=="1").unwrap_or(cfg.free_use_roads),
     };
+    if get(&flags, "dry-run").is_some() {
+        return match crate::api::flow::prepare_run(
+            &mut client, &params, &mut log, &crate::task_control::Control::default(),
+        ) {
+            Ok(prepared) => {
+                let path = get(&flags, "out").map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| crate::platform::data_dir().join("run-preview.json"));
+                let value = serde_json::json!({
+                    "mode": route_mode.as_str(), "submitted": false,
+                    "motion_model": if route_mode==crate::track::generate_road::RouteMode::Legacy { "classic" } else { "road-shared" },
+                    "free_use_roads": params.free_use_roads,
+                    "distance_m": prepared.track.totalDistance,
+                    "duration_s": prepared.track.totalTime,
+                    "checkpoint_payload": serde_json::from_str::<serde_json::Value>(&prepared.five_point_json).unwrap(),
+                    "track": prepared.track,
+                });
+                match std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()) {
+                    Ok(()) => { println!("检查通过，未提交或上传运动记录。预览已保存：{}", path.display()); 0 }
+                    Err(error) => { eprintln!("保存预览失败：{error}"); 1 }
+                }
+            }
+            Err(error) => { eprintln!("检查失败：{error}"); 1 }
+        };
+    }
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {
             println!(

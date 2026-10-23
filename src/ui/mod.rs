@@ -24,6 +24,7 @@ mod road_tools;
 pub mod run;
 pub mod theme;
 pub mod user;
+pub mod watermark;
 
 use crate::api::model::{self, Config, HeaderIdentity, Session};
 use eframe::egui;
@@ -301,6 +302,7 @@ impl App {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             if mobile::compact_ui(ui) {
                 ui.horizontal(|ui| {
+                    watermark::show(ui);
                     ui.add(egui::Label::new(&self.status).truncate());
                 });
                 return;
@@ -320,6 +322,7 @@ impl App {
                 }
                 ui.separator();
                 ui.label(&self.status);
+                watermark::show(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // 超链接但不用链接样式，纯文本观感
                     ui.hyperlink_to(

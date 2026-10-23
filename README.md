@@ -37,6 +37,8 @@
 ```text
 NekoSportsWorldTool login --user <手机号> --pass <密码> --remember
 NekoSportsWorldTool run                                  # 一键跑步（--altitude 17.2 固定海拔，或 11.6-22.8 映射到区间）
+NekoSportsWorldTool run --dry-run --dist 2 --pace 360 --lat 39.9 --lon 116.4
+                                                         # 本地构建并校验轨迹/OBS；不登录、不联网、不上传
 NekoSportsWorldTool ai --sport 2 --score 26000           # AI 运动
 NekoSportsWorldTool rank main --type 1 --sort 1          # 排行榜
 NekoSportsWorldTool update [--check]           # 自动更新（--check 仅检查不下载）
@@ -46,6 +48,8 @@ NekoSportsWorldTool help                                 # 全部命令
 
 `template` 只读取用户手动选择的本地 GPX/JSON 文件，输出采样点、海拔范围、累计上升和累计下降，
 不会登录、访问服务器或把模板记录接入跑步上传流程。
+
+`run --dry-run` 使用本地生成器构造样本并校验轨迹一致性、五点包装、OBS 字段和速度窗口；不创建 API 客户端，也不读取保存的会话。可用 `--lat` / `--lon` 指定本地锚点，省略时使用文档中的示例坐标。
 
 手动海拔支持三种状态：留空使用自动海拔；填写单个数字（例如 `17.2`）让所有轨迹点使用固定海拔；填写区间（例如 `11.6-22.8`）将生成的海拔曲线映射到该上下限内，同时保留轨迹的相对起伏。
 

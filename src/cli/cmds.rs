@@ -82,13 +82,7 @@ fn cmd_logout() -> i32 {
 
 fn cmd_run(rest: &[&str]) -> i32 {
     let flags = parse_flags(rest);
-    let mut client = match make_client() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{e}");
-            return 1;
-        }
-    };
+    let dry_run = get(&flags, "dry-run").is_some();
     let dist_km: f32 = get(&flags, "dist")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.0);
@@ -122,10 +116,16 @@ fn cmd_run(rest: &[&str]) -> i32 {
     } else {
         seed
     };
-    let cfg = model::load_config();
-    let route_mode = crate::track::generate_road::RouteMode::from_str(
-        get(&flags, "route").unwrap_or(&cfg.route_mode),
-    );
+    let route_mode = if dry_run {
+        crate::track::generate_road::RouteMode::from_str(
+            get(&flags, "route").unwrap_or("legacy"),
+        )
+    } else {
+        let cfg = model::load_config();
+        crate::track::generate_road::RouteMode::from_str(
+            get(&flags, "route").unwrap_or(&cfg.route_mode),
+        )
+    };
 
     let dist = if dist_km > 0.0 {
         dist_km as f64 * 1000.0
@@ -167,7 +167,6 @@ fn cmd_run(rest: &[&str]) -> i32 {
         fmt_hms(start_ms)
     );
 
-    let mut log = logger();
     let params = crate::api::flow::RunParams {
         dist,
         dur,
@@ -178,6 +177,47 @@ fn cmd_run(rest: &[&str]) -> i32 {
         seed,
         route_mode,
     };
+    if dry_run {
+        let latitude = get(&flags, "lat")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(38.901678);
+        let longitude = get(&flags, "lon")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(121.540241);
+        let anchor = match crate::location::Coordinate::new(latitude, longitude, 0.0) {
+            Ok(anchor) => anchor,
+            Err(error) => {
+                eprintln!("dry-run anchor invalid: {error}");
+                return 1;
+            }
+        };
+        return match crate::api::flow::run_dry_run(&params, anchor) {
+            Ok(summary) => {
+                println!(
+                    "本地 dry-run 通过：{:.0}m / {}s / {} 个轨迹点 / {} 个 OBS key / 速度 {:.2}..{:.2}m/s；未登录、未联网、未上传",
+                    summary.distance_m,
+                    summary.duration_s,
+                    summary.track_points,
+                    summary.obs_keys,
+                    summary.min_speed_mps,
+                    summary.max_speed_mps,
+                );
+                0
+            }
+            Err(error) => {
+                eprintln!("本地 dry-run 失败：{error}");
+                1
+            }
+        };
+    }
+    let mut client = match make_client() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let mut log = logger();
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {
             println!(

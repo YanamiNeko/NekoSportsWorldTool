@@ -10,8 +10,10 @@ use super::submit::{submit_record, SubmitParams, SubmitResult};
 use crate::location::Coordinate;
 use crate::track::generate_road::RouteMode;
 use crate::track::generator::build as gen_track;
-use crate::track::wire::{build_obs_object, five_point_wrapper, obs_keys};
-use serde_json::Value;
+use crate::track::wire::{
+    build_obs_object, five_point_wrapper, obs_keys, validate_five_point_wrapper, RunAreaMeta,
+};
+use serde_json::{json, Value};
 
 #[derive(Clone, Copy)]
 pub struct RunParams {
@@ -34,6 +36,134 @@ pub struct RunOutcome {
     pub result: SubmitResult,
     pub obs_ok: usize,
     pub verification: Verification,
+}
+
+/// Summary of a local-only validation run. It never creates an API client or sends data.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DryRunSummary {
+    pub distance_m: f64,
+    pub duration_s: i64,
+    pub track_points: usize,
+    pub obs_keys: usize,
+    pub min_speed_mps: f64,
+    pub max_speed_mps: f64,
+}
+
+/// Build and validate a representative track and its wire payload without network access.
+pub fn run_dry_run(params: &RunParams, anchor: Coordinate) -> Result<DryRunSummary, String> {
+    anchor.validate()?;
+    if !params.dist.is_finite() || params.dist <= 0.0 {
+        return Err("dry-run distance must be finite and positive".into());
+    }
+    if params.dur <= 0 || params.start_ms <= 0 {
+        return Err("dry-run duration and start time must be positive".into());
+    }
+
+    let lat = anchor.latitude;
+    let lon = anchor.longitude;
+    let points = [
+        (lat - 0.0008, lon - 0.0010),
+        (lat - 0.0008, lon + 0.0010),
+        (lat + 0.0008, lon + 0.0010),
+        (lat + 0.0008, lon - 0.0010),
+    ];
+    let live_points: Vec<Value> = points
+        .into_iter()
+        .enumerate()
+        .map(|(i, (point_lat, point_lon))| {
+            json!({
+                "lat": point_lat,
+                "lon": point_lon,
+                "glat": point_lat,
+                "glon": point_lon,
+                "pointName": format!("dry-run-{i}"),
+                "isFixed": 1,
+            })
+        })
+        .collect();
+    let point_coords: Vec<(f64, f64)> = live_points
+        .iter()
+        .map(|point| {
+            let point_lat = point["lat"].as_f64().ok_or("dry-run point missing latitude")?;
+            let point_lon = point["lon"].as_f64().ok_or("dry-run point missing longitude")?;
+            Coordinate::new(point_lat, point_lon, 0.0)?;
+            Ok((point_lat, point_lon))
+        })
+        .collect::<Result<_, String>>()?;
+
+    let mut track = gen_track(
+        params.dist,
+        params.dur,
+        params.seed,
+        (lat, lon),
+        params.start_ms,
+        &point_coords,
+    );
+    if let Some(range) = params.manual_altitude_range {
+        crate::track::altitude::override_bd_a_range(&mut track, range)?;
+    } else if let Some(altitude) = params.manual_altitude {
+        crate::track::altitude::override_bd_a(&mut track, altitude)?;
+    }
+    track.validate_consistency()?;
+
+    let five_point = five_point_wrapper(&live_points, &track, &RunAreaMeta::default());
+    validate_five_point_wrapper(&five_point)?;
+    let five_point_json = serde_json::from_str::<Value>(&five_point)
+        .map_err(|error| format!("dry-run wrapper JSON invalid: {error}"))?
+        .get("fivePointJson")
+        .and_then(Value::as_str)
+        .ok_or("dry-run wrapper is missing fivePointJson")?
+        .to_string();
+    let obs = build_obs_object(&track, 0, "dry-run", 0, &five_point_json);
+    let keys = obs_keys(&track, 0, "dry-run");
+    if keys.len() != 2 {
+        return Err(format!("dry-run produced {} OBS keys, expected 2", keys.len()));
+    }
+    for key in [
+        "rrid",
+        "uuid",
+        "uid",
+        "run_data",
+        "fixed_point_json",
+        "segment_json",
+        "speed_json",
+        "step_freq_json",
+        "laps_json",
+        "runFaceCheck",
+    ] {
+        if obs.get(key).and_then(Value::as_str).is_none_or(str::is_empty) {
+            return Err(format!("dry-run produced an empty OBS field: {key}"));
+        }
+    }
+
+    let speeds: Vec<f64> = track
+        .locations
+        .iter()
+        .map(|point| point.avgSpeed)
+        .filter(|speed| speed.is_finite() && *speed > 0.0)
+        .collect();
+    let Some((&first, rest)) = speeds.split_first() else {
+        return Err("dry-run produced no valid speed samples".into());
+    };
+    let (min_speed_mps, max_speed_mps) = rest.iter().fold((first, first), |(min, max), speed| {
+        (min.min(*speed), max.max(*speed))
+    });
+    if min_speed_mps < crate::track::generator::SPEED_FLOOR
+        || max_speed_mps > crate::track::generator::SPEED_CEIL
+    {
+        return Err(format!(
+            "dry-run speed outside configured window: {min_speed_mps:.3}..{max_speed_mps:.3} m/s"
+        ));
+    }
+
+    Ok(DryRunSummary {
+        distance_m: track.totalDistance,
+        duration_s: track.totalTime,
+        track_points: track.locations.len(),
+        obs_keys: keys.len(),
+        min_speed_mps,
+        max_speed_mps,
+    })
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -390,5 +520,50 @@ mod verification_tests {
         assert!(second.detail.is_none());
         assert_eq!(second.complete, None);
         assert_eq!(second.error.as_deref(), Some("offline"));
+    }
+}
+
+#[cfg(test)]
+mod dry_run_tests {
+    use super::{run_dry_run, RunParams};
+    use crate::location::Coordinate;
+    use crate::track::generate_road::RouteMode;
+
+    fn params() -> RunParams {
+        RunParams {
+            dist: 2_000.0,
+            dur: 720,
+            start_ms: 1_700_000_000_000,
+            face_check: 1,
+            manual_altitude: None,
+            manual_altitude_range: None,
+            seed: 7,
+            route_mode: RouteMode::Legacy,
+        }
+    }
+
+    #[test]
+    fn local_dry_run_builds_valid_wire_payload() {
+        let summary = run_dry_run(
+            &params(),
+            Coordinate::new(39.9, 116.4, 0.0).unwrap(),
+        )
+        .unwrap();
+        assert!((summary.distance_m - 2_000.0).abs() < 1.0);
+        assert!(summary.track_points > 2);
+        assert_eq!(summary.obs_keys, 2);
+        assert!(summary.min_speed_mps >= crate::track::generator::SPEED_FLOOR);
+        assert!(summary.max_speed_mps <= crate::track::generator::SPEED_CEIL);
+    }
+
+    #[test]
+    fn dry_run_rejects_invalid_distance_without_network_access() {
+        let mut invalid = params();
+        invalid.dist = f64::NAN;
+        assert!(run_dry_run(
+            &invalid,
+            Coordinate::new(39.9, 116.4, 0.0).unwrap()
+        )
+        .is_err());
     }
 }

@@ -145,7 +145,8 @@ pub fn run_full_flow_cancellable(
     }
     let anchor: Coordinate = client.identity.anchor_coordinate()?;
     let area_id = (fences.area.run_area_id >= 0).then(|| fences.area.run_area_id.to_string());
-    let pts = points::fetch_points_ext(client, anchor, area_id, log)?;
+    // 点位集合随目标距离变化（官方路径 `/distance/<米>`），这里传本次目标距离
+    let pts = points::fetch_points_ext(client, anchor, area_id, params.dist, log)?;
     if pts.is_empty() {
         return Err("实时点位为空 —— 拒绝本地样本兜底".into());
     }

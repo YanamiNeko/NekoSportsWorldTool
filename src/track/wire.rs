@@ -115,7 +115,8 @@ pub fn five_point_payload(points: &[Value], track: &Track) -> Vec<Value> {
                 "isPass": bd.map(|xy| passes_point(track, xy)).unwrap_or(false),
                 "lat": lat, "lon": lon,
                 "pointName": p["pointName"].as_str().unwrap_or(""),
-                "position": p.get("position").cloned().unwrap_or_else(|| json!(999)),
+                // 真机 fivePointJson 的 position 就是数组下标（0,1,2,…）
+                "position": i,
                 "state": 0,
             })
         })
@@ -198,17 +199,29 @@ pub(crate) fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>
     let mut sp = Vec::new();
     let mut stf = Vec::new();
     let mut lo = 0;
+    // 真机（RunData.speed_json）语义：
+    //   · `id` 是**跨跑步单调递增**的序号（两次跑步分别 2..96、97..102），与 rrid 无关；
+    //   · `queueNum` 是**本次跑步内的 0 起下标**；
+    //   · 末窗可能不足 10s，而 `speedPerTenSec` 里每项都是满 10 秒的统计量，
+    //     必须按实际时长缩放，否则详情页会算出 300+ 步/分。
+    let _ = rrid;
+    let id_base = (start_ms / 1000).rem_euclid(100_000);
     for (i, a) in track.speedPerTenSec.iter().enumerate() {
         let b = &track.stepsPerTenSec[i];
         let hi = (lo + a.time).min(total_time);
-        let id = (rrid % 100000) * 1000 + hi;
+        let window_s = (hi - lo).max(1) as f64;
+        let frac = (window_s / a.time.max(1) as f64).clamp(0.01, 1.0);
+        let win_dist = (a.value * frac * 100.0).round() / 100.0;
+        let max_steps = (220.0 * window_s / 60.0).ceil() as i64;
+        let win_steps = ((b.value as f64 * frac).round() as i64).min(max_steps.max(0));
+        let id = id_base + i as i64;
         sp.push(json!({
             "beginTime": start_ms + lo * 1000,
-            "distance": a.value,
+            "distance": win_dist,
             "endTime": start_ms + hi * 1000,
             "flag": start_ms,
             "id": id,
-            "queueNum": 0,
+            "queueNum": i as i64,
             "state": 0,
         }));
         stf.push(json!({
@@ -219,9 +232,9 @@ pub(crate) fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>
             "id": id,
             "maxDiff": 0.0,
             "minDiff": 1000.0,
-            "queueNum": 0,
+            "queueNum": i as i64,
             "state": 0,
-            "stepsNum": b.value as i64,
+            "stepsNum": win_steps,
         }));
         lo = hi;
     }
@@ -469,5 +482,71 @@ mod regression_tests {
             obs_keys(&track, 1, "test")[0],
             "run_data/1970010200/test.json"
         );
+    }
+}
+
+#[cfg(test)]
+mod window_and_position_tests {
+    use super::*;
+    use crate::track::model::{TenWindow, Track};
+
+    fn track_with(total_time: i64) -> Track {
+        let n = ((total_time + 9) / 10) as usize;
+        Track {
+            totalTime: total_time,
+            totalDistance: 2000.0,
+            validDistance: 2000.0,
+            validTime: total_time,
+            startTime: 1_792_730_659_564,
+            startLatitude: 23.05,
+            startLongitude: 113.37,
+            locations: Vec::new(),
+            totalSteps: 1800,
+            speedPerTenSec: (0..n).map(|_| TenWindow { time: 10, value: 30.0 }).collect(),
+            stepsPerTenSec: (0..n).map(|_| TenWindow { time: 10, value: 26.0 }).collect(),
+            segments: Vec::new(),
+        }
+    }
+
+    /// 末窗不足 10s 时按实际时长缩放，避免详情页算出 300+ 步/分。
+    #[test]
+    fn last_partial_window_keeps_cadence_sane() {
+        let (sp, stf) = build_windows(&track_with(1237), 0);
+        let last = stf.last().unwrap();
+        let secs = ((last["endTime"].as_i64().unwrap() - last["beginTime"].as_i64().unwrap()) as f64
+            / 1000.0)
+            .max(0.1);
+        let cadence = last["stepsNum"].as_i64().unwrap() as f64 / secs * 60.0;
+        assert!(cadence <= 225.0, "末窗步频 {cadence:.0} spm 异常");
+
+        let v = sp.last().unwrap()["distance"].as_f64().unwrap() / secs;
+        assert!(v < 12.0, "末窗隐含速度 {v:.1} m/s 异常");
+    }
+
+    /// `id` 必须是跨跑步递增的序号，`queueNum` 是窗内下标。
+    #[test]
+    fn window_ids_are_sequential() {
+        let (sp, stf) = build_windows(&track_with(60), 99_999_999);
+        let ids: Vec<i64> = sp.iter().map(|w| w["id"].as_i64().unwrap()).collect();
+        assert_eq!(ids, vec![ids[0], ids[0] + 1, ids[0] + 2, ids[0] + 3, ids[0] + 4, ids[0] + 5]);
+        for (i, w) in sp.iter().enumerate() {
+            assert_eq!(w["queueNum"].as_i64().unwrap(), i as i64);
+        }
+        assert_eq!(stf[1]["queueNum"].as_i64().unwrap(), 1);
+    }
+
+    /// 五点的 `position` 用数组下标（真机样本为 0,1,2,…）。
+    #[test]
+    fn five_point_position_uses_array_index() {
+        let track = track_with(60);
+        let payload = five_point_payload(
+            &[
+                serde_json::json!({"lat":1.0,"lon":1.0}),
+                serde_json::json!({"lat":2.0,"lon":2.0}),
+            ],
+            &track,
+        );
+        assert_eq!(payload[0]["position"], 0);
+        assert_eq!(payload[1]["position"], 1);
     }
 }

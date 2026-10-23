@@ -396,6 +396,9 @@ pub struct PointsCacheScope {
     pub uid: i64,
     pub unid: String,
     pub run_area_id: Option<String>,
+    /// 拉点位时用的目标距离（米，取整）。不同距离对应不同点位集合，不能复用。
+    #[serde(default)]
+    pub distance_m: i64,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -463,6 +466,7 @@ mod points_cache_tests {
                 uid: 1,
                 unid: "school".into(),
                 run_area_id: None,
+                distance_m: 2000,
             },
             points: vec![serde_json::json!({"lat":39.9,"lon":116.4})],
         };
@@ -481,6 +485,11 @@ mod points_cache_tests {
             },
             PointsCacheScope {
                 run_area_id: Some("42".into()),
+                ..cache.scope.clone()
+            },
+            // 距离不同 → 点位集合不同，不能复用
+            PointsCacheScope {
+                distance_m: 3000,
                 ..cache.scope.clone()
             },
         ] {

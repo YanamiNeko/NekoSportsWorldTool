@@ -54,6 +54,7 @@ pub struct SubmitParams {
     pub weight: f64,
     pub face_check: i64,
     pub five_point_json: String,
+    pub free_run: bool,
     pub address: String,
 }
 
@@ -84,7 +85,11 @@ pub fn submit_record(
         return Err("提交账号或学校与当前会话不一致".into());
     }
     p.track.validate_consistency()?;
-    validate_five_point_wrapper(&p.five_point_json)?;
+    if p.free_run {
+        crate::track::wire::validate_free_run_wrapper(&p.five_point_json)?;
+    } else {
+        validate_five_point_wrapper(&p.five_point_json)?;
+    }
     let stop_ms = p.track.totalTime.checked_mul(1000)
         .and_then(|n| p.track.startTime.checked_add(n)).ok_or("时间范围溢出")?;
     let mut guard = super::submission_guard::Guard::open(p.uid, p.selected_unid)?;
@@ -141,10 +146,7 @@ fn send_record(
 ) -> Result<SubmitResult, SubmitFailure> {
     let track = &p.track;
     let start_coordinate = track.validate_consistency()?;
-    if p.five_point_json.is_empty() {
-        return Err("五点轨迹不能为空".into());
-    }
-    validate_five_point_wrapper(&p.five_point_json)?;
+    // Checkpoint validation already completed before the write-ahead receipt was opened.
     let (speed_windows, step_windows) = submit_windows(track);
     let total_time = track.totalTime;
     let total_dis = track.totalDistance;

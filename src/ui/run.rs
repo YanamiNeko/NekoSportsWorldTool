@@ -107,6 +107,9 @@ pub struct RunPage {
     pub map_fitted: bool,
     /// Request whose WGS84 base map currently owns the viewport; None means BD09 preview.
     pub base_map_request: Option<u64>,
+    pub free_map_key: String,
+    pub free_checked_key: String,
+    pub free_checked_path: Vec<(f64,f64)>,
 }
 
 /// 一次提交的确定方案（进入页面/参数变更时抽样生成）。
@@ -414,15 +417,31 @@ impl App {
                 ui.label("路线算法：");
                 ui.selectable_value(&mut page.route_mode, RouteMode::Legacy, "经典打卡点环");
                 ui.selectable_value(&mut page.route_mode, RouteMode::Road, "真实道路路由");
+                ui.selectable_value(&mut page.route_mode, RouteMode::Free, "自由跑（无打卡点）");
                 if page.route_mode == RouteMode::Road && self.network.is_none() {
                     ui.colored_label(theme::warn(), "（正在按学校获取，可到路网页查看）");
                 }
             });
         }
 
+        if self.run_page.route_mode == RouteMode::Free {
+            if ui.checkbox(&mut self.config.free_use_roads, "沿真实道路生成（按定位获取地图，无需打卡点）").changed() {
+                let _ = crate::api::model::save_config(&self.config);
+            }
+        }
+
         // 切换到真实道路路由时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
-        if self.run_page.route_mode == RouteMode::Road && prev_route != RouteMode::Road {
-            self.refresh_points();
+        if self.run_page.route_mode != prev_route {
+            self.config.route_mode = self.run_page.route_mode.as_str().into();
+            let _ = crate::api::model::save_config(&self.config);
+            if self.run_page.route_mode == RouteMode::Road {
+                self.refresh_points();
+            } else if prev_route == RouteMode::Road {
+                self.osm_page.cancel.cancel();
+                self.osm_page.request_id = self.osm_page.request_id.wrapping_add(1);
+                self.osm_page.busy = false;
+                self.run_page.preview_cancel.cancel();
+            }
         }
 
         ui.add_space(8.0);
@@ -477,13 +496,16 @@ impl App {
         }
         let enabled = !self.run_busy && self.session.is_some();
         let btn = if self.run_busy {
-            theme::primary_btn("提交中…")
+            theme::primary_btn("处理中…")
         } else {
             theme::primary_btn("开始跑步")
         };
         mobile::row(ui, |ui| {
             if ui.add_enabled(enabled, btn).clicked() {
                 self.start_run();
+            }
+            if ui.add_enabled(enabled, egui::Button::new("仅检查/预览（不提交）")).clicked() {
+                self.start_run_mode(true);
             }
             if self.session.is_none() {
                 ui.label("（请先登录）");
@@ -528,6 +550,10 @@ impl App {
     }
 
     fn draw_run_map(&mut self, ui: &mut egui::Ui) {
+        if self.run_page.route_mode == RouteMode::Free {
+            self.draw_free_run_map(ui);
+            return;
+        }
         if self.run_page.route_mode != RouteMode::Road {
             ui.label("经典模式仅按点位拟合，不包含建筑避让；需要沿道路行进时请选择真实道路模式。");
             return;
@@ -860,6 +886,50 @@ impl App {
         self.run_page.map.interact(ui, canvas);
     }
 
+    fn draw_free_run_map(&mut self, ui: &mut egui::Ui) {
+        ui.label("自由跑：无需学校打卡点；使用与道路模式相同的运动模型。");
+        ui.label(if self.config.free_use_roads { "地图来源：真实道路与建筑。先点仅检查/预览，成功后显示实际路线。" } else { "地图来源：本地几何仿真，未包含真实道路与建筑。" });
+        if self.config.free_use_roads {
+            ui.hyperlink_to("地图数据 © OpenStreetMap contributors","https://www.openstreetmap.org/copyright");
+        }
+        if self.identity.has_unconfigured_default_location() {
+            ui.colored_label(theme::warn(), "请先在设备信息页保存有效的城市、纬度和经度。");
+            return;
+        }
+        let Some(plan) = self.run_page.plan.as_ref() else { return; };
+        let center = (self.identity.anchor_lat, self.identity.anchor_lon);
+        let key = self.free_preview_key();
+        let ring = if self.run_page.free_checked_key==key && !self.run_page.free_checked_path.is_empty() {
+            self.run_page.free_checked_path.clone()
+        } else if self.config.free_use_roads {
+            ui.label("尚无当前参数的道路预览。地图加载失败时可以重试或导入本地 OSM 文件。");
+            return;
+        } else { match crate::track::free_run::plan(center, plan.dist * 1000.0,plan.seed) {
+            Ok(route) => route.points.iter().map(|p| (p.lat,p.lon)).collect(),
+            Err(error) => { ui.colored_label(theme::warn(), error); return; }
+        }};
+        let (response, painter) = ui.allocate_painter(
+            egui::vec2(ui.available_width().max(200.0), 210.0), egui::Sense::drag(),
+        );
+        let canvas = response.rect;
+        if self.run_page.free_map_key != key {
+            self.run_page.map.fit(canvas, &ring);
+            self.run_page.free_map_key = key;
+        }
+        painter.rect_filled(canvas, egui::Rounding::ZERO, egui::Color32::from_rgb(250, 252, 251));
+        self.run_page.map.draw_polyline(&painter, canvas, &ring, theme::ok(), 2.0);
+        let anchor = self.run_page.map.to_screen(canvas, center.0, center.1);
+        painter.circle_filled(anchor, 4.0, egui::Color32::from_rgb(50, 110, 210));
+        painter.text(anchor + egui::vec2(8.0, 0.0), egui::Align2::LEFT_CENTER,
+            "定位锚点", egui::FontId::proportional(12.0), theme::plain());
+        self.run_page.map.interact(ui, canvas);
+    }
+
+    pub(super) fn free_preview_key(&self) -> String {
+        self.run_page.plan.as_ref().map(|p| format!("{}:{}:{}:{}:{}:{}:{}",
+            self.identity.anchor_lat,self.identity.anchor_lon,p.dist,p.dur,p.seed,self.config.free_use_roads,self.config.osm_path)).unwrap_or_default()
+    }
+
     fn draw_run_base_map(&mut self, ui: &mut egui::Ui, net: &route_planner::RoadGraph) {
         ui.label("基础地图：道路与建筑已加载，路线尚未生成。可拖拽和滚轮缩放。");
         super::map::legend(
@@ -895,6 +965,10 @@ impl App {
     }
 
     fn start_run(&mut self) {
+        self.start_run_mode(false);
+    }
+
+    fn start_run_mode(&mut self, preview_only: bool) {
         if self.run_busy { return; }
         if self.run_page.route_mode == RouteMode::Road && self.network.is_none() {
             self.status = "请先加载路网并刷新路线点位".into();
@@ -930,11 +1004,7 @@ impl App {
         self.config.face_check = page.face_check;
         self.config.manual_altitude = manual_altitude;
         self.config.manual_altitude_range = manual_altitude_range;
-        self.config.route_mode = if route_mode == RouteMode::Road {
-            "road".into()
-        } else {
-            "legacy".into()
-        };
+        self.config.route_mode = route_mode.as_str().into();
         let _ = crate::api::model::save_config(&self.config);
 
         let identity = self.identity.clone();
@@ -948,8 +1018,10 @@ impl App {
         self.run_busy = true;
         self.run_control = std::sync::Arc::new(crate::task_control::Control::default());
         let control = self.run_control.clone();
-        self.status = "跑步提交中…".into();
+        self.status = if preview_only { "正在检查路线，不提交运动记录…" } else { "跑步提交中…" }.into();
         let seed = plan.seed;
+        let free_use_roads = self.config.free_use_roads;
+        let preview_key = self.free_preview_key();
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
             let mut client = tx.client(identity, Some(session));
@@ -962,7 +1034,25 @@ impl App {
                 manual_altitude_range,
                 seed,
                 route_mode,
+                free_use_roads,
             };
+            if preview_only {
+                let payload = match crate::api::flow::prepare_run(&mut client, &params, &mut log, &control) {
+                    Ok(prepared) => serde_json::json!({
+                        "ok": true, "mode": route_mode.as_str(),
+                        "distance": prepared.track.totalDistance,
+                        "duration": prepared.track.totalTime,
+                        "samples": prepared.track.locations.len(),
+                        "key": preview_key,
+                        "free_use_roads": free_use_roads,
+                        "uses_real_roads": route_mode==RouteMode::Road || (route_mode==RouteMode::Free && free_use_roads),
+                        "path":prepared.track.locations.iter().map(|p| [p.gLat,p.gLng]).collect::<Vec<_>>(),
+                    }),
+                    Err(error) => serde_json::json!({"ok":false, "message":crate::road_status::explain(&error)}),
+                };
+                tx.send(format!("__RUN_PREVIEW_DONE__{payload}")).ok();
+                return;
+            }
             let payload = match crate::api::flow::run_full_flow_cancellable(
                 &mut client,
                 &params,

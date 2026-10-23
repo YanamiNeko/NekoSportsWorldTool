@@ -126,6 +126,36 @@ fn late_record_detail_cannot_replace_current_violation_record() {
 }
 
 #[test]
+fn run_detail_preserves_the_overall_grade_status_and_raw_point_checks() {
+    let detail = json!({
+        "rrid":42,"complete":true,"status":0,"statusInfo":"恭喜您完成了跑步",
+        "totalTime":1325.0,"totalDis":3473.0,
+        "reasonList":[{"complete":false,"reason":"经过必经点位","completeStatus":0,"type":2},
+            {"reason":"未提供子项状态"}]
+    });
+    let (host, server) = super::route_refresh_tests::mock_school(vec![(
+        crate::api::records::GET_ONE_PATH, json!({"error":10000,"data":detail})
+    )]);
+    let ctx = egui::Context::default();
+    let mut app = App::from_state(&ctx, HeaderIdentity::default(), Session {
+        uid:42, unid:"77".into(), token:"offline-only".into(), ..Default::default()
+    }, Config::default());
+    app.route_fixture = Some((host, std::env::temp_dir()));
+    app.records_page.detail_rrid = Some(42);
+    app.fetch_run_detail(42);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.records_page.detail_loading {
+        app.poll_messages();
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(server.join().unwrap(), 1);
+    let raw = app.records_page.detail_raw.unwrap();
+    assert_eq!(raw, detail);
+    assert_eq!(crate::api::flow::Verification::from_result(Ok(raw)).complete, Some(true));
+}
+
+#[test]
 fn mismatched_detail_finishes_with_an_error_for_the_requested_record() {
     let (host, server) = super::route_refresh_tests::mock_school(vec![(
         crate::api::records::GET_ONE_PATH,
@@ -179,7 +209,7 @@ fn active_submission_button_cannot_start_a_second_task() {
             frame(&mut app, &ctx, 880., 900., vec![]);
         }
         let output = frame(&mut app, &ctx, 880., 900., vec![]);
-        let at = label_position(&output, "提交中…").unwrap();
+        let at = label_position(&output, "处理中…").unwrap();
         click(&mut app, &ctx, 880., 900., at);
     }
     assert!(app.run_busy);

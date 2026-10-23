@@ -21,9 +21,12 @@ fn usage() {
   login   --user <手机号> --pass <密码> [--remember]
                                            登录并保存会话；--remember 同时保存凭据供自动重登
   logout                                   登出并清理本地会话
-  run    [--dist km] [--pace 秒/km] [--altitude 米或min-max] [--ago 分钟] [--days-ago 0-3 --time HH:MM] [--face 0|1] [--seed n] [--route legacy|road]
+  run    [--dist km] [--pace 秒/km] [--altitude 米或min-max] [--ago 分钟] [--days-ago 0-3 --time HH:MM] [--face 0|1] [--seed n] [--route legacy|road|free] [--free-roads 0|1] [--dry-run] [--out 文件]
                                            跑步全链：策略-点位-轨迹-提交-OBS-验证（--route 选择路线算法）
+                                           free 为无打卡点自由跑；--dry-run 只检查并生成本地预览，不提交
+                                           --free-roads 1 按定位获取真实道路与建筑；0 使用本地几何仿真
   template --file <GPX/JSON>                本地读取真实记录，分析海拔（不会上传）
+  diagnose-route                          只读诊断位置、围栏、策略和点位（不提交运动记录）
   ai-list                                  AI 运动项目列表
   ai     --sport <id> [--mode min|count] [--score n]
                                            AI 运动：min 按分钟 1-30；count 按次 5-1000 步长 5

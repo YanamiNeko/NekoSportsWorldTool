@@ -14,6 +14,26 @@ pub struct PolicyInfo {
     pub valid_time: i64,
     /// 必经点（BD 系，与打卡点同系），policy 响应里若有则返回。
     pub must_points: Vec<(f64, f64)>,
+    pub free_run_enabled: bool,
+    pub free_run_fence_required: bool,
+}
+
+impl PolicyInfo {
+    pub fn validate_free_run(&self, distance: f64, has_fences: bool) -> Result<(), String> {
+        if !self.free_run_enabled {
+            return Err("学校策略未明确开启自由跑，请使用打卡点模式或确认学校规则".into());
+        }
+        if !self.must_points.is_empty() {
+            return Err("当前策略包含必经点，不能使用无打卡点自由跑".into());
+        }
+        if self.free_run_fence_required && !has_fences {
+            return Err("自由跑策略要求或未明确免除学校围栏，但服务端未返回围栏".into());
+        }
+        if distance < self.min_distance as f64 {
+            return Err(format!("自由跑距离不足学校最低要求 {} 米", self.min_distance));
+        }
+        Ok(())
+    }
 }
 
 /// 从 policy 响应 `data` 中防御式提取必经点列表（字段名不确定，逐个尝试）。
@@ -91,6 +111,12 @@ pub(crate) fn parse_response(biz: &Value) -> Result<PolicyInfo, String> {
             .unwrap_or(1000),
         valid_time: rule.get("validTime").and_then(|t| t.as_i64()).unwrap_or(0),
         must_points: extract_must_points(&biz)?,
+        free_run_enabled: rule.get("freedomRunCalculateSingle").and_then(Value::as_bool) == Some(true),
+        free_run_fence_required: match rule.get("freedomElectronicFence") {
+            Some(Value::Bool(required)) => *required,
+            Some(value) => value.as_i64() != Some(0),
+            None => true,
+        },
     })
 }
 

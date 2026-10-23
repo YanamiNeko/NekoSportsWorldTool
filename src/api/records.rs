@@ -73,6 +73,11 @@ pub fn fetch_one_record(client: &mut ApiClient, rrid: i64) -> Result<Value, Stri
     if record.is_null() {
         return Err("记录详情为空".into());
     }
+    if let Some(id) = record.get("rrid") {
+        if id.as_i64().or_else(|| id.as_str()?.parse().ok()) != Some(rrid) {
+            return Err("详情返回的记录编号与请求不一致，请刷新重试".into());
+        }
+    }
     Ok(record)
 }
 
@@ -111,11 +116,6 @@ pub struct ReasonItem {
 /// 拉取单条详情并解析为结构体。
 pub fn fetch_detail(client: &mut ApiClient, rrid: i64) -> Result<RunDetail, String> {
     let raw = fetch_one_record(client, rrid)?;
-    if let Some(id) = raw.get("rrid") {
-        if id.as_i64().or_else(|| id.as_str()?.parse().ok()) != Some(rrid) {
-            return Err("详情返回的记录编号与请求不一致，请刷新重试".into());
-        }
-    }
     let reasons: Vec<ReasonItem> = raw
         .get("reasonList")
         .and_then(|v| v.as_array())

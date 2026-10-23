@@ -82,6 +82,8 @@ pub struct Config {
     /// 路线算法：legacy | road。
     #[serde(default = "default_route_mode")]
     pub route_mode: String,
+    #[serde(default)]
+    pub free_use_roads: bool,
 }
 
 fn default_route_mode() -> String {
@@ -126,6 +128,7 @@ impl Default for Config {
             update_check: default_update_check(),
             osm_path: String::new(),
             route_mode: default_route_mode(),
+            free_use_roads: false,
         }
     }
 }

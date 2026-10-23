@@ -48,9 +48,30 @@ pub fn build(
     start_ms: i64,
     points_bd: &[(f64, f64)],
 ) -> Track {
+    build_with_geometry(dist, dur, seed, start_ms, points_bd, points_bd)
+}
+
+pub fn build_free(
+    dist: f64,
+    dur: i64,
+    seed: u64,
+    center: (f64, f64),
+    start_ms: i64,
+) -> Result<Track, String> {
+    super::free_run::build(dist, dur, seed, center, start_ms)
+}
+
+fn build_with_geometry(
+    dist: f64,
+    dur: i64,
+    seed: u64,
+    start_ms: i64,
+    path_points: &[(f64, f64)],
+    checkpoints: &[(f64, f64)],
+) -> Track {
     let mut rng = Rng::new(seed);
     let dur_f = dur as f64;
-    let (dense, arcs, pc) = make_point_ring(points_bd);
+    let (dense, arcs, pc) = make_point_ring(path_points);
     let (c_lat, c_lng) = pc;
     let direction: f64 = rng.choice(&[1.0, -1.0]);
     let s0 = rng.uniform(0.0, *arcs.last().unwrap_or(&400.0));
@@ -296,7 +317,7 @@ pub fn build(
     apply_post_fixes(&mut locs, &mut rng, start_ms);
 
     // 点位吸附：<40m 精确落位
-    for pl in points_bd {
+    for pl in checkpoints {
         let mut best_i = None;
         let mut best_d = 1e18f64;
         for (i, q) in locs.iter().enumerate().filter(|(_, q)| q.ptype != -1) {

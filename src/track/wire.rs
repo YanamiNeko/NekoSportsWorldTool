@@ -460,6 +460,28 @@ mod regression_tests {
             1201
         );
     }
+
+    #[test]
+    fn completed_payload_keeps_two_passed_ordinary_checkpoints_countable() {
+        let track = linear_track(1000.0, 600, 1200);
+        let points = vec![
+            json!({"id":17,"lat":39.9,"lon":116.4,"isFixed":0}),
+            json!({"id":18,"lat":39.9,"lon":116.4,"isFixed":0}),
+            json!({"id":19,"lat":39.9,"lon":116.4,"isFixed":1}),
+            json!({"id":20,"lat":39.9,"lon":116.4,"isFixed":0}),
+        ];
+
+        let payload = five_point_payload(&points, &track);
+        let passed_ordinary = payload
+            .iter()
+            .filter(|point| point["isFixed"] == 0 && point["isPass"] == true)
+            .count();
+
+        assert_eq!(passed_ordinary, 3);
+        assert!(passed_ordinary >= 2);
+        assert_eq!(payload[2]["isFixed"], 1);
+    }
+
     #[test]
     fn protocol_times_use_beijing_even_on_utc_hosts() {
         assert_eq!(crate::track::geom::fmt_gain_time(0), "1970-01-01 08:00:00");

@@ -121,6 +121,13 @@ impl App {
         let selection = self.config.school_campus.clone();
         let control = self.osm_page.cancel.clone();
         let net_tx = self.net_tx.clone();
+        // 点位集合随目标距离变化：用当前预览方案的距离（没有方案时按 2 km 档）
+        let plan_dist = self
+            .run_page
+            .plan
+            .as_ref()
+            .map(|p| p.dist)
+            .unwrap_or(2000.0);
         #[cfg(test)]
         let route_fixture = self.route_fixture.clone();
         self.osm_page.status = "正在获取学校点位、围栏及路网…".into();
@@ -224,6 +231,7 @@ impl App {
                     &mut client,
                     anchor,
                     run_area_id,
+                    plan_dist,
                     &mut log,
                 )?;
                 if pts.is_empty() || crate::api::points::points_bd(&pts).len() != pts.len() {

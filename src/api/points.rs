@@ -10,7 +10,16 @@ use crate::crypto::sign::md5_url_sign;
 use crate::location::Coordinate;
 use serde_json::{json, Value};
 
-pub const POINTS_PATH: &str = "/api/v560/get/1/distance/1";
+/// 点位接口路径前缀：`/api/v560/get/1/distance/<目标距离(米)>`。
+///
+/// 官方客户端把**本次目标距离**拼在末尾（真机抓包实测为 `.../distance/2000`），
+/// 写死 `1` 会让服务端按 1 米返回点位集合，表现为「打卡点拉不全 / 每次都是同样几个点」。
+pub const POINTS_PATH_PREFIX: &str = "/api/v560/get/1/distance/";
+
+/// 拼点位接口路径（距离取整，最少 1 米）。
+pub fn points_path(distance_m: f64) -> String {
+    format!("{POINTS_PATH_PREFIX}{}", distance_m.round().max(1.0) as i64)
+}
 
 /// 经纬度六位小数字符串。
 fn six_digit(v: f64) -> String {
@@ -23,7 +32,7 @@ pub fn fetch_points(
     anchor: Coordinate,
     log: &mut dyn FnMut(&str),
 ) -> Result<Vec<Value>, String> {
-    fetch_points_ext(client, anchor, None, log)
+    fetch_points_ext(client, anchor, None, 2000.0, log)
 }
 
 /// run_area_id：学校配置了区域时 App 会附带；未配置则不传（与 App 一致）。
@@ -31,6 +40,7 @@ pub fn fetch_points_ext(
     client: &mut ApiClient,
     anchor: Coordinate,
     run_area_id: Option<String>,
+    distance_m: f64,
     log: &mut dyn FnMut(&str),
 ) -> Result<Vec<Value>, String> {
     anchor.validate()?;
@@ -39,6 +49,7 @@ pub fn fetch_points_ext(
         uid: login.uid,
         unid: login.unid.clone(),
         run_area_id: run_area_id.clone(),
+        distance_m: distance_m.round() as i64,
     };
     // ① TTL 内命中缓存直接返回
     if let Some((ts, pts)) = model::load_points_cache_for(anchor, &scope) {
@@ -58,7 +69,7 @@ pub fn fetch_points_ext(
         .unwrap_or_else(|| "0".into());
     let lat = anchor.latitude;
     let lon = anchor.longitude;
-    let url = format!("{}{}", model::HOST, POINTS_PATH);
+    let url = format!("{}{}", model::HOST, points_path(distance_m));
 
     let start_ms = crate::crypto::envelope::now_ms();
     let runec_input = format!(

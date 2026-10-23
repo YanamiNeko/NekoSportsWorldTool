@@ -58,7 +58,16 @@ pub(super) fn mock_school(responses: Vec<(&'static str, Value)>) -> (String, std
                 }
             };
             let headers = String::from_utf8_lossy(&bytes[..header_end]).into_owned();
-            assert!(headers.starts_with(&format!("POST {expected_path} HTTP/1.1\r\n")));
+            // 以 `/` 结尾表示"前缀匹配"：点位接口末尾是本次目标距离，值不固定
+            if expected_path.ends_with('/') {
+                assert!(
+                    headers.starts_with(&format!("POST {expected_path}")),
+                    "expected prefix {expected_path}, got {}",
+                    headers.lines().next().unwrap_or("")
+                );
+            } else {
+                assert!(headers.starts_with(&format!("POST {expected_path} HTTP/1.1\r\n")));
+            }
             assert!(headers.to_ascii_lowercase().contains("headersign:"));
             let length: usize = headers
                 .lines()
@@ -162,7 +171,7 @@ fn string_data_http_refresh_reaches_a_complete_campus_preview() {
             json!({"error":10000,"data":policy.to_string()}),
         ),
         (
-            crate::api::points::POINTS_PATH,
+            "/api/v560/get/1/distance/",
             json!({"error":10000,"data":points.to_string()}),
         ),
     ]);
@@ -182,6 +191,7 @@ fn string_data_http_refresh_reaches_a_complete_campus_preview() {
             uid: 42,
             unid: "77".into(),
             run_area_id: Some("12".into()),
+            distance_m: 2400,
         },
         &[json!({"lat":1.,"lon":1.})],
     )
@@ -331,7 +341,7 @@ fn explicit_null_boundary_refreshes_points_and_repeats_one_road_loop() {
             json!({"error":10000,"data":{"timestamp":123,"policy":1,"mustPoints":[]}}),
         ),
         (
-            crate::api::points::POINTS_PATH,
+            "/api/v560/get/1/distance/",
             json!({"error":10000,"data":{"pointsResModels":live}}),
         ),
     ]);

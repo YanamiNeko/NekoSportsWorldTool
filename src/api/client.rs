@@ -365,6 +365,8 @@ mod shared_auth_tests {
                 assert!(std::time::Instant::now() < deadline, "mock HTTP request did not arrive");
                 std::thread::sleep(std::time::Duration::from_millis(5));
             };
+            // Windows accepted sockets inherit the listener's nonblocking mode.
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
             let mut request = Vec::new();
             let header_end = loop {

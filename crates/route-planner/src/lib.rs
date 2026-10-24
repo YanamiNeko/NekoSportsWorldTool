@@ -12,6 +12,7 @@ use petgraph::graph::NodeIndex;
 
 pub mod biomech;
 pub mod boundary;
+pub mod campus;
 pub mod check;
 pub mod gpx;
 pub mod graph;

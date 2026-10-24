@@ -52,7 +52,7 @@ fn related_record_button_scrolls_and_opens_only_the_explicit_id() {
     for (width, height) in [(320., 360.), (360., 400.), (412., 480.), (880., 720.)] {
         let (host, server) = super::route_refresh_tests::mock_school(vec![(
             crate::api::records::GET_ONE_PATH,
-            json!({"error":10000,"data":{"rrid":42,"statusInfo":"fixture detail"}}),
+            json!({"error":10000,"data":{"rrid":"42","statusInfo":"fixture detail","speed":"6833.5","reasonList":[{"reason":"raw reason","extraCode":201}]}}),
         )]);
         let ctx = egui::Context::default();
         let mut app = App::from_state(
@@ -83,6 +83,8 @@ fn related_record_button_scrolls_and_opens_only_the_explicit_id() {
         }
         assert_eq!(server.join().unwrap(), 1);
         assert_eq!(app.records_page.detail_raw.as_ref().unwrap()["rrid"], 42);
+        assert_eq!(app.records_page.detail_raw.as_ref().unwrap()["speed"], "6833.5");
+        assert_eq!(app.records_page.detail_raw.as_ref().unwrap()["reasonList"][0]["extraCode"], 201);
     }
 }
 

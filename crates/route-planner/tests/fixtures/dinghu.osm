@@ -1,0 +1,65 @@
+<?xml version='1.0' encoding='utf-8'?>
+<osm version="0.6" generator="openstreetmap-cgimap 2.1.0 (2053 spike-07.openstreetmap.org)" copyright="OpenStreetMap and contributors" attribution="http://www.openstreetmap.org/copyright" license="http://opendatacommons.org/licenses/odbl/1-0/">
+ <node id="6464766386" visible="true" lat="23.2084799" lon="112.5803635" />
+ <node id="6464766388" visible="true" lat="23.2081600" lon="112.5809884" />
+ <node id="6464766389" visible="true" lat="23.2065285" lon="112.5817876" />
+ <node id="6464766390" visible="true" lat="23.2058182" lon="112.5812919" />
+ <node id="6464766391" visible="true" lat="23.2047126" lon="112.5834022" />
+ <node id="6464766392" visible="true" lat="23.2033395" lon="112.5821818" />
+ <node id="6464766393" visible="true" lat="23.2056042" lon="112.5791599" />
+ <node id="10079940800" visible="true" lat="23.2051431" lon="112.5788687" />
+ <node id="10079940801" visible="true" lat="23.2058501" lon="112.5786716" />
+ <node id="10079957024" visible="true" lat="23.2066891" lon="112.5815044" />
+ <node id="10079957025" visible="true" lat="23.2044354" lon="112.5801525" />
+ <node id="10079957026" visible="true" lat="23.2046278" lon="112.5802752" />
+ <node id="10079957027" visible="true" lat="23.2041854" lon="112.5810940" />
+ <node id="10079957028" visible="true" lat="23.2040098" lon="112.5809833" />
+ <node id="10079957029" visible="true" lat="23.2032744" lon="112.5823340" />
+ <node id="10079957030" visible="true" lat="23.2034308" lon="112.5825751" />
+ <node id="10079957031" visible="true" lat="23.2073905" lon="112.5804511" />
+ <node id="10079957032" visible="true" lat="23.2067932" lon="112.5815607" />
+ <node id="10079957033" visible="true" lat="23.2073047" lon="112.5795351">
+  <tag k="entrance" v="yes" />
+ </node>
+ <node id="10871497113" visible="true" lat="23.2044167" lon="112.5806659">
+  <tag k="entrance" v="yes" />
+ </node>
+ <node id="10871497114" visible="true" lat="23.2042978" lon="112.5808860">
+  <tag k="entrance" v="yes" />
+ </node>
+ <way id="689151593" visible="true">
+  <nd ref="6464766386" />
+  <nd ref="6464766388" />
+  <nd ref="10079957031" />
+  <nd ref="10079957032" />
+  <nd ref="10079957024" />
+  <nd ref="6464766389" />
+  <nd ref="6464766390" />
+  <nd ref="6464766391" />
+  <nd ref="10079957030" />
+  <nd ref="10079957029" />
+  <nd ref="6464766392" />
+  <nd ref="10079957028" />
+  <nd ref="10079957027" />
+  <nd ref="10871497114" />
+  <nd ref="10871497113" />
+  <nd ref="10079957026" />
+  <nd ref="10079957025" />
+  <nd ref="10079940800" />
+  <nd ref="6464766393" />
+  <nd ref="10079940801" />
+  <nd ref="10079957033" />
+  <nd ref="6464766386" />
+  <tag k="addr:housenumber" v="1" />
+  <tag k="addr:street" v="团结路" />
+  <tag k="amenity" v="university" />
+  <tag k="barrier" v="wall" />
+  <tag k="education" v="university" />
+  <tag k="name" v="肇庆医学院(鼎湖校区)" />
+  <tag k="name:en" v="Zhaoqing Medical College (Dinghu Campus)" />
+  <tag k="name:zh" v="肇庆医学院(鼎湖校区)" />
+  <tag k="name:zh-Hans" v="肇庆医学院(鼎湖校区)" />
+  <tag k="start_date" v="2012" />
+  <tag k="website" v="https://www.zqmc.edu.cn/" />
+ </way>
+</osm>

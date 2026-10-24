@@ -16,6 +16,8 @@ pub struct SemesterSummary {
     pub semester_valid_dis: f64,
     pub semester_count: i64,
     pub semester_valid_count: i64,
+    #[serde(default)]
+    pub completed_proportion: Option<Value>,
 }
 
 #[allow(dead_code)]
@@ -35,6 +37,7 @@ pub fn query(client: &mut ApiClient, log: &mut dyn FnMut(&str)) -> Result<Semest
         semester_valid_dis: data.get("semesterValidDis").and_then(|v| v.as_f64()).unwrap_or(0.0),
         semester_count: data.get("semesterCount").and_then(|v| v.as_i64()).unwrap_or(0),
         semester_valid_count: data.get("semesterValidCount").and_then(|v| v.as_i64()).unwrap_or(0),
+        completed_proportion: data.get("completedProportion").filter(|v| v.is_string() || v.is_number()).cloned(),
     };
 
     // 个人完成度：学期起止 / 考核方式 / 有效次数
@@ -53,15 +56,10 @@ pub fn query(client: &mut ApiClient, log: &mut dyn FnMut(&str)) -> Result<Semest
             .to_string();
     }
 
-    // 部分学校汇总接口计数恒为 0，有效次数退回个人完成度接口
-    if summary.semester_valid_count == 0 {
-        if let Some(n) = personal_raw.get("semesterValid").and_then(|v| v.as_i64()) {
-            summary.semester_valid_count = n;
-        }
-    }
+    merge_explicit(&mut summary, &personal_raw);
 
-    // 目标次数仅存在于完成状态接口（需最近一条记录的 rrid）
-    if summary.semester_count == 0 {
+    // 仅合并名称明确的字段，不把目标次数作为历史总次数。
+    if summary.completed_proportion.is_none() || summary.semester_valid_dis == 0.0 {
         let rrid = super::records::fetch_records(client)
             .ok()
             .and_then(|rows| rows.first().map(|r| r.rrid));
@@ -69,17 +67,52 @@ pub fn query(client: &mut ApiClient, log: &mut dyn FnMut(&str)) -> Result<Semest
             let body = json!({ "rrid": rrid }).to_string();
             if let Ok(biz) = client.call("POST", super::user::SEMESTER_COMPLETED_PATH, &body, &[]) {
                 let done = super::client::parse_data_field(&biz);
-                if let Some(n) = done.get("semesterGoalCount").and_then(|v| v.as_i64()) {
+                merge_explicit(&mut summary, &done);
+                if let Some(n) = done.get("semesterCount").and_then(|v| v.as_i64()).filter(|n| *n >= 0) {
                     summary.semester_count = n;
-                }
-                if summary.semester_valid_count == 0 {
-                    if let Some(n) = done.get("semesterValidCount").and_then(|v| v.as_i64()) {
-                        summary.semester_valid_count = n;
-                    }
                 }
             }
         }
     }
 
     Ok(SemesterResult { summary: Some(summary), personal_raw })
+}
+
+
+fn merge_explicit(summary: &mut SemesterSummary, data: &Value) {
+    if summary.semester_valid_dis == 0.0 {
+        if let Some(n) = data.get("semesterValidDis").and_then(Value::as_f64).filter(|n| *n >= 0.0) {
+            summary.semester_valid_dis = n;
+        }
+    }
+    if summary.semester_valid_count == 0 {
+        if let Some(n) = data.get("semesterValidCount").and_then(Value::as_i64).filter(|n| *n >= 0) {
+            summary.semester_valid_count = n;
+        }
+    }
+    if summary.completed_proportion.is_none() {
+        summary.completed_proportion = data.get("completedProportion").filter(|v| v.is_string() || v.is_number()).cloned();
+    }
+}
+impl SemesterSummary {
+    pub fn display(&self) -> String {
+        let completion = self.completed_proportion.as_ref().map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())).unwrap_or_else(|| "未知".into());
+        format!("学期 {}：有效 {} 次（总 {} 次），有效里程 {:.2} km（总 {:.2} km）；完成度（服务端原值）：{}",
+            self.sname, self.semester_valid_count, self.semester_count, self.semester_valid_dis / 1000.0, self.semester_dis / 1000.0, completion)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn distance_never_becomes_count_or_target() {
+        let mut s = SemesterSummary { sname: "测试".into(), semester_dis: 42270.0, semester_valid_dis: 0.0, semester_count: 12, semester_valid_count: 0, completed_proportion: None };
+        merge_explicit(&mut s, &json!({"semesterValid":32000,"semesterGoalCount":60}));
+        assert_eq!(s.semester_valid_count,0);
+        assert_eq!(s.semester_count,12);
+        merge_explicit(&mut s, &json!({"semesterValidDis":32000,"semesterValidCount":10,"completedProportion":"40%"}));
+        assert_eq!(s.semester_valid_count,10);
+        assert!(s.display().contains("32.00 km"));
+        assert!(s.display().contains("40%"));
+    }
 }

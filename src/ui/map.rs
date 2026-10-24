@@ -149,6 +149,14 @@ impl MapState {
         painter.add(egui::Shape::line(ps, Stroke::new(width, color)));
     }
 
+    /// Display only exposed boundary edges, not triangulation diagonals.
+    pub fn draw_boundary(&self, painter:&egui::Painter, rect:Rect, rings:&[Vec<(f64,f64)>], color:Color32, width:f32) {
+        let painter=painter.with_clip_rect(rect);
+        for (a,b) in boundary_edges(rings) {
+            painter.line_segment([self.to_screen(rect,a.0,a.1),self.to_screen(rect,b.0,b.1)],Stroke::new(width,color));
+        }
+    }
+
     pub fn draw_polygon(
         &self,
         painter: &egui::Painter,
@@ -249,4 +257,39 @@ pub fn legend(ui: &mut egui::Ui, items: &[(&str, Color32)]) {
             ui.label(*label);
         }
     });
+}
+
+fn boundary_edges(rings:&[Vec<(f64,f64)>])->Vec<((f64,f64),(f64,f64))> {
+    use std::collections::BTreeMap;
+    let mut edges=BTreeMap::new();
+    let key=|p:(f64,f64)| (if p.0==0. {0} else {p.0.to_bits()},if p.1==0. {0} else {p.1.to_bits()});
+    for ring in rings {
+        if ring.len()<3 { continue; }
+        for (&a,&b) in ring.iter().zip(ring.iter().cycle().skip(1)).take(ring.len()) {
+            if a==b {continue;}
+            let (ka,kb)=(key(a),key(b));
+            let (k,sign)=if ka<kb {((ka,kb),1)} else {((kb,ka),-1)};
+            let value=edges.entry(k).or_insert((a,b,0i32));value.2+=sign;
+        }
+    }
+    edges.into_values().filter(|e|e.2!=0).map(|(a,b,_)|(a,b)).collect()
+}
+
+#[cfg(test)]
+mod boundary_display_tests {
+    use super::*;
+    #[test]
+    fn triangulated_real_campus_draws_only_its_perimeter() {
+        let items=route_planner::campus::parse(include_bytes!("../../crates/route-planner/tests/fixtures/dinghu.osm")).unwrap();
+        let c=&items[0];let triangles:Vec<Vec<_>>=c.triangles().unwrap().iter().map(|r|r.iter().map(|p|(p.lat,p.lon)).collect()).collect();
+        let edges=boundary_edges(&triangles);
+        assert_eq!(edges.len(),c.outer[0].len()-1);
+        assert!(edges.iter().all(|&(a,b)|c.outer[0].windows(2).any(|w| {let x=(w[0].lat,w[0].lon);let y=(w[1].lat,w[1].lon);(a==x && b==y)||(a==y && b==x)})));
+    }
+    #[test]
+    fn boundary_display_retains_holes_and_duplicate_outlines() {
+        let c=route_planner::campus::Campus{id:"test".into(),name:"test".into(),outer:vec![vec![(0.,0.),(4.,0.),(4.,4.),(0.,4.),(0.,0.)].into_iter().map(|(x,y)|route_planner::Coord::new(x,y)).collect()],inner:vec![vec![(1.,1.),(2.,1.),(2.,2.),(1.,2.),(1.,1.)].into_iter().map(|(x,y)|route_planner::Coord::new(x,y)).collect()]};
+        let triangles:Vec<Vec<_>>=c.triangles().unwrap().iter().map(|r|r.iter().map(|p|(p.lat,p.lon)).collect()).collect();assert_eq!(boundary_edges(&triangles).len(),8);
+        let ring=vec![(0.,0.),(1.,0.),(1.,1.),(0.,1.)];assert_eq!(boundary_edges(&[ring.clone(),ring]).len(),4);
+    }
 }

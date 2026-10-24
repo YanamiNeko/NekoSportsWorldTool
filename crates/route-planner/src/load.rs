@@ -325,7 +325,9 @@ pub fn load_osm(bytes: &[u8]) -> Result<RoadGraph, String> {
     if parsed.roads.is_empty() {
         return Err("OSM 中未找到可用的 highway 道路".into());
     }
-    Ok(build_graph(&parsed))
+    let mut graph = build_graph(&parsed);
+    graph.campuses = crate::campus::parse(bytes).unwrap_or_default();
+    Ok(graph)
 }
 
 /// 球面近似距离（米）。

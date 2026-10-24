@@ -70,20 +70,7 @@ impl App {
                 mobile::row(ui, |ui| {
                     match &self.data_page.semester {
                         Some(s) => {
-                            let km = |m: f64| format!("{:.2}", m / 1000.0);
-                            ui.label(format!("学期：{}", s.sname));
-                            ui.separator();
-                            ui.label(format!(
-                                "有效次数：{}/{}",
-                                s.semester_valid_count, s.semester_count
-                            ));
-                            ui.separator();
-                            ui.label(format!(
-                                "有效里程：{}/{} km（总 {} km）",
-                                km(s.semester_valid_dis),
-                                km(s.semester_dis),
-                                km(s.semester_dis)
-                            ));
+                            ui.label(s.display());
                         }
                         None => {
                             ui.label("未拉取");
@@ -117,6 +104,7 @@ impl App {
                                 _ => theme::warn(),
                             };
                             ui.colored_label(color, c.label());
+                            ui.label(c.count_and_appeal());
                             ui.separator();
                             ui.label(format!("本页通报：{} 条（非全校总数）", c.list.len()));
                             ui.toggle_value(&mut self.data_page.show_cheat_list, "查看列表");

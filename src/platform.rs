@@ -94,3 +94,8 @@ pub fn apply_safe_area(context: &egui::Context, input: &mut egui::RawInput) {
 thread_local! {
     pub(crate) static TEST_DATA_DIR: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
 }
+
+/// 构建标识独立于更新检查使用的语义版本。
+pub fn build_version() -> String {
+    format!("{}+{}", version_name(), env!("NEKO_BUILD_REVISION"))
+}

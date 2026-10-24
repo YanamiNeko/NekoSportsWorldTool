@@ -58,6 +58,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check release version and tracked runtime data
+        run: |
+          python scripts/check_release.py
+          python scripts/test_package_windows.py
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -90,7 +99,7 @@ jobs:
           BIN=target/$TARGET/release/nekosportsworldtool
           if [ "${{ matrix.os }}" = "windows-latest" ]; then BIN="$BIN.exe"; fi
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a "dist/$ARTIFACT.zip" "$BIN"
+            python scripts/package_windows.py "$BIN" "dist/$ARTIFACT.zip"
           else
             tar czf "dist/$ARTIFACT.tar.gz" -C "$(dirname "$BIN")" "$(basename "$BIN")"
           fi

@@ -9,11 +9,13 @@ nekosportsworldtool.log*
 /config.json
 /identity.json
 /points_cache.json
+/maps/
+/school_roads/
+/diagnostic-*.json
 /semester_result.json
 /rank_result.json
 /.idea/
 docs/_preview.png
-/docs
 /fixtures
 /ai_sports.json
 /obs_*.json
@@ -32,6 +34,7 @@ docs/_preview.png
 
 # 打包输出（含 exe 与运行数据，禁止入库）
 /dist
+/outputs/
 # 本地工具目录
 /.mimosa/
 /.zcode/
@@ -39,3 +42,4 @@ docs/_preview.png
 # 自动更新替换残留
 *.exe.old
 *.exe.new
+__pycache__/

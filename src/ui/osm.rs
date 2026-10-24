@@ -22,9 +22,12 @@ pub struct NetworkLoad {
 }
 
 pub struct OsmPage {
+    pub(crate) lookup: super::campus_lookup::LookupUi,
+    pub map_choice: String,
     pub campuses: Vec<crate::api::campus::Campus>,
     pub selected_key: String,
     pub offline: bool,
+    pub pending_offline_key: Option<String>,
     pub cancel: Arc<crate::task_control::Control>,
     pub cache_entries: Vec<crate::api::school_roads::Entry>,
     pub gpx_path: String,
@@ -41,10 +44,13 @@ pub struct OsmPage {
 impl Default for OsmPage {
     fn default() -> Self {
         OsmPage {
+            lookup: Default::default(),
+            map_choice: String::new(),
             cancel: Arc::new(crate::task_control::Control::default()),
             campuses: Vec::new(),
             selected_key: String::new(),
             offline: false,
+            pending_offline_key: None,
             cache_entries: Vec::new(),
             gpx_path: String::new(),
             gpx_text: None,
@@ -284,15 +290,7 @@ impl App {
             );
         }
 
-        for f in &display_fences {
-            self.osm_page.map.draw_polygon(
-                &painter,
-                canvas,
-                f,
-                egui::Color32::from_rgb(180, 118, 0),
-                2.5,
-            );
-        }
+        self.osm_page.map.draw_boundary(&painter,canvas,&display_fences,egui::Color32::from_rgb(180,118,0),2.5);
         if let Some(gpx) = &self.osm_page.gpx {
             for line in &gpx.segments {
                 self.osm_page.map.draw_polyline(
@@ -323,6 +321,12 @@ impl App {
     }
 
     pub(crate) fn begin_network_load(&mut self) -> u64 {
+        self.forget_offline_preview();
+        self.reset_network_load()
+    }
+
+    pub(crate) fn reset_network_load(&mut self) -> u64 {
+        self.osm_page.pending_offline_key = None;
         self.osm_page.cancel.cancel();
         self.osm_page.cancel = Arc::new(crate::task_control::Control::default());
         self.run_page.preview_cancel.cancel();
@@ -355,7 +359,7 @@ impl App {
     /// 后台线程加载 OSM 路网，成功后经 `net_rx` 回传。
     pub fn load_osm_async(&mut self, path: String) {
         // Reading a local map must never depend on login, location or school APIs.
-        let inputs = self.run_page.preview_inputs.clone();
+        let inputs = None;
         let campuses = self.osm_page.campuses.clone();
         let selected_key = self.osm_page.selected_key.clone();
         let request_id = self.begin_network_load();

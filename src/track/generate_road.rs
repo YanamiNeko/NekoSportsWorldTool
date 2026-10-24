@@ -227,7 +227,7 @@ fn required_route(
     let opts = RouteOptions {
         a_c_max: 2.5,
         min_radius_m: (avg * avg / 2.5).max(6.0),
-        repeat_checkpoint_loop: true,
+        repeat_checkpoint_loop: points.len() > 1,
         ..Default::default()
     };
     let waypoints: Vec<Coord> = points.iter().map(|p| Coord::new(p.1, p.0)).collect();
@@ -242,7 +242,7 @@ fn required_route(
     if let Some(error) = check.error() {
         return Err(error);
     }
-    let route = plan_route_split(net, &waypoints, &waypoints, dist, seed, &opts)?;
+    let route = plan_route_split(net, &waypoints, &waypoints, if points.len()==1 { dist.min(600.) } else { dist }, seed, &opts)?;
     if route.points.len() < 2 || !route.length_m.is_finite() || route.length_m <= 0.0 {
         return Err("路网无法形成有效闭环".into());
     }
@@ -833,5 +833,80 @@ mod preview_tests {
         net.rebuild_index();
         let net = apply_fences(&net, &fences);
         assert!(build_road(5000., 2000, 1, 0, &[points[0], points[3]], &[], &net).is_err());
+    }
+}
+
+#[cfg(test)]
+mod dinghu_public_map_tests {
+    use super::*;
+    #[test]
+    fn dinghu_actual_campus_and_roads_support_local_preview_within_boundary() {
+        let net=route_planner::load_osm(include_bytes!("../../crates/route-planner/tests/fixtures/dinghu-roads.osm")).unwrap();
+        let items=route_planner::campus::parse(include_bytes!("../../crates/route-planner/tests/fixtures/dinghu.osm")).unwrap();
+        assert_eq!(items.len(),1); let c=&items[0];
+        assert_eq!(c.id,"way/689151593"); assert_eq!(c.name,"肇庆医学院(鼎湖校区)");
+        let choice=crate::api::map_boundary::Selection{school:"fixture".into(),id:c.id.clone(),revision:crate::api::map_boundary::revision(c)};
+        let fences=crate::api::map_boundary::planning_fences(&[],&items,Some(&choice),"fixture").unwrap();
+        let mut aligned=net.clone(); align_network(&mut aligned); let clipped=apply_fences(&aligned,&fences);
+        assert!(clipped.graph.edge_count()>0);
+        // This is a test start on a real in-campus road, not a user's configured location.
+        let e=clipped.graph.edge_indices().next().unwrap();let (a,_)=clipped.graph.edge_endpoints(e).unwrap(); let start=clipped.graph[a].coord;
+        for seed in [1,42,2026] {
+            let plan=plan_road_view(&net,&[(start.lat,start.lon)],2400.,960,seed,&fences).unwrap();
+            assert!((plan.laps.iter().sum::<f64>()-2400.).abs()<0.01);
+            assert!(plan.route.windows(2).all(|w|route_planner::boundary::segment_inside(&clipped.boundaries,Coord::new(w[0].1,w[0].0),Coord::new(w[1].1,w[1].0))));
+        }
+    }
+}
+
+#[cfg(test)]
+mod dinghu_preset_tests {
+    use super::*;
+    pub(super) fn identity() -> crate::crypto::header::HeaderIdentity {
+        // OSM node/10871479374, on campus service road way/1169099683.
+        let (lat,lon)=wgs84_to_bd09(23.2057797,112.5811961);
+        crate::crypto::header::HeaderIdentity { city:"肇庆市".into(),anchor_lat:lat,anchor_lon:lon,..Default::default() }
+    }
+    fn preset() -> (RoadGraph,Vec<Vec<(f64,f64)>>,crate::api::map_boundary::Selection) {
+        let net=route_planner::load_osm(include_bytes!("../../crates/route-planner/tests/fixtures/dinghu-roads.osm")).unwrap();
+        let c=net.campuses.iter().find(|c|c.id=="way/689151593").unwrap();
+        let selection=crate::api::map_boundary::Selection{school:"dinghu-local-preview".into(),id:c.id.clone(),revision:crate::api::map_boundary::revision(c)};
+        let fences=crate::api::map_boundary::planning_fences(&[],&net.campuses,Some(&selection),&selection.school).unwrap();
+        (net,fences,selection)
+    }
+    #[test]
+    fn fixed_dinghu_anchor_generates_requested_distances_and_final_tracks() {
+        let id=identity();assert!(!id.has_unconfigured_default_location());let (net,fences,_)=preset();
+        let mut aligned=net.clone();align_network(&mut aligned);let clipped=apply_fences(&aligned,&fences);
+        let points=vec![(id.anchor_lat,id.anchor_lon)];
+        assert!(route_planner::boundary::contains(&clipped.boundaries,Coord::new(id.anchor_lon,id.anchor_lat)));
+        for meters in [1000.,2400.,3000.] { for seed in [1,42,2026] {
+            let dur=(meters*0.4) as i64;
+            let p=plan_road_view(&net,&points,meters,dur,seed,&fences).unwrap();
+            assert!((p.laps.iter().sum::<f64>()-meters).abs()<0.01);
+            assert!(p.route.windows(2).all(|w|route_planner::boundary::segment_inside(&clipped.boundaries,Coord::new(w[0].1,w[0].0),Coord::new(w[1].1,w[1].0))));
+            let track=build_road(meters,dur,seed,0,&points,&[],&clipped).unwrap();track.validate_consistency().unwrap();
+            assert!(track.locations.windows(2).all(|w|route_planner::boundary::segment_inside(&clipped.boundaries,Coord::new(w[0].gLng,w[0].gLat),Coord::new(w[1].gLng,w[1].gLat))));
+        }}
+    }
+    #[test]
+    #[ignore="explicit offline preset export; output folder supplied by developer"]
+    fn export_verified_dinghu_preset() {
+        let out=std::path::PathBuf::from(std::env::var("NEKO_DINGHU_EXPORT_DIR").expect("output directory required"));
+        assert!(!out.exists(),"refuse to overwrite an existing preset directory");
+        std::fs::create_dir_all(out.join("maps")).unwrap();std::fs::create_dir_all(out.join("school_roads")).unwrap();
+        let id=identity();let (_,fences,selection)=preset();
+        let config=crate::api::model::Config{route_mode:"road".into(),osm_path:"maps/dinghu.osm".into(),map_boundary:Some(selection.clone()),dist_min:1.,dist_max:1.,pace_min:400.,pace_max:400.,update_check:"off".into(),..Default::default()};
+        std::fs::write(out.join("identity.json"),serde_json::to_vec_pretty(&id).unwrap()).unwrap();
+        std::fs::write(out.join("config.json"),serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+        let xml=include_str!("../../crates/route-planner/tests/fixtures/dinghu-roads.osm");
+        std::fs::write(out.join("maps/dinghu.osm"),xml).unwrap();
+        let key=crate::api::school_roads::scope_key(&selection.school,&fences);
+        let cache=serde_json::json!({"key":key,"school":selection.school,"name":"鼎湖校区 · 已验证的本地预览","loaded_ms":crate::crypto::envelope::now_ms(),"xml":xml,"fences":fences,"points":[[id.anchor_lat,id.anchor_lon]]});
+        std::fs::write(out.join("school_roads").join(format!("{key}.json")),serde_json::to_vec(&cache).unwrap()).unwrap();
+        let net=route_planner::load_osm(xml.as_bytes()).unwrap();let p=plan_road_view(&net,&[(id.anchor_lat,id.anchor_lon)],1000.,400,42,&fences).unwrap();
+        let wgs:Vec<_>=p.route.iter().map(|&(a,b)|crate::api::school_roads::to_wgs(a,b)).collect();
+        std::fs::write(out.join("verified-preview.json"),serde_json::to_vec_pretty(&serde_json::json!({"anchor_bd09":[id.anchor_lat,id.anchor_lon],"anchor_wgs84":[23.2057797,112.5811961],"route_wgs84":wgs,"laps_m":p.laps,"target_m":1000,"seed":42,"boundary_object":"way/689151593"})).unwrap()).unwrap();
+        println!("Exported a verified 1000 m local preview and portable Dinghu preset");
     }
 }

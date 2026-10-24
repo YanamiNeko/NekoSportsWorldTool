@@ -156,6 +156,7 @@ fn params() -> SubmitParams {
     );
     track.validate_consistency().unwrap();
     SubmitParams {
+        allow_empty_points: false,
         five_point_json: json!({"fivePointJson":json!([{"lat":39.9,"lon":116.4,"glat":39.9,"glon":116.4}]).to_string()}).to_string(),
         track, uid:42, selected_unid:77, policy:1, policy_ts:123, min_distance:1000,
         weight:68., face_check:0, address:"offline fixture".into(),

@@ -38,7 +38,7 @@ impl App {
     pub fn draw_about(&mut self, ui: &mut egui::Ui) {
         ui.heading("NekoSportsWorldTool");
         ui.add_space(6.0);
-        ui.label(format!("当前版本：v{}", crate::platform::version_name()));
+        ui.label(format!("当前版本：v{}", crate::platform::build_version()));
         let repo = if cfg!(target_os = "android") {
             crate::update::REPO_FORK
         } else {

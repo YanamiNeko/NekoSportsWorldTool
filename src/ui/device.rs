@@ -63,6 +63,7 @@ impl App {
     }
 
     fn draw_device_inner(&mut self, ui: &mut egui::Ui, page: &mut DevicePage) {
+        ui.colored_label(egui::Color32::from_rgb(180, 90, 0), "成绩提交固定模拟安卓；本页平台设置仅影响其他接口，不能统一所有请求身份。");
         ui.add_space(6.0);
 
         mobile::row(ui, |ui| {

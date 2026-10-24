@@ -2,6 +2,8 @@
 
 pub mod ai;
 pub mod campus;
+pub mod map_boundary;
+pub(crate) mod map_search;
 pub mod cheat;
 pub mod client;
 pub mod fence;

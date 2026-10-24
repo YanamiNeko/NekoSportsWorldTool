@@ -28,6 +28,7 @@ fn usage() {
   ai     --sport <id> [--mode min|count] [--score n]
                                            AI 运动：min 按分钟 1-30；count 按次 5-1000 步长 5
   records                                  跑步记录列表
+  record --rrid <id>                        单条详情原值 JSON（stdout）；诊断输出到 stderr
   ai-records --sport <id>                  AI 运动记录（按天分组）
   semester                                 学期完成度
   cheat  [--page n]                        违规自查
@@ -81,10 +82,10 @@ pub(crate) fn silent() -> impl FnMut(&str) {
 }
 
 /// 自动登录（GUI 记住密码 / login --remember 落盘的凭据）。
-pub(crate) fn auto_login(identity: &model::HeaderIdentity) -> Result<Session, String> {
+fn auto_login(identity: &model::HeaderIdentity, log: &mut dyn FnMut(&str)) -> Result<Session, String> {
     let cfg = model::load_config();
     if cfg.remember && !cfg.username.is_empty() && !cfg.password.is_empty() {
-        println!("[login] 使用已保存的账号自动登录…");
+        log("[login] 使用已保存的账号自动登录…");
         let mut client = ApiClient::new(identity.clone(), None);
         return crate::api::login::login(&mut client, &cfg.username, &cfg.password, &mut silent());
     }
@@ -93,13 +94,17 @@ pub(crate) fn auto_login(identity: &model::HeaderIdentity) -> Result<Session, St
 
 /// 构造已登录客户端；本地会话失效时自动重登一次。
 pub(crate) fn make_client() -> Result<ApiClient, String> {
+    make_client_with_log(&mut logger())
+}
+
+fn make_client_with_log(log: &mut dyn FnMut(&str)) -> Result<ApiClient, String> {
     let identity = model::load_identity();
     let client = {
         let sess = model::load_session();
         if sess.is_logged_in() {
             ApiClient::new(identity, Some(sess))
         } else {
-            let s = auto_login(&identity)?;
+            let s = auto_login(&identity, log)?;
             ApiClient::new(identity, Some(s))
         }
     };

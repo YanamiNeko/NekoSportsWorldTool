@@ -527,6 +527,20 @@ fn draw_ai_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
 }
 
 fn draw_detail_panel(ui: &mut egui::Ui, raw: &serde_json::Value) {
+    // Show the detail fields without unit conversion or status interpretation.
+    // Keep this separate from the summary below, which hides empty/zero values.
+    for key in ["speed", "statusInfo", "reasonList"] {
+        let value = match raw.get(key) {
+            Some(serde_json::Value::String(s)) if key != "reasonList" => s.clone(),
+            Some(value) => serde_json::to_string_pretty(value).unwrap_or_default(),
+            None => "(missing)".into(),
+        };
+        ui.label(egui::RichText::new(key).color(theme::text_dim()));
+        ui.add(egui::Label::new(egui::RichText::new(value).monospace()).wrap()
+            .selectable(true));
+    }
+    ui.separator();
+
     let g = |k: &str| -> String {
         match raw.get(k) {
             Some(serde_json::Value::String(s)) if !s.is_empty() => s.clone(),

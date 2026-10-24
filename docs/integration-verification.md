@@ -32,7 +32,7 @@
 1. 配速修改依据旧记录截图和源码定位。未通过真实成绩提交核实官方 App 的最终显示；旧服务器记录不会自动改变。
 2. 重复提交保护仅覆盖同一数据目录内、本工具保存回执的跑步请求。不覆盖其他独立目录、官方 App、历史无回执记录和 AI 运动。服务器不返回 UUID 或对应记录不在列表时，未知请求不能自动解除。
 3. Android 工具链已检查，本机没有可用 JDK、SDK、NDK、adb，未进行 Android 构建或 smoke。macOS 和 Windows MSVC 本轮也未验证。
-4. GitHub 的 `windows-road-loop-2026-10-20` Release 和仓库 `downloads/` 中的压缩包是先前道路闭环版本，不包含本批新增修改。源码合并不代表这些包已重新发布。
+4. 合并验收时尚未发布本批二进制；后续已提供 [Windows 配速与提交保护修复版](https://github.com/GAN1112233131/NekoSportsWorldTool/releases/tag/windows-pace-fix-2026-10-20)。`windows-road-loop-2026-10-20` Release 和仓库 `downloads/` 中的旧压缩包仍是历史道路闭环版，不包含本批新增修改。
 5. 不宣称 #64 的服务端时间限制、#76 的官方 App 显示或真实服务端计分问题已经全部解决。
 
 ## 复现

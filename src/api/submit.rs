@@ -9,7 +9,7 @@ use crate::crypto::sign::{original_sign, signature};
 use crate::track::calorie::{avg_power, official_kcal};
 use crate::track::geom::round_to;
 use crate::track::model::{GenPoint, Track};
-use crate::track::wire::validate_five_point_wrapper;
+use crate::track::wire::validate_five_point_wrapper_for;
 use serde_json::{Map, Value};
 
 pub const RECORD_PATH: &str = "/api/v70260/runnings/save/record";
@@ -45,6 +45,7 @@ pub fn total_ascent(locs: &[GenPoint]) -> f64 {
 }
 
 pub struct SubmitParams {
+    pub allow_empty_points: bool,
     pub track: Track,
     pub uid: i64,
     pub selected_unid: i64,
@@ -84,7 +85,7 @@ pub fn submit_record(
         return Err("提交账号或学校与当前会话不一致".into());
     }
     p.track.validate_consistency()?;
-    validate_five_point_wrapper(&p.five_point_json)?;
+    validate_five_point_wrapper_for(&p.five_point_json, p.allow_empty_points)?;
     let stop_ms = p.track.totalTime.checked_mul(1000)
         .and_then(|n| p.track.startTime.checked_add(n)).ok_or("时间范围溢出")?;
     let mut guard = super::submission_guard::Guard::open(p.uid, p.selected_unid)?;
@@ -144,7 +145,7 @@ fn send_record(
     if p.five_point_json.is_empty() {
         return Err("五点轨迹不能为空".into());
     }
-    validate_five_point_wrapper(&p.five_point_json)?;
+    validate_five_point_wrapper_for(&p.five_point_json, p.allow_empty_points)?;
     let (speed_windows, step_windows) = submit_windows(track);
     let total_time = track.totalTime;
     let total_dis = track.totalDistance;

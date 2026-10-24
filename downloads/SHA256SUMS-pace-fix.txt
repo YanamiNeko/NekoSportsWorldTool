@@ -1,0 +1,2 @@
+44e9d56e9803849a3568204561d5acd4c0dbf467e836cf40bdec5b907d5a23b7  NekoSportsWorldTool-Windows-x64-pace-fix.zip
+9f5641ee918c8e5e5a81eabb699499c7fe8181155668fc416afb987f8bad6cd4  Windows配速修正版/NekoSportsWorldTool-Windows-x64-pace-fix.exe

@@ -78,6 +78,7 @@ impl App {
     }
 
     pub(crate) fn poll_messages(&mut self) {
+        self.poll_map_lookup();
         self.poll_preview_results();
         let mut done_ip = None;
         let mut done_login = None;
@@ -264,10 +265,33 @@ impl App {
                     self.network = Some(net);
                     self.run_page.preview_stale = true;
                     self.osm_page.cache_entries = crate::api::school_roads::entries();
+                    if res.offline {
+                        if let (Some(key), Some(inputs)) = (
+                            self.osm_page.pending_offline_key.take(),
+                            self.run_page.preview_inputs.as_ref(),
+                        ) {
+                            self.config.offline_preview = Some(model::OfflinePreviewSelection {
+                                key,
+                                // Bind an explicitly chosen local cache to the current
+                                // account school, even for a bundled offline-only preset.
+                                school: self.session.as_ref().map(|s| s.unid.clone())
+                                    .unwrap_or_else(|| inputs.unid.clone()),
+                                anchor_lat: inputs.anchor.latitude,
+                                anchor_lon: inputs.anchor.longitude,
+                            });
+                            self.config.route_mode = "road".into();
+                            if let Err(e) = model::save_config(&self.config) {
+                                self.osm_page.status.push_str(&format!("\n离线选择仅本次生效，保存失败：{e}"));
+                            }
+                        }
+                    }
                     self.analyze_gpx();
                 }
                 Err(e) => {
+                    if res.offline { self.forget_offline_preview(); }
+                    self.osm_page.pending_offline_key = None;
                     self.network = None;
+                    self.run_page.preview_inputs = None;
                     self.run_page.preview = None;
                     self.run_page.preview_stale = true;
                     self.osm_page.status = crate::road_status::explain(&e);

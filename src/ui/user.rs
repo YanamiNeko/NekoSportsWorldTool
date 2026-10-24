@@ -113,7 +113,7 @@ const FIELD_LABELS: &[(&str, &str)] = &[
     ("endDate", "学期结束"),
     ("semesterGoal", "学期目标"),
     ("semesterGoalCount", "目标次数"),
-    ("semesterValid", "已有效次数"),
+    ("semesterValid", "学期有效值（原始字段）"),
     ("semesterValidCount", "有效次数"),
     ("semesterValidDis", "有效里程"),
     ("curValidDis", "当前有效里程"),

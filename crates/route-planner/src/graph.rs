@@ -12,7 +12,7 @@ pub const MET_PER_DEG_LAT: f64 = 111_132.0;
 pub const MET_PER_DEG_LNG_EQ: f64 = 111_320.0;
 
 /// 经纬度（度，工作系）。
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Coord {
     pub lon: f64,
     pub lat: f64,
@@ -68,6 +68,7 @@ impl rstar::PointDistance for Seg {
 
 #[derive(Clone)]
 pub struct RoadGraph {
+    pub campuses: Vec<crate::campus::Campus>,
     pub graph: DiGraph<NodeData, EdgeData>,
     /// 投影锚点（度）。
     pub anchor: Coord,
@@ -105,6 +106,7 @@ impl RoadGraph {
 
     pub fn new() -> Self {
         RoadGraph {
+            campuses: Vec::new(),
             graph: DiGraph::new(),
             anchor: Coord::new(0.0, 0.0),
             meter_per_lng: MET_PER_DEG_LNG_EQ,

@@ -70,14 +70,19 @@ pub fn fetch_one_record(client: &mut ApiClient, rrid: i64) -> Result<Value, Stri
     } else {
         inner
     };
-    if record.is_null() {
-        return Err("记录详情为空".into());
+    if !record.is_object() {
+        return Err("记录详情为空或格式异常".into());
+    }
+    if let Some(id) = record.get("rrid") {
+        if id.as_i64().or_else(|| id.as_str()?.parse().ok()) != Some(rrid) {
+            return Err("详情返回的记录编号与请求不一致，请刷新重试".into());
+        }
     }
     Ok(record)
 }
 
 /// 单条跑步详情（get_one_record 返回的完整 data）。
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunDetail {
     pub rrid: i64,
@@ -101,7 +106,7 @@ pub struct RunDetail {
     pub start_time: i64,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReasonItem {
     pub reason: String,
@@ -154,6 +159,34 @@ pub fn fetch_detail(client: &mut ApiClient, rrid: i64) -> Result<RunDetail, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detail_deserialization_preserves_raw_values_and_empty_reasons() {
+        let fixture = r#"{
+            "rrid": 42, "uuid": "fixture", "sportType": 1,
+            "totalTime": 600, "totalDis": 1234.0, "speed": 2.3456789,
+            "calorie": 60, "avgPower": 0, "totalSteps": 1200,
+            "totalAscent": 0, "totalDescent": 0, "avgStepFreq": 120,
+            "validDis": 1234.0, "validTime": 600, "address": "fixture",
+            "statusInfo": "原始状态 RAW_STATUS / 未翻译",
+            "complete": false,
+            "reasonList": [{"reason": "原始原因 RAW_REASON", "complete": false}],
+            "startTime": 1700000000000
+        }"#;
+        for input in [fixture.to_owned(), fixture.replace(
+            r#"[{"reason": "原始原因 RAW_REASON", "complete": false}]"#, "[]"
+        )] {
+            let original: Value = serde_json::from_str(&input).unwrap();
+            let detail: RunDetail = serde_json::from_str(&input).unwrap();
+            assert_eq!(detail.speed, 2.3456789);
+            assert_eq!(detail.status_info, "原始状态 RAW_STATUS / 未翻译");
+            assert_eq!(detail.reason_list.len(), original["reasonList"].as_array().unwrap().len());
+            let output: Value = serde_json::from_str(&serde_json::to_string_pretty(&detail).unwrap()).unwrap();
+            for key in ["speed", "statusInfo", "reasonList"] {
+                assert_eq!(output[key], original[key], "字段 {key} 被改写");
+            }
+        }
+    }
 
     #[test]
     fn test_detail_serializes_camel_case() {

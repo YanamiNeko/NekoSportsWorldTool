@@ -1,6 +1,6 @@
 # 违规状态与重复提交保护
 
-本页说明当前源码的违规状态与重复提交保护。2026-10-20 道路闭环 Release 包不包含本批新增改动，版本号保持不变。测试范围见[合并前验证报告](integration-verification.md)。
+本页说明当前源码的违规状态与重复提交保护。新增改动已包含在 [Windows 配速与提交保护修复版](https://github.com/GAN1112233131/NekoSportsWorldTool/releases/tag/windows-pace-fix-2026-10-20)；此前道路闭环 Release 包不包含这些改动。版本号保持不变，测试范围见[合并前验证报告](integration-verification.md)。
 
 ## 查看违规状态
 

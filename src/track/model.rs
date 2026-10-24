@@ -132,6 +132,20 @@ impl Track {
         if self.speedPerTenSec.len() != self.stepsPerTenSec.len() {
             return Err("距离与步数窗口数量不一致".into());
         }
+        if self.speedPerTenSec.is_empty() { return Err("缺少距离和步数窗口".into()); }
+        for (distance,steps) in self.speedPerTenSec.iter().zip(&self.stepsPerTenSec) {
+            if distance.time <= 0 || distance.time != steps.time
+                || !distance.value.is_finite() || distance.value < 0.
+                || !steps.value.is_finite() || steps.value < 0. || steps.value.fract() != 0.
+                || (distance.value > 0. && steps.value < 1.) {
+                return Err("窗口统计无效：移动窗口不能为零步；不补造总步数".into());
+            }
+        }
+        if self.speedPerTenSec.iter().map(|w| w.time).sum::<i64>() != self.totalTime
+            || (self.speedPerTenSec.iter().map(|w| w.value).sum::<f64>()-self.totalDistance).abs() > 1e-5
+            || (self.stepsPerTenSec.iter().map(|w| w.value).sum::<f64>()-self.totalSteps as f64).abs() > 1e-5 {
+            return Err("窗口总量与轨迹总量不一致".into());
+        }
         self.start_coordinate()
     }
 }
@@ -183,8 +197,8 @@ mod tests {
             startLongitude: 116.4,
             locations: vec![point],
             totalSteps: 1,
-            speedPerTenSec: vec![],
-            stepsPerTenSec: vec![],
+            speedPerTenSec: vec![TenWindow { time:1, value:1. }],
+            stepsPerTenSec: vec![TenWindow { time:1, value:1. }],
             segments: vec![],
         }
     }

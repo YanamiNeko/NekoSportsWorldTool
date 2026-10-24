@@ -118,7 +118,10 @@ impl App {
             session.token.clone(),
         ));
         let path = self.config.osm_path.clone();
+        let map_search_endpoint = self.config.map_search_endpoint.clone();
+        let lookup_name = crate::api::map_boundary::school_name(&session, &self.config);
         let selection = self.config.school_campus.clone();
+        let map_selection = self.config.map_boundary.clone();
         let control = self.osm_page.cancel.clone();
         let net_tx = self.net_tx.clone();
         #[cfg(test)]
@@ -136,6 +139,7 @@ impl App {
             let mut inputs = None;
             let mut campuses = Vec::new();
             let mut selected_key = String::new();
+            let mut map_notice = String::new();
             let stage = |message: &str| {
                 let _ = tx.send(format!("__ROAD_STAGE__{request_id}|{message}"));
             };
@@ -220,16 +224,28 @@ impl App {
                 stage("获取当前学校策略与路线点位…");
                 let policy = crate::api::policy::fetch_policy(&mut client)?;
                 control.check()?;
-                let pts = crate::api::points::fetch_points_ext(
+                let point_response = crate::api::points::fetch_point_response(
                     &mut client,
                     anchor,
                     run_area_id,
                     &mut log,
                 )?;
-                if pts.is_empty() || crate::api::points::points_bd(&pts).len() != pts.len() {
-                    return Err("点位为空或坐标无效".into());
+                log(point_response.label());
+                let pts = point_response.points();
+                let route_points = crate::api::map_boundary::route_inputs(&policy.must_points, pts, anchor);
+                let mut map_items = loaded.as_ref().map(|n| n.campuses.clone()).unwrap_or_default();
+                if fences.is_empty() && (map_items.is_empty() || map_selection.as_ref().is_some_and(|s| s.school == school && crate::api::map_boundary::selected(&map_items, Some(s), &school).is_none())) {
+                    stage("查找地图校园边界…");
+                    let name = lookup_name.as_str();
+                    match crate::api::map_boundary::discover_with_backup(&school, name, anchor, force, &map_search_endpoint, &control) {
+                        Ok(items) => { map_notice = if items.is_empty() { "地图查询完成，未找到完整校园区域；可在路网页修改校名重查".into() } else { format!("找到 {} 个校园区域，请到路网页核对确认", items.len()) }; map_items = items; },
+                        Err(e) => { control.check()?; map_notice = format!("校园地图查询失败：{e}；请在路网页重试，不能据此判断学校没有边界"); log(&map_notice); }
+                    }
                 }
-                let route_points = crate::api::points::route_points(&policy.must_points, &pts);
+                let boundary_label = if !fences.is_empty() { "官方围栏" }
+                    else if crate::api::map_boundary::selected(&map_items, map_selection.as_ref(), &school).is_some() { "已确认的地图校园边界" }
+                    else { "校园范围未校验" }.to_owned();
+                let fences = crate::api::map_boundary::planning_fences(&fences, &map_items, map_selection.as_ref(), &school)?;
                 if loaded.is_none() {
                     stage("按学校真实点位获取附近路网…");
                     loaded = Some(std::sync::Arc::new(
@@ -244,8 +260,11 @@ impl App {
                         )?,
                     ));
                 }
+                if let Some(net) = loaded.as_mut() { std::sync::Arc::make_mut(net).campuses = map_items; }
                 let session = client.login.as_ref().ok_or("未登录")?;
+                log(&format!("[road] {boundary_label}"));
                 inputs = Some(super::run::PreviewInputs {
+                    boundary_label,
                     uid: session.uid,
                     unid: session.unid.clone(),
                     anchor,
@@ -274,7 +293,8 @@ impl App {
                 }
                 Ok(())
             })();
-            let (result, warning) = finish_road_load(loaded, result);
+            let (result, mut warning) = finish_road_load(loaded, result);
+            if !map_notice.is_empty() { warning.push_str(&format!("\n{map_notice}")); }
             let _ = net_tx.send(super::osm::NetworkLoad {
                 pending: false,
                 warning,
@@ -486,8 +506,11 @@ impl App {
             if let Some(host) = detail_test_host {
                 client.set_test_host(host);
             }
-            match crate::api::records::fetch_detail(&mut client, rrid) {
-                Ok(d) => {
+            match crate::api::records::fetch_one_record(&mut client, rrid) {
+                Ok(mut d) => {
+                    // Keep unknown reason fields and numeric/string types intact.
+                    // The validated request ID is used for UI routing.
+                    d["rrid"] = serde_json::json!(rrid);
                     let payload = serde_json::to_string(&d).unwrap_or_default();
                     tx.send(format!("{RUN_DETAIL}{payload}")).ok();
                 }
@@ -592,13 +615,7 @@ impl App {
             match crate::api::semester::query(&mut client, &mut log) {
                 Ok(r) => {
                     if let Some(s) = r.summary {
-                        log(&format!(
-                            "√ [semester] {} 有效 {}/{} 次，有效里程 {:.2} km",
-                            s.sname,
-                            s.semester_valid_count,
-                            s.semester_count,
-                            s.semester_valid_dis / 1000.0
-                        ));
+                        log(&format!("√ [semester] {}", s.display()));
                         let payload = serde_json::to_string(&s).unwrap_or_default();
                         tx.send(format!("{SEMESTER}{payload}")).ok();
                     } else {

@@ -53,12 +53,12 @@ NekoSportsWorldTool help                                 # 全部命令
 
 ## 常见问题
 
-- **提示未登录 / 401**：先执行 `login --remember`（GUI 勾选记住密码等价），会话失效会自动重登
+- **提示未登录 / 401**：学校接口拒绝旧会话时，请在账号栏正常重新登录，或通过 CLI 执行 `login --remember`。本地地图会保留；登录成功后再刷新路线点位。
 - **10121 设备风险**：设备身份是持久化的，删除 `identity.json` 等于换了新设备，不要频繁删
 - **10603 点位限流**：点位接口 5 分钟限 3 次，程序内置 300s 缓存，正常使用不会触发
 - **榜单为空**：当天还没有人产生有效里程，查询会自动回退最近 3 天
 - **检查更新失败**：更新仅直连 GitHub，网络不通时到 [Release](https://github.com/YanamiNeko/NekoSportsWorldTool/releases) 手动下载
-- **手动更新方式**：Windows 下载新的 `nekosportsworldtool.exe` 后退出软件，用新文件替换旧文件；请保留 `config.json`、`identity.json`、`points_cache.json` 等配置文件，不要删除或修改。
+- **手动更新方式**：Windows 下载并解压新版本后退出旧程序，用新 EXE 替换旧文件；请保留 `config.json`、`identity.json`、`points_cache.json` 等配置文件，不要删除或修改。
 - **人机验证失败**：自动重试 3 轮，仍失败大概率是网络波动，稍后再试
 - **杀软误报**：未签名编译产物可能被误报，自行判断后加白
 
@@ -74,3 +74,8 @@ cargo build --release --no-default-features  # 仅 CLI
 ## 许可证
 
 [CC BY-NC 4.0](LICENSE) © YanamiNeko（禁止商用）
+
+## 测试构建与设备说明
+记录详情页增加 `speed`、`statusInfo` 和 `reasonList` JSON。脚本可执行 `NekoSportsWorldTool.exe record --rrid 123 > record.json`：stdout 仅输出详情原始 JSON，诊断写到 stderr，失败返回非零退出码；保留原有 `record-info` 命令。该查询需要有效登录状态，或已保存的登录配置。
+成绩提交固定模拟安卓；设备信息页的平台设置只影响其他接口，不能统一所有请求身份。当前自动海拔是模拟数据，不是定位锚点的真实地形；手动填写单个海拔值会使爬升为零。
+使用 `--version` 或界面版本查看构建标识；带 dirty 的标识表示来自未提交工作区，精确识别请使用发行包 SHA256SUMS.txt。

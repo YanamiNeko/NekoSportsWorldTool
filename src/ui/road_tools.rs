@@ -3,6 +3,7 @@ use super::App;
 use eframe::egui;
 impl App {
     pub(crate) fn draw_road_tools(&mut self, ui: &mut egui::Ui) {
+        self.draw_map_boundary_choice(ui);
         if !self.osm_page.campuses.is_empty() && !self.osm_page.offline {
             let old = self.osm_page.selected_key.clone();
             let name = self
@@ -108,7 +109,16 @@ impl App {
                     }
                     if ui.button("清除此缓存").clicked() {
                         match crate::api::school_roads::clear_cache(&entry.key) {
-                            Ok(()) => self.osm_page.cache_entries.retain(|c| c.key != entry.key),
+                            Ok(()) => {
+                                if self.config.offline_preview.as_ref().is_some_and(|s| s.key == entry.key)
+                                    || self.osm_page.pending_offline_key.as_deref() == Some(entry.key.as_str())
+                                {
+                                    self.begin_network_load();
+                                    self.osm_page.busy = false;
+                                    self.osm_page.status = "已清除当前离线缓存，请重新选择路网".into();
+                                }
+                                self.osm_page.cache_entries.retain(|c| c.key != entry.key);
+                            },
                             Err(e) => self.osm_page.status = e,
                         }
                     }
@@ -223,8 +233,40 @@ impl App {
             }
         }
     }
-    fn open_cached_road(&mut self, key: &str) {
-        let request_id = self.begin_network_load();
+    pub(crate) fn forget_offline_preview(&mut self) {
+        if self.config.offline_preview.take().is_some() {
+            if let Err(e) = crate::api::model::save_config(&self.config) {
+                self.log.push(&format!("[osm] 清除离线恢复选择失败：{e}"));
+            }
+        }
+    }
+
+    /// Shared by real startup and restart regression tests. Failed offline
+    /// restoration must not silently switch to another map or campus.
+    pub(crate) fn restore_route_on_startup(&mut self) {
+        if let Some(saved) = self.config.offline_preview.clone() {
+            if self.run_page.route_mode != crate::track::generate_road::RouteMode::Road
+                || self.session.as_ref().is_some_and(|s| s.unid != saved.school)
+                || self.identity.anchor_lat != saved.anchor_lat
+                || self.identity.anchor_lon != saved.anchor_lon
+            {
+                self.forget_offline_preview();
+                self.osm_page.status = "学校、定位或路线模式已变化，未恢复上次离线预览；请重新选择路网".into();
+                return;
+            }
+            self.open_cached_road(&saved.key);
+        } else if !self.config.osm_path.is_empty() {
+            self.load_osm_async(self.config.osm_path.clone());
+        } else if self.session.is_some() {
+            self.refresh_points();
+        }
+    }
+
+    pub(crate) fn open_cached_road(&mut self, key: &str) {
+        // Keep the last successful selection on disk while reading. Closing
+        // during startup must not erase it; failure explicitly clears it.
+        let request_id = self.reset_network_load();
+        self.osm_page.pending_offline_key = Some(key.to_string());
         self.osm_page.offline = true;
         self.osm_page.status = "正在后台读取离线缓存…".into();
         self.run_page.route_mode = crate::track::generate_road::RouteMode::Road;
@@ -235,11 +277,16 @@ impl App {
         let tx = self.net_tx.clone();
         let key = key.to_string();
         let control = self.osm_page.cancel.clone();
+        #[cfg(test)]
+        let data_dir = crate::platform::TEST_DATA_DIR.with(|p| p.borrow().clone());
         std::thread::spawn(move || {
+            #[cfg(test)]
+            crate::platform::TEST_DATA_DIR.with(|p| *p.borrow_mut() = data_dir);
             let mut inputs = None;
             let result = crate::api::school_roads::read_cache(&key).and_then(|(net, entry)| {
                 control.check()?;
                 inputs = Some(super::run::PreviewInputs {
+                    boundary_label: "离线缓存范围".into(),
                     uid: 0,
                     unid: entry.school,
                     anchor,
@@ -282,5 +329,65 @@ impl App {
                 self.osm_page.status = format!("GPX 分析失败：{e}");
             }
         }
+    }
+}
+
+impl App {
+    fn draw_map_boundary_choice(&mut self, ui: &mut egui::Ui) {
+        let Some(session) = self.session.clone() else { return; };
+        self.draw_school_lookup(ui);
+        let mut items = self.network.as_ref().map(|n| n.campuses.clone()).unwrap_or_default();
+        if self.osm_page.lookup.school == session.unid {
+            for c in &self.osm_page.lookup.items {
+                items.retain(|old| old.id != c.id);
+                items.push(c.clone());
+            }
+        }
+        let official = self.run_page.preview_inputs.as_ref().is_some_and(|i| i.boundary_label == "官方围栏");
+        if official { ui.label("当前使用官方围栏，地图校园边界不覆盖官方范围。"); return; }
+        if let Some(choice) = self.config.map_boundary.as_ref().filter(|s|s.school==session.unid) {
+            let valid = crate::api::map_boundary::selected(&items,Some(choice),&session.unid).is_some();
+            ui.label(if valid { "已启用确认过的地图校园边界（本地规划使用）" } else { "已确认的地图边界不可用或变化，需重新确认后正式运行" });
+            if ui.add_enabled(!self.osm_page.busy,egui::Button::new("取消地图边界，使用无边界路线")).clicked() {
+                self.save_map_boundary_choice(None);
+            }
+        }
+        if items.is_empty() { ui.label("尚未取得可选校园区域，可在上方按校名查询；校园范围未校验。"); return; }
+        ui.label("地图校园边界：请选择并核对轮廓，确认后才限制路线范围。");
+        if !items.iter().any(|c|c.id==self.osm_page.map_choice) {
+            self.osm_page.map_choice = crate::api::map_boundary::selected(&items,self.config.map_boundary.as_ref(),&session.unid)
+                .unwrap_or(&items[0]).id.clone();
+        }
+        let selected = items.iter().find(|c|c.id==self.osm_page.map_choice).unwrap();
+        egui::ComboBox::from_id_salt("map_campus_choice")
+            .selected_text(format!("{} ({})",selected.name,selected.id))
+            .width(ui.available_width().min(300.))
+            .show_ui(ui,|ui| { for c in &items { ui.selectable_value(&mut self.osm_page.map_choice,c.id.clone(),format!("{} ({})",c.name,c.id)); } });
+        let c=items.iter().find(|c|c.id==self.osm_page.map_choice).unwrap();
+        let (response,painter)=ui.allocate_painter(egui::vec2(ui.available_width(),180.),egui::Sense::hover());
+        let mut map=super::map::MapState::default();
+        let bounds:Vec<_>=c.outer.iter().flatten().map(|p|(p.lat,p.lon)).collect();
+        map.fit(response.rect,&bounds);
+        painter.rect_filled(response.rect,0.,egui::Color32::from_rgb(245,248,246));
+        if let Some(net)=&self.network { map.draw_network(&painter,response.rect,net); }
+        for ring in &c.outer { map.draw_polygon(&painter,response.rect,&ring.iter().map(|p|(p.lat,p.lon)).collect::<Vec<_>>(),egui::Color32::from_rgb(0,135,110),2.); }
+        for ring in &c.inner { map.draw_polygon(&painter,response.rect,&ring.iter().map(|p|(p.lat,p.lon)).collect::<Vec<_>>(),egui::Color32::RED,2.); }
+        ui.label("绿色为校园外轮廓，红色为排除区域；地图边界不代表服务端达标规则。");
+        if ui.add_enabled(!self.osm_page.busy,egui::Button::new("确认使用此校园边界")).clicked() {
+            self.save_map_boundary_choice(Some(crate::api::map_boundary::Selection{school:session.unid,id:c.id.clone(),revision:crate::api::map_boundary::revision(c)}));
+        }
+    }
+}
+
+impl App {
+    pub(crate) fn save_map_boundary_choice(&mut self, selection:Option<crate::api::map_boundary::Selection>) {
+        let mut config=self.config.clone();
+        config.map_boundary=selection;
+        if let Err(e)=crate::api::model::save_config(&config) {
+            self.osm_page.status=format!("校园边界选择未保存，未应用：{e}");
+            return;
+        }
+        self.config=config;
+        self.refresh_school_route(false);
     }
 }

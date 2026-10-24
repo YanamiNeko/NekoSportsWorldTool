@@ -1,13 +1,13 @@
-# Windows 道路闭环版（2026-10-20）
+# Windows 配速与提交保护修复版（2026-10-20）
 
-[下载 Windows x64 压缩包](https://github.com/GAN1112233131/NekoSportsWorldTool/raw/refs/heads/fix/confirmed-bugs-69856c91/downloads/NekoSportsWorldTool-Windows-x64-road-loop.zip)
+[下载最新版 Windows x64 压缩包](https://github.com/GAN1112233131/NekoSportsWorldTool/releases/download/windows-pace-fix-2026-10-20/NekoSportsWorldTool-Windows-x64-pace-fix.zip)
 
-解压后先关闭旧程序，将新版 EXE 放入原工具目录运行，保留原配置和地图。版本号仍为 0.3.0，校验值见 SHA256SUMS.txt。
+首次使用可解压运行 `Windows配速修正版/NekoSportsWorldTool-Windows-x64-pace-fix.exe`。已有工具先关闭旧程序，只复制新版 EXE 到原工具目录，保留原配置、登录状态、地图及 `submission_receipts/`。不要用包内空配置覆盖原配置；独立目录之间不会共享重复提交保护。版本号仍为 0.3.0，包内自动更新默认关闭。
 
-预览和正式道路生成均支持无围栏；额外里程沿已覆盖点位的同一道路闭环重复。有有效围栏时仍应用其范围，无围栏无法保证全程在校内。
+本版修正 OBS 每公里配速单位，增加准确的违规状态、关联详情和重复提交保护，继承道路刷新及闭环重复修复。无围栏无法保证全程在校内，旧服务器记录不会自动更新。
 
-GUI 178 项、无 GUI 122 项、Windows 本机 163 项测试通过，Windows 窗口启动检查通过。手动 OSM 和自动获取均完成真实点位的只读预览验收；未进行真实成绩提交或 OBS 上传。
+GUI 197 项、无 GUI 136 项、Windows 本机 182 项测试通过，编译与 Windows 启动检查通过。未提交真实成绩或上传 OBS；官方 App 最终显示、Android 尚未实测。
 
-[完整验证报告](../docs/bugfix-69856c91/route-refresh-verification.md) · [源码修改说明](../BUGFIX_NOTES.md)
+[验证报告](../docs/integration-verification.md) · [配速说明](../docs/pace-unit-fix.md) · [重复提交保护](../docs/violation-checks.md) · [本版 SHA-256](SHA256SUMS-pace-fix.txt)
 
-本文件记录本次 GitHub 上传；验证报告中的“未推送”是构建验收时状态。本次只更新修复分支并提供下载文件，没有发布 Release、创建 PR 或关闭议题。包内不含账号配置、密码、会话或设备身份。
+本目录中的 `NekoSportsWorldTool-Windows-x64-road-loop.zip` 及 `SHA256SUMS.txt` 保留为历史道路闭环版，不包含本次新增修复。最新版仅在上面的 Release 链接提供 ZIP；包内包含空配置和使用说明，不含用户账号、密码、会话或设备身份。

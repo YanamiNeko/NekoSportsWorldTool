@@ -1,0 +1,10 @@
+{
+  "route_mode": "road",
+  "dist_min": 1.0,
+  "dist_max": 1.5,
+  "pace_min": 360.0,
+  "pace_max": 480.0,
+  "update_check": "off",
+  "remember": false,
+  "osm_path": ""
+}

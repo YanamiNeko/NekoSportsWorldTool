@@ -9,6 +9,7 @@ pub fn dispatch(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|x| x.as_str()).unwrap_or("help");
     let rest = args.iter().skip(1).map(|x| x.as_str()).collect::<Vec<_>>();
     match cmd {
+        "--version" | "-V" | "version" => { println!("NekoSportsWorldTool {}", crate::platform::build_version()); 0 },
         "login" => cmd_login(&rest),
         "logout" => cmd_logout(),
         "run" => cmd_run(&rest),
@@ -16,6 +17,7 @@ pub fn dispatch(args: Vec<String>) -> i32 {
         "ai" => cmd_ai(&rest),
         "ai-list" => cmd_ai_list(),
         "records" => cmd_records(),
+        "record" => cmd_record(&rest),
         "records-raw" => cmd_records_raw(&rest),
         "record-info" => cmd_record_info(&rest),
         "obs-get" => cmd_obs_get(&rest),
@@ -502,6 +504,95 @@ fn cmd_obs_sample(rest: &[&str]) -> i32 {
 }
 
 /// 单条跑步记录原始详情。
+fn cmd_record(rest: &[&str]) -> i32 {
+    let rrid = match rest {
+        ["--rrid", id] if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) =>
+            id.parse::<i64>().ok().filter(|id| *id > 0),
+        _ => None,
+    };
+    let Some(rrid) = rrid else {
+        eprintln!("需要 --rrid <正整数>");
+        return 1;
+    };
+    let result = super::make_client_with_log(&mut |s| eprintln!("{}", crate::textlog::clean(s)))
+        .and_then(|mut client| record_json(&mut client, rrid));
+    match result {
+        Ok(json) => { println!("{json}"); 0 }
+        Err(error) => { eprintln!("{error}"); 1 }
+    }
+}
+
+fn record_json(client: &mut ApiClient, rrid: i64) -> Result<String, String> {
+    // Preserve server fields/types instead of round-tripping through the typed
+    // summary, which can drop unknown reason fields or default absent values.
+    let raw = crate::api::records::fetch_one_record(client, rrid)?;
+    if let Some(id) = raw.get("rrid") {
+        if id.as_i64().or_else(|| id.as_str()?.parse().ok()) != Some(rrid) {
+            return Err("详情返回的记录编号与请求不一致".into());
+        }
+    }
+    serde_json::to_string_pretty(&raw).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn record_reads_original_json_and_rejects_another_record() {
+        for returned_id in [42, 43] {
+            let data = json!({"rrid": returned_id, "speed": 6833.5,
+                "statusInfo": "原始判词", "reasonList": [{"complete": false,
+                "reason": "原始原因", "extra": {"code": 201}}], "unknownField": null});
+            let expected = data.clone();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let host = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let mut stream = loop {
+                    if let Ok((stream, _)) = listener.accept() { break stream; }
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0; 4096];
+                    let n = stream.read(&mut chunk).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&chunk[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                        assert!(headers.starts_with(&format!("post {} ", crate::api::records::GET_ONE_PATH)));
+                        let length: usize = headers.lines().find_map(|line| line.strip_prefix("content-length:")).unwrap().trim().parse().unwrap();
+                        if request.len() >= end + 4 + length { break; }
+                    }
+                }
+                let body = json!({"error":10000,"data":data}).to_string();
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            });
+            let mut client = ApiClient::new(model::HeaderIdentity::default(), Some(model::Session { uid: 42, token: "offline-test".into(), ..Default::default() }));
+            client.set_test_host(host);
+            let result = record_json(&mut client, 42);
+            server.join().unwrap();
+            if returned_id == 42 {
+                assert_eq!(serde_json::from_str::<serde_json::Value>(&result.unwrap()).unwrap(), expected);
+            } else { assert!(result.is_err()); }
+        }
+    }
+
+    #[test]
+    fn invalid_record_id_fails_before_login_or_network() {
+        for args in [vec!["record"], vec!["record","--rrid","no"], vec!["record","--rrid","0"], vec!["record","--rrid","-1"], vec!["record","--rrid","42","extra"], vec!["record","--rrid","42","--rrid","43"]] {
+            assert_eq!(dispatch(args.into_iter().map(str::to_owned).collect()), 1);
+        }
+    }
+}
+
 fn cmd_record_info(rest: &[&str]) -> i32 {
     let flags = parse_flags(rest);
     let Some(rrid) = get(&flags, "rrid").and_then(|v| v.parse::<i64>().ok()) else {
@@ -608,14 +699,7 @@ fn cmd_semester() -> i32 {
     match crate::api::semester::query(&mut client, &mut log) {
         Ok(r) => {
             if let Some(s) = r.summary {
-                println!(
-                    "学期：{}  有效次数：{}/{}  有效里程：{:.2} km（总 {:.2} km）",
-                    s.sname,
-                    s.semester_valid_count,
-                    s.semester_count,
-                    s.semester_valid_dis / 1000.0,
-                    s.semester_dis / 1000.0
-                );
+                println!("{}", s.display());
             }
             if !r.personal_raw.is_null() {
                 println!("个人完成度：{}", r.personal_raw);
@@ -644,7 +728,7 @@ fn cmd_cheat(rest: &[&str]) -> i32 {
     let mut log = logger();
     match crate::api::cheat::query(&mut client, page, &mut log) {
         Ok(r) => {
-            println!("自查：{}", r.label());
+            println!("自查：{}；{}", r.label(), r.count_and_appeal());
             println!("检查时间：{}", crate::track::geom::fmt_cst(r.checked_at_ms, "%Y-%m-%d %H:%M:%S 北京时间"));
             if r.status() == crate::api::cheat::Status::Flagged {
                 println!("服务端原因：{}；发生时间：{}", r.reason(), r.occurred_at());

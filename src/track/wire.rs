@@ -135,7 +135,12 @@ pub fn five_point_wrapper(points: &[Value], track: &Track, area: &RunAreaMeta) -
 }
 
 /// 校验提交用五点轨迹仍是同一次点位请求产生的有效数据。
+#[cfg(test)]
 pub fn validate_five_point_wrapper(wrapper: &str) -> Result<(), String> {
+    validate_five_point_wrapper_for(wrapper, false)
+}
+
+pub fn validate_five_point_wrapper_for(wrapper: &str, allow_empty: bool) -> Result<(), String> {
     let outer: Value =
         serde_json::from_str(wrapper).map_err(|e| format!("五点轨迹 JSON 无效: {e}"))?;
     let raw = outer
@@ -144,7 +149,7 @@ pub fn validate_five_point_wrapper(wrapper: &str) -> Result<(), String> {
         .ok_or("五点轨迹缺少 fivePointJson")?;
     let points: Vec<Value> =
         serde_json::from_str(raw).map_err(|e| format!("五点轨迹数组无效: {e}"))?;
-    if points.is_empty() {
+    if points.is_empty() && !allow_empty {
         return Err("五点轨迹不能为空".into());
     }
     for point in points {
@@ -392,6 +397,26 @@ mod regression_tests {
                 .sum::<i64>(),
             3000
         );
+    }
+    #[test]
+    fn lap_pace_extrema_are_ordered_in_seconds_per_kilometre() {
+        let mut track = linear_track(3000.0, 1164, 3600);
+        let first = track.locations[0].clone();
+        track.locations = [(0., 0, 0), (1000., 410, 1200),
+            (2000., 799, 2400), (3000., 1164, 3600)].into_iter().map(|(d,t,s)| {
+                let mut p=first.clone(); p.totalDis=d; p.totalTime=t; p.steps=s; p
+            }).collect();
+        crate::track::stats::rebuild(&mut track);
+        let laps=build_laps(&track,0);
+        let paces: Vec<_>=laps.iter().map(|l| l["avgPace"].as_f64().unwrap()).collect();
+        assert_eq!(paces, vec![410.,389.,365.]);
+        let fastest=paces.iter().copied().fold(f64::INFINITY,f64::min);
+        let slowest=paces.iter().copied().fold(0.,f64::max);
+        let average=track.totalTime as f64/(track.totalDistance/1000.);
+        assert_eq!(fastest,365.);
+        assert!(fastest <= average && average <= slowest);
+        // There are no maxPace/minPace fields in the observed lap contract.
+        assert!(laps.iter().all(|l| l.get("maxPace").is_none() && l.get("minPace").is_none()));
     }
     #[test]
     fn encoded_obs_lap_pace_uses_seconds_not_decimal_minutes() {

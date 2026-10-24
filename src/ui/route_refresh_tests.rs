@@ -141,6 +141,15 @@ fn wire_point(lat: f64, lon: f64) -> Value {
 
 #[test]
 fn string_data_http_refresh_reaches_a_complete_campus_preview() {
+    check_string_data_refresh(false);
+}
+
+#[test]
+fn string_point_list_http_refresh_reaches_a_complete_campus_preview() {
+    check_string_data_refresh(true);
+}
+
+fn check_string_data_refresh(encoded_list: bool) {
     let root = FixtureDir::new();
     let first = wire_point(39.9, 116.4);
     let live = vec![first.clone(), wire_point(39.901, 116.401)];
@@ -151,7 +160,7 @@ fn string_data_http_refresh_reaches_a_complete_campus_preview() {
     }]});
     let policy = json!({"timestamp":123, "policy":1, "runRuleModel":{"minDistance":1000},
         "mustPoints":[first.clone(), first]});
-    let points = json!({"pointsResModels":live});
+    let points = json!({"pointsResModels": if encoded_list { json!(serde_json::to_string(&live).unwrap()) } else { json!(live) }});
     let (host, server) = mock_school(vec![
         (
             crate::api::fence::FENCE_PATH,
@@ -582,4 +591,427 @@ fn run_base_map_can_pan_zoom_and_refit_a_reloaded_map() {
     );
     assert!(app.run_page.preview.is_none());
     assert!(app.run_page.preview_inputs.is_none());
+}
+
+fn campus_osm() -> String {
+    LOCAL_OSM.replace("</osm>",r#"<node id="101" lat="39.8995" lon="116.3995"/><node id="102" lat="39.8995" lon="116.4015"/><node id="103" lat="39.9015" lon="116.4015"/><node id="104" lat="39.9015" lon="116.3995"/><way id="100"><nd ref="101"/><nd ref="102"/><nd ref="103"/><nd ref="104"/><nd ref="101"/><tag k="amenity" v="university"/><tag k="name" v="测试学校"/></way></osm>"#)
+}
+fn absent_replies(value:Value, must:Value) -> Vec<(&'static str,Value)> {
+    vec![
+        (crate::api::fence::FENCE_PATH,json!({"error":10000,"data":{"geoFences":[]}})),
+        (crate::api::policy::POLICY_PATH,json!({"error":10000,"data":{"timestamp":123,"policy":1,"mustPoints":must}})),
+        (crate::api::points::POINTS_PATH,value),
+    ]
+}
+#[test]
+fn no_points_http_refresh_plans_and_generates_with_and_without_map_boundary() {
+    for (response,must,confirmed) in [
+        (json!({"error":10600,"message":"当前学校尚未设置点位，请联系学校老师"}),json!([]),true),
+        (json!({"error":10000,"pointsResModels":[]}),json!([]),false),
+        (json!({"error":10600,"message":"当前学校尚未设置点位，请联系学校老师"}),json!([wire_point(39.901,116.401)]),true),
+    ] {
+        let root=FixtureDir::new(); let ctx=egui::Context::default();
+        let (host,server)=mock_school(absent_replies(response,must.clone()));
+        let mut app=fixture_app(&root,&ctx,host);
+        std::fs::write(&app.config.osm_path,campus_osm()).unwrap();
+        if confirmed {
+            let c=route_planner::campus::parse(campus_osm().as_bytes()).unwrap().remove(0);
+            app.config.map_boundary=Some(crate::api::map_boundary::Selection{school:"77".into(),id:c.id.clone(),revision:crate::api::map_boundary::revision(&c)});
+        }
+        app.refresh_school_route(false); wait_for_refresh(&mut app); assert_eq!(server.join().unwrap(),3);
+        let inputs=app.run_page.preview_inputs.as_ref().expect(&app.osm_page.status);
+        assert_eq!(inputs.fences.is_empty(),!confirmed);
+        if must.as_array().unwrap().is_empty(){ assert_eq!(inputs.points,vec![(inputs.anchor.latitude,inputs.anchor.longitude)]); }
+        else { assert_eq!(inputs.points,crate::api::points::points_bd(must.as_array().unwrap())); }
+        let net=app.network.as_ref().unwrap();
+        let preview=crate::track::generate_road::plan_road_view(net,&inputs.points,2400.,960,42,&inputs.fences).unwrap();
+        assert!((preview.laps.iter().sum::<f64>()-2400.).abs()<0.01);
+        let mut aligned=(**net).clone(); crate::track::generate_road::align_network(&mut aligned);
+        let clipped=crate::track::generate_road::apply_fences(&aligned,&inputs.fences);
+        let track=crate::track::generate_road::build_road(2400.,960,42,123000,&inputs.points,&[],&clipped).unwrap();
+        track.validate_consistency().unwrap();
+        if confirmed { assert!(track.locations.windows(2).all(|w| route_planner::boundary::segment_inside(&clipped.boundaries,route_planner::Coord::new(w[0].gLng,w[0].gLat),route_planner::Coord::new(w[1].gLng,w[1].gLat)))); }
+        let wrapper=crate::track::wire::five_point_wrapper(&[],&track,&Default::default());
+        assert!(crate::track::wire::validate_five_point_wrapper_for(&wrapper,true).is_ok());
+        assert!(crate::track::wire::validate_five_point_wrapper_for(&wrapper,false).is_err());
+        let value:Value=serde_json::from_str(&wrapper).unwrap();
+        assert_eq!(value["fivePointJson"],"[]"); assert_eq!(value["geoFencesJson"],"[]"); assert_eq!(value["runAreaId"],-1);
+        assert!(!root.0.join("points_cache.json").exists());
+        assert!(!app.run_busy);
+    }
+}
+#[test]
+fn campus_confirmation_is_reachable_and_clickable_on_short_screens() {
+    for (w,h) in [(320.,360.),(360.,400.),(412.,600.),(1100.,900.)] {
+        let root=FixtureDir::new(); let ctx=egui::Context::default();
+        let (host,server)=mock_school(absent_replies(json!({"error":10000,"pointsResModels":[]}),json!([])));
+        let mut app=fixture_app(&root,&ctx,host); app.tab=7;
+        std::fs::write(&app.config.osm_path,campus_osm()).unwrap();
+        app.network=Some(std::sync::Arc::new(route_planner::load_osm(campus_osm().as_bytes()).unwrap()));
+        frame(&mut app,&ctx,w,h,vec![]);
+        let pos=scroll_to_label(&mut app,&ctx,w,h,"确认使用此校园边界");
+        click(&mut app,&ctx,w,h,pos);
+        assert!(app.config.map_boundary.is_some(),"{w}x{h}");
+        wait_for_refresh(&mut app); assert_eq!(server.join().unwrap(),3);
+        assert!(!app.run_page.preview_inputs.as_ref().expect(&app.osm_page.status).fences.is_empty());
+        assert!(!app.run_busy);
+    }
+}
+
+#[test]
+fn failed_boundary_confirmation_save_does_not_enable_unsaved_constraint() {
+    let root=FixtureDir::new(); let ctx=egui::Context::default();
+    let mut app=fixture_app(&root,&ctx,"http://127.0.0.1:1".into());
+    std::fs::create_dir(root.0.join("config.json")).unwrap();
+    app.save_map_boundary_choice(Some(crate::api::map_boundary::Selection{school:"77".into(),id:"way/1".into(),revision:"fixture".into()}));
+    assert!(app.config.map_boundary.is_none());
+    assert!(!app.osm_page.busy); assert!(app.osm_page.status.contains("未保存"));
+}
+
+#[test]
+fn school_lookup_works_without_roads_or_school_api_on_small_screens() {
+    for (w,h) in [(320.,360.),(360.,400.),(412.,600.),(1100.,900.)] {
+        let root=FixtureDir::new(); let ctx=egui::Context::default();
+        let mut app=fixture_app(&root,&ctx,"http://127.0.0.1:1".into()); app.tab=7;
+        app.session.as_mut().unwrap().profile=json!({"campusName":"肇庆医学院 鼎湖校区"});
+        frame(&mut app,&ctx,w,h,vec![]);
+        assert_eq!(app.osm_page.lookup.name,"肇庆医学院 鼎湖校区");
+        let pos=scroll_to_label(&mut app,&ctx,w,h,"按校名查找校园边界");
+        click(&mut app,&ctx,w,h,pos);
+        let deadline=Instant::now()+Duration::from_secs(3);
+        while app.osm_page.lookup.busy {
+            assert!(Instant::now()<deadline); std::thread::sleep(Duration::from_millis(5)); app.poll_messages();
+        }
+        assert!(app.osm_page.lookup.status.contains("查询完成"),"{}",app.osm_page.lookup.status);
+        assert!(app.network.is_none()); assert!(!app.osm_page.busy); assert!(!app.run_busy);
+        assert_eq!(app.config.map_search_name.as_ref().unwrap().school,"77");
+    }
+}
+#[test]
+fn map_lookup_rejects_old_school_and_cancelled_results_and_keeps_errors_visible() {
+    use crate::ui::campus_lookup::LookupResult;
+    let root=FixtureDir::new(); let ctx=egui::Context::default();
+    let mut app=fixture_app(&root,&ctx,"http://127.0.0.1:1".into());
+    let items=route_planner::campus::parse(campus_osm().as_bytes()).unwrap();
+    app.osm_page.lookup.id=2; app.osm_page.lookup.school="77".into();
+    let tx=app.osm_page.lookup.tx.clone();
+    tx.send(LookupResult{id:1,school:"77".into(),result:Ok(items.clone())}).unwrap();
+    tx.send(LookupResult{id:2,school:"other".into(),result:Ok(items.clone())}).unwrap();
+    app.poll_messages(); assert!(app.osm_page.lookup.items.is_empty());
+    tx.send(LookupResult{id:2,school:"77".into(),result:Err("timeout".into())}).unwrap();
+    app.poll_messages(); assert!(app.osm_page.lookup.status.contains("地图查询失败：timeout"));
+    app.osm_page.lookup.cancel.cancel();
+    tx.send(LookupResult{id:2,school:"77".into(),result:Ok(items)}).unwrap();
+    app.poll_messages(); assert!(app.osm_page.lookup.items.is_empty());
+}
+
+#[test]
+fn configured_dinghu_anchor_refreshes_to_a_complete_route_preview() {
+    let root=FixtureDir::new();let ctx=egui::Context::default();
+    let (host,server)=mock_school(absent_replies(json!({"error":10600,"message":"当前学校尚未设置点位，请联系学校老师"}),json!([])));
+    let mut app=fixture_app(&root,&ctx,host);
+    let (lat,lon)=crate::track::geom::wgs84_to_bd09(23.2057797,112.5811961);
+    app.identity.anchor_lat=lat;app.identity.anchor_lon=lon;app.identity.city="肇庆市".into();
+    let xml=include_bytes!("../../crates/route-planner/tests/fixtures/dinghu-roads.osm");
+    std::fs::create_dir_all(root.0.join("maps")).unwrap();std::fs::write(root.0.join("maps/dinghu.osm"),xml).unwrap();
+    app.config.osm_path="maps/dinghu.osm".into();
+    let items=route_planner::campus::parse(xml).unwrap();let c=items.iter().find(|c|c.id=="way/689151593").unwrap();
+    app.config.map_boundary=Some(crate::api::map_boundary::Selection{school:"77".into(),id:c.id.clone(),revision:crate::api::map_boundary::revision(c)});
+    crate::api::model::save_config(&app.config).unwrap();crate::api::model::save_identity(&app.identity).unwrap();
+    app.config=crate::api::model::load_config();app.identity=crate::api::model::load_identity();
+    assert_eq!(std::path::Path::new(&app.config.osm_path),root.0.join("maps/dinghu.osm"));
+    assert_eq!(app.identity.anchor_lat,lat);assert_eq!(app.identity.anchor_lon,lon);
+    app.refresh_school_route(false);wait_for_refresh(&mut app);assert_eq!(server.join().unwrap(),3);
+    let inputs=app.run_page.preview_inputs.as_ref().expect(&app.osm_page.status);
+    assert_eq!(inputs.points,vec![(lat,lon)]);assert_eq!(inputs.boundary_label,"已确认的地图校园边界");
+    let deadline=Instant::now()+Duration::from_secs(15);
+    while app.run_page.preview.is_none() {
+        app.poll_messages();frame(&mut app,&ctx,1100.,800.,vec![]);
+        assert!(Instant::now()<deadline,"{}",app.run_page.preview_status);std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.run_page.check.as_ref().unwrap().issues.is_empty());
+    let p=app.run_page.preview.as_ref().unwrap();assert!((p.laps.iter().sum::<f64>()-2400.).abs()<0.01);
+    assert!(!app.run_busy);
+}
+
+// Exercise the actual disk cache and startup loader; no route inputs or worker
+// replies are fabricated. Cache coordinates use the same conversion as roads.
+fn saved_offline_fixture(root: &FixtureDir, ctx: &egui::Context) -> (App, String) {
+    let mut app = fixture_app(root, ctx, "http://127.0.0.1:1".into());
+    app.session = None;
+    app.config.osm_path = "school.osm".into();
+    app.config.update_check = "off".into();
+    crate::api::model::save_identity(&app.identity).unwrap();
+    crate::api::model::save_config(&app.config).unwrap();
+    let fences = vec![[(39.8998, 116.3998), (39.8998, 116.4012),
+        (39.9012, 116.4012), (39.9012, 116.3998)]
+        .into_iter().map(|(lat, lon)| crate::track::geom::wgs84_to_bd09(lat, lon))
+        .collect::<Vec<_>>()];
+    let points = vec![crate::track::geom::wgs84_to_bd09(39.9, 116.4),
+        crate::track::geom::wgs84_to_bd09(39.901, 116.401)];
+    let key = crate::api::school_roads::scope_key("77", &fences);
+    std::fs::create_dir_all(root.0.join("school_roads")).unwrap();
+    std::fs::write(root.0.join("school_roads").join(format!("{key}.json")),
+        serde_json::to_vec(&json!({"key":key,"school":"77","name":"离线重启测试校区",
+            "loaded_ms":1,"xml":LOCAL_OSM,"fences":fences,"points":points})).unwrap()).unwrap();
+    app.open_cached_road(&key);
+    wait_for_refresh(&mut app);
+    assert!(app.osm_page.offline, "{}", app.osm_page.status);
+    assert!(app.network.is_some(), "{}", app.osm_page.status);
+    assert_eq!(crate::api::model::load_config().offline_preview.as_ref().unwrap().key, key);
+    (app, key)
+}
+
+fn restarted_offline_app(ctx: &egui::Context) -> App {
+    App::from_state(ctx, crate::api::model::load_identity(), Session::default(),
+        crate::api::model::load_config())
+}
+
+fn assert_offline_preview_completes(app: &mut App, ctx: &egui::Context, distance_m: f64) {
+    wait_for_refresh(app);
+    assert!(app.osm_page.offline, "{}", app.osm_page.status);
+    app.tab = 0;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while app.run_page.preview.is_none() {
+        app.poll_messages();
+        frame(app, ctx, 1100., 900., vec![]);
+        assert!(Instant::now() < deadline, "{} / {}", app.osm_page.status, app.run_page.preview_status);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.run_page.check.as_ref().unwrap().issues.is_empty());
+    assert!((app.run_page.preview.as_ref().unwrap().laps.iter().sum::<f64>() - distance_m).abs() < 0.05);
+    assert!(app.session.is_none());
+    assert!(!app.run_busy);
+}
+
+#[test]
+fn offline_preview_reopens_from_disk_without_another_click_or_login() {
+    let root = FixtureDir::new();
+    let ctx = egui::Context::default();
+    let (app, key) = saved_offline_fixture(&root, &ctx);
+    let expected = app.run_page.preview_inputs.as_ref().unwrap().clone();
+    drop(app);
+    let ctx = egui::Context::default();
+    let mut restarted = restarted_offline_app(&ctx);
+    assert!(restarted.network.is_none());
+    assert!(restarted.run_page.preview_inputs.is_none());
+    restarted.restore_route_on_startup();
+    // Closing before the async loader reply is polled must not erase the saved
+    // choice. A subsequent fresh process should still restore without a click.
+    assert!(restarted.osm_page.busy);
+    assert_eq!(crate::api::model::load_config().offline_preview.as_ref().unwrap().key, key);
+    drop(restarted);
+    let ctx = egui::Context::default();
+    let mut restarted = restarted_offline_app(&ctx);
+    restarted.restore_route_on_startup();
+    assert_offline_preview_completes(&mut restarted, &ctx, 2400.);
+    let actual = restarted.run_page.preview_inputs.as_ref().unwrap();
+    assert_eq!(actual.points, expected.points);
+    assert_eq!(actual.fences, expected.fences);
+    assert_eq!(actual.unid, expected.unid);
+    assert_eq!(restarted.config.offline_preview.as_ref().unwrap().key, key);
+}
+
+#[test]
+fn offline_preview_reopens_after_moving_the_portable_directory() {
+    let mut root = FixtureDir::new();
+    let ctx = egui::Context::default();
+    let (app, key) = saved_offline_fixture(&root, &ctx);
+    drop(app);
+    let old = root.0.clone();
+    let moved = old.with_file_name(format!("route-refresh-moved-{}", uuid::Uuid::new_v4()));
+    std::fs::rename(&old, &moved).unwrap();
+    root.0 = moved;
+    crate::platform::TEST_DATA_DIR.with(|p| *p.borrow_mut() = Some(root.0.clone()));
+    let ctx = egui::Context::default();
+    let mut restarted = restarted_offline_app(&ctx);
+    assert!(!old.exists());
+    assert_eq!(std::path::Path::new(&restarted.config.osm_path), root.0.join("school.osm"));
+    restarted.restore_route_on_startup();
+    assert_offline_preview_completes(&mut restarted, &ctx, 2400.);
+    assert_eq!(restarted.config.offline_preview.as_ref().unwrap().key, key);
+}
+
+#[test]
+fn offline_restart_missing_or_broken_cache_does_not_load_a_different_map() {
+    for failure in ["missing", "invalid-json", "invalid-osm"] {
+        let root = FixtureDir::new();
+        let ctx = egui::Context::default();
+        let (app, key) = saved_offline_fixture(&root, &ctx);
+        drop(app);
+        let path = root.0.join("school_roads").join(format!("{key}.json"));
+        match failure {
+            "missing" => std::fs::remove_file(&path).unwrap(),
+            "invalid-json" => std::fs::write(&path, "{broken").unwrap(),
+            _ => {
+                let mut cache: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                cache["xml"] = json!("<osm version=\"0.6\"></osm>");
+                std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+            }
+        }
+        let mut restarted = restarted_offline_app(&egui::Context::default());
+        assert!(std::path::Path::new(&restarted.config.osm_path).is_file());
+        restarted.restore_route_on_startup();
+        wait_for_refresh(&mut restarted);
+        assert!(restarted.network.is_none(), "{failure}: must not silently load school.osm");
+        assert!(restarted.run_page.preview_inputs.is_none(), "{failure}");
+        assert!(restarted.run_page.preview.is_none(), "{failure}");
+        assert!(restarted.config.offline_preview.is_none(), "{failure}");
+        assert!(crate::api::model::load_config().offline_preview.is_none(), "{failure}");
+        assert!(!restarted.osm_page.status.is_empty());
+        assert!(!restarted.osm_page.status.contains("加载成功"), "{failure}");
+    }
+}
+
+#[test]
+fn offline_restart_rejects_changed_school_anchor_or_route_mode() {
+    for changed in ["school", "anchor-lat", "anchor-lon", "route-mode"] {
+        let root = FixtureDir::new();
+        let ctx = egui::Context::default();
+        let (app, _) = saved_offline_fixture(&root, &ctx);
+        drop(app);
+        let mut restarted = restarted_offline_app(&egui::Context::default());
+        match changed {
+            "school" => restarted.session = Some(Session { uid: 43, unid: "88".into(),
+                token: "other-local-fixture".into(), ..Default::default() }),
+            "anchor-lat" => restarted.identity.anchor_lat += 0.01,
+            "anchor-lon" => restarted.identity.anchor_lon += 0.01,
+            _ => restarted.run_page.route_mode = crate::track::generate_road::RouteMode::Legacy,
+        }
+        restarted.restore_route_on_startup();
+        assert!(!restarted.osm_page.busy, "{changed}");
+        assert!(restarted.network.is_none(), "{changed}");
+        assert!(restarted.run_page.preview_inputs.is_none(), "{changed}");
+        assert!(restarted.osm_page.status.contains("未恢复"), "{changed}");
+        assert!(crate::api::model::load_config().offline_preview.is_none(), "{changed}");
+    }
+}
+
+#[test]
+fn explicitly_selected_portable_cache_restores_for_the_same_logged_in_school_only() {
+    let root = FixtureDir::new();
+    let ctx = egui::Context::default();
+    let (mut app, key) = saved_offline_fixture(&root, &ctx);
+    let session = Session {
+        uid: 43,
+        unid: "139002".into(),
+        token: "portable-selection-local-fixture".into(),
+        ..Default::default()
+    };
+    app.session = Some(session.clone());
+    // The portable cache identifies its own offline dataset (school 77), while
+    // this explicit user selection belongs to the active account's school.
+    app.open_cached_road(&key);
+    wait_for_refresh(&mut app);
+    assert_eq!(app.run_page.preview_inputs.as_ref().unwrap().unid, "77");
+    assert_eq!(crate::api::model::load_config().offline_preview.as_ref().unwrap().school, "139002");
+    drop(app);
+
+    let ctx = egui::Context::default();
+    let mut restarted = App::from_state(&ctx, crate::api::model::load_identity(),
+        session, crate::api::model::load_config());
+    restarted.restore_route_on_startup();
+    wait_for_refresh(&mut restarted);
+    assert!(restarted.osm_page.offline, "{}", restarted.osm_page.status);
+    assert!(restarted.network.is_some(), "{}", restarted.osm_page.status);
+    assert_eq!(restarted.run_page.preview_inputs.as_ref().unwrap().unid, "77");
+    assert_eq!(restarted.config.offline_preview.as_ref().unwrap().school, "139002");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while restarted.run_page.preview.is_none() {
+        restarted.poll_messages();
+        frame(&mut restarted, &ctx, 1100., 900., vec![]);
+        assert!(Instant::now() < deadline, "{}", restarted.run_page.preview_status);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(restarted.run_page.check.as_ref().unwrap().issues.is_empty());
+    assert!(!restarted.run_busy);
+    drop(restarted);
+
+    let other_session = Session { uid: 44, unid: "other-school".into(),
+        token: "other-school-local-fixture".into(), ..Default::default() };
+    let mut other = App::from_state(&egui::Context::default(), crate::api::model::load_identity(),
+        other_session, crate::api::model::load_config());
+    other.restore_route_on_startup();
+    assert!(!other.osm_page.busy);
+    assert!(other.network.is_none());
+    assert!(other.run_page.preview_inputs.is_none());
+    assert!(other.osm_page.status.contains("未恢复"));
+    assert!(crate::api::model::load_config().offline_preview.is_none());
+}
+
+#[test]
+fn manual_map_switch_clears_offline_restart_and_discards_its_delayed_reply() {
+    let root = FixtureDir::new();
+    let ctx = egui::Context::default();
+    let (mut app, key) = saved_offline_fixture(&root, &ctx);
+    app.open_cached_road(&key);
+    // Hold a real cache worker result until after a new manual-map request.
+    let old_reply = app.net_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(old_reply.result.is_ok());
+    let path = root.0.join("replacement.osm");
+    std::fs::write(&path, LOCAL_OSM).unwrap();
+    app.load_osm_async(path.display().to_string());
+    assert_ne!(app.osm_page.request_id, old_reply.request_id);
+    app.net_tx.send(old_reply).unwrap();
+    wait_for_refresh(&mut app);
+    assert!(app.network.is_some());
+    assert!(!app.osm_page.offline);
+    assert!(app.run_page.preview_inputs.is_none());
+    assert!(app.run_page.preview.is_none());
+    assert!(app.config.offline_preview.is_none());
+    assert!(crate::api::model::load_config().offline_preview.is_none());
+    assert_eq!(app.config.osm_path, path.display().to_string());
+}
+
+#[test]
+fn deleting_active_cache_clears_current_preview_and_restart_selection() {
+    let root = FixtureDir::new();
+    let ctx = egui::Context::default();
+    let (mut app, key) = saved_offline_fixture(&root, &ctx);
+    app.tab = 7;
+    let pos = scroll_to_label(&mut app, &ctx, 1100., 900., "已保存的学校路网");
+    click(&mut app, &ctx, 1100., 900., pos);
+    let pos = scroll_to_label(&mut app, &ctx, 1100., 900., "清除此缓存");
+    click(&mut app, &ctx, 1100., 900., pos);
+    assert!(!root.0.join("school_roads").join(format!("{key}.json")).exists());
+    assert!(crate::api::model::load_config().offline_preview.is_none());
+    assert!(app.network.is_none());
+    assert!(app.run_page.preview_inputs.is_none());
+    assert!(!app.osm_page.busy);
+}
+
+#[test]
+#[ignore="explicit offline acceptance check against the exported portable preset"]
+fn exported_dinghu_preset_opens_offline_preview_without_login() {
+    let exported=std::path::PathBuf::from(std::env::var("NEKO_DINGHU_EXPORT_DIR").expect("export directory required"));
+    let root=FixtureDir::new();
+    for file in ["config.json","identity.json","maps/dinghu.osm"] {
+        let target=root.0.join(file);std::fs::create_dir_all(target.parent().unwrap()).unwrap();std::fs::copy(exported.join(file),target).unwrap();
+    }
+    std::fs::create_dir_all(root.0.join("school_roads")).unwrap();
+    for f in std::fs::read_dir(exported.join("school_roads")).unwrap() {let f=f.unwrap();std::fs::copy(f.path(),root.0.join("school_roads").join(f.file_name())).unwrap();}
+    let identity=crate::api::model::load_identity();let config=crate::api::model::load_config();
+    assert!(std::path::Path::new(&config.osm_path).is_file());
+    let ctx=egui::Context::default();let mut app=App::from_state(&ctx,identity,Session::default(),config);app.tab=7;
+    app.osm_page.cache_entries=crate::api::school_roads::entries();assert_eq!(app.osm_page.cache_entries.len(),1);
+    frame(&mut app,&ctx,1100.,900.,vec![]);
+    let pos=scroll_to_label(&mut app,&ctx,1100.,900.,"已保存的学校路网");click(&mut app,&ctx,1100.,900.,pos);
+    let pos=scroll_to_label(&mut app,&ctx,1100.,900.,"离线预览");click(&mut app,&ctx,1100.,900.,pos);
+    wait_for_refresh(&mut app);assert!(app.osm_page.offline);assert!(app.network.is_some(),"{}",app.osm_page.status);
+    app.tab=0;
+    let deadline=Instant::now()+Duration::from_secs(15);
+    while app.run_page.preview.is_none() {
+        app.poll_messages();frame(&mut app,&ctx,1100.,900.,vec![]);
+        assert!(Instant::now()<deadline,"{}",app.run_page.preview_status);std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.run_page.check.as_ref().unwrap().issues.is_empty());
+    assert!((app.run_page.preview.as_ref().unwrap().laps.iter().sum::<f64>()-1000.).abs()<0.01);
+    assert!(app.session.is_none());assert!(!app.run_busy);
+    assert!(crate::api::model::load_config().offline_preview.is_some());
+    drop(app);
+    let ctx = egui::Context::default();
+    let mut restarted = restarted_offline_app(&ctx);
+    restarted.restore_route_on_startup();
+    assert_offline_preview_completes(&mut restarted, &ctx, 1000.);
+    println!("Portable preset: no-login offline UI generated a 1000 m route and restored it after restart without another click");
 }

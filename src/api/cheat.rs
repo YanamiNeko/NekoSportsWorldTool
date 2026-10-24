@@ -52,9 +52,20 @@ impl CheatReport {
         }
         match &self.self_info {
             Value::Null => Status::NoRecord,
-            Value::Object(o) if !o.is_empty() => Status::Flagged,
+            Value::Object(_) => match self.count() {
+                Some(0) => Status::NoRecord,
+                Some(_) => Status::Flagged,
+                None => Status::Unknown,
+            },
             _ => Status::Unknown,
         }
+    }
+    pub fn count(&self) -> Option<i64> {
+        let v = self.self_info.get("count")?;
+        v.as_i64().or_else(|| v.as_str()?.parse().ok()).filter(|n| *n >= 0)
+    }
+    pub fn count_and_appeal(&self) -> String {
+        format!("count={}；appealStatus={}", self.count().map(|n| n.to_string()).unwrap_or_else(|| "未知".into()), text_field(&self.self_info, &["appealStatus"]).unwrap_or_else(|| "未知".into()))
     }
     pub fn status(&self) -> Status {
         self.status_at(crate::crypto::envelope::now_ms())
@@ -152,6 +163,14 @@ mod tests {
         );
     }
     #[test]
+    fn counts_determine_status_without_guessing_appeal_meaning() {
+        for (count, expected) in [(json!(0), Status::NoRecord), (json!(7), Status::Flagged), (json!("0"), Status::NoRecord), (json!(-1), Status::Unknown), (json!(0.5), Status::Unknown), (Value::Null, Status::Unknown)] {
+            let r = CheatReport::from_data(&json!({"self":{"count":count,"appealStatus":2}}), 1000).unwrap();
+            assert_eq!(r.status_at(1000), expected);
+            assert!(r.count_and_appeal().contains("appealStatus=2"));
+        }
+    }
+    #[test]
     fn timestamp_bounds_and_message_roundtrip() {
         let r = CheatReport::from_data(&json!({"self":null}), 1000).unwrap();
         assert_eq!(r.status_at(999), Status::Stale);
@@ -163,7 +182,7 @@ mod tests {
     }
     #[test]
     fn details_preserve_reason_and_only_use_explicit_record_id() {
-        let r = CheatReport::from_data(&json!({"self":{"reason":"","punishReason":"原始原因","createTime":1_700_000_000,"rrid":"42","id":99}}), 1000).unwrap();
+        let r = CheatReport::from_data(&json!({"self":{"count":7,"reason":"","punishReason":"原始原因","createTime":1_700_000_000,"rrid":"42","id":99}}), 1000).unwrap();
         assert_eq!(r.status_at(1000), Status::Flagged);
         assert_eq!(r.reason(), "原始原因");
         assert_eq!(r.record_id(), Some(42));

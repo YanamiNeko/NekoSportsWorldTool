@@ -145,9 +145,11 @@ pub fn run_full_flow_cancellable(
     }
     let anchor: Coordinate = client.identity.anchor_coordinate()?;
     let area_id = (fences.area.run_area_id >= 0).then(|| fences.area.run_area_id.to_string());
-    let pts = points::fetch_points_ext(client, anchor, area_id, log)?;
-    if pts.is_empty() {
-        return Err("实时点位为空 —— 拒绝本地样本兜底".into());
+    let point_response = points::fetch_point_response(client, anchor, area_id, log)?;
+    log(point_response.label());
+    let pts = point_response.points();
+    if pts.is_empty() && params.route_mode == RouteMode::Legacy {
+        return Err("学校没有实时点位，请使用真实道路路由配置起点".into());
     }
     log(&format!("√ [points] {} 个点位", pts.len()));
     for p in pts.iter().take(5) {
@@ -165,7 +167,7 @@ pub fn run_full_flow_cancellable(
     if points::points_bd(&pts).len() != pts.len() {
         return Err("实时点位包含无效坐标".into());
     }
-    let route_pts = points::route_points(&pol.must_points, &pts);
+    let route_pts = super::map_boundary::route_inputs(&pol.must_points, pts, anchor);
     log(&format!(
         "[points] 去重后 {} 个路线点位（包含全部策略必经点）",
         route_pts.len()
@@ -188,19 +190,35 @@ pub fn run_full_flow_cancellable(
                 super::school_roads::validate_fences(&fences.polygons)?;
             }
             let config = super::model::load_config();
+            let mut items = if !config.osm_path.is_empty() {
+                crate::track::generate_road::load_network_path(&config.osm_path)?.campuses
+            } else { Vec::new() };
+            if fences.polygons.is_empty() && (items.is_empty() || config.map_boundary.as_ref().is_some_and(|s| s.school == sess.unid && super::map_boundary::selected(&items, Some(s), &sess.unid).is_none())) {
+                let name = super::map_boundary::school_name(&sess, &config);
+                match super::map_boundary::discover(&sess.unid, &name, anchor, false, control) {
+                    Ok(found) => items = found,
+                    Err(e) => { control.check()?; log(&format!("[map] {e}；校园范围未校验")); }
+                }
+            }
+            // A previously confirmed selection may not silently disappear at submission.
+            if fences.polygons.is_empty() && config.map_boundary.as_ref().is_some_and(|s|s.school==sess.unid)
+                && super::map_boundary::selected(&items,config.map_boundary.as_ref(),&sess.unid).is_none() {
+                return Err("已确认的地图边界不可用或已变化，请刷新并重新确认；如需无边界运行，请在路网页明确取消地图边界".into());
+            }
+            let planning_fences = super::map_boundary::planning_fences(&fences.polygons,&items,config.map_boundary.as_ref(),&sess.unid)?;
             let mut net = super::school_roads::load_for_route_cancellable(
                 &config.osm_path,
                 &sess.unid,
-                &fences.polygons,
+                &planning_fences,
                 &route_pts,
                 false,
                 control,
                 log,
             )?;
             crate::track::generate_road::align_network(&mut net);
-            let filtered = crate::track::generate_road::apply_fences(&net, &fences.polygons);
-            log(if fences.polygons.is_empty() {
-                "[road] 学校边界未提供；沿点位闭环重复补足距离，无法保证校内范围"
+            let filtered = crate::track::generate_road::apply_fences(&net, &planning_fences);
+            log(if planning_fences.is_empty() {
+                "[road] 校园范围未校验；沿道路闭环重复补足距离"
             } else {
                 "[road] 在学校围栏内沿点位闭环重复补足距离"
             });
@@ -262,6 +280,7 @@ pub fn run_full_flow_cancellable(
     control.begin_submit()?;
     log("[record] 提交跑步记录（已进入提交，不能撤回）…");
     let sp = SubmitParams {
+        allow_empty_points: point_response.allows_empty(),
         track,
         uid: sess.uid,
         selected_unid: sess.unid.parse().unwrap_or(0),

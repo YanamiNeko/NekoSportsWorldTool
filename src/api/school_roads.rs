@@ -100,22 +100,109 @@ fn parse(bytes: &[u8]) -> Result<RoadGraph, String> {
     Ok(net)
 }
 
-fn download(query: &str) -> Result<Vec<u8>, String> {
+const BACKUP_ENDPOINT: &str = "https://api.openstreetmap.org/api/0.6/map";
+
+// Convert only our bounded road queries; arbitrary/name queries must use
+// the dedicated school-search fallback rather than inventing an extent.
+fn official_bbox(query: &str) -> Result<String, String> {
+    let raw = query.split_once("way[highway](").and_then(|(_, tail)| tail.split_once(')').map(|v| v.0))
+        .ok_or("此查询需使用校名备用搜索")?;
+    let values: Vec<f64> = raw.split(',').map(str::parse).collect::<Result<_, _>>()
+        .map_err(|_| "无效路网范围")?;
+    if values.len() != 4 || values.iter().any(|v| !v.is_finite()) { return Err("无效路网范围".into()); }
+    let (s, w, n, e) = (values[0], values[1], values[2], values[3]);
+    if s < -85. || n > 85. || w < -180. || e > 180. || s >= n || w >= e
+        || (n-s)*(e-w) > 0.01 { return Err("备用地图仅支持小范围校园查询".into()); }
+    Ok(format!("{w},{s},{e},{n}"))
+}
+
+// Only transport/server failures are retryable; do not evade rate limits or
+// repeat invalid queries. Each endpoint is tried at most once, sequentially.
+fn with_backup<T>(mut fetch: impl FnMut(&str) -> Result<T, (String, bool)>) -> Result<T, String> {
+    match fetch(ENDPOINT) {
+        Ok(value) => Ok(value),
+        Err((primary, false)) => Err(primary),
+        Err((primary, true)) => {
+            eprintln!("[map-service] primary failed, switching to backup: {primary}");
+            fetch(BACKUP_ENDPOINT)
+                .map_err(|(backup, _)| format!("主地图服务：{primary}；备用地图服务：{backup}"))
+        },
+    }
+}
+
+pub(crate) fn download(query: &str) -> Result<Vec<u8>, String> {
     let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(45))
+        .timeout_connect(Duration::from_secs(8))
+        .timeout(Duration::from_secs(35))
         .build();
-    let response = agent
-        .post(ENDPOINT)
-        .set("User-Agent", "NekoSportsWorldTool/0.3.0 (school-road-map)")
-        .send_form(&[("data", query)])
-        .map_err(|e| format!("自动获取学校路网失败：{e}"))?;
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("读取学校路网失败：{e}"))?;
-    Ok(bytes)
+    with_backup(|endpoint| {
+        eprintln!("[map-service] requesting {endpoint}");
+        let request = if endpoint == BACKUP_ENDPOINT {
+            let bbox = official_bbox(query).map_err(|e| (e, false))?;
+            agent.get(endpoint).query("bbox", &bbox)
+                .set("User-Agent", "NekoSportsWorldTool/0.3.0 (school-road-map)").call()
+        } else {
+            agent.post(endpoint).set("User-Agent", "NekoSportsWorldTool/0.3.0 (school-road-map)")
+                .send_form(&[("data", query)])
+        };
+        let response = request
+            .map_err(|e| {
+                let retry = match &e {
+                    ureq::Error::Transport(_) => true,
+                    ureq::Error::Status(code, _) => matches!(code, 408 | 500 | 502 | 503 | 504),
+                };
+                (format!("自动获取地图失败：{e}"), retry)
+            })?;
+        let mut bytes = Vec::new();
+        response.into_reader().take(MAX_BYTES + 1).read_to_end(&mut bytes)
+            .map_err(|e| (format!("读取地图失败：{e}"), true))?;
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err(("地图响应超过 24 MiB".into(), false));
+        }
+        eprintln!("[map-service] received {} bytes from {endpoint}", bytes.len());
+        Ok(bytes)
+    })
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    #[test]
+    fn bounded_query_converts_coordinate_order_and_rejects_large_or_named_queries() {
+        assert_eq!(official_bbox("way[highway](23.20,112.57,23.22,112.59)").unwrap(), "112.57,23.2,112.59,23.22");
+        for query in ["way[name=test]", "way[highway](0,0,5,5)", "way[highway](NaN,0,1,1)", "way[highway](2,0,1,1)"] {
+            assert!(official_bbox(query).is_err());
+        }
+    }
+    #[test]
+    fn primary_success_never_calls_backup() {
+        let mut calls = vec![];
+        assert_eq!(with_backup(|endpoint| { calls.push(endpoint.to_owned()); Ok(42) }).unwrap(), 42);
+        assert_eq!(calls, vec![ENDPOINT]);
+    }
+    #[test]
+    fn timeout_uses_backup_once_for_the_same_query() {
+        let mut calls = vec![];
+        let result = with_backup(|endpoint| {
+            calls.push(endpoint.to_owned());
+            if endpoint == ENDPOINT { Err(("timeout".into(), true)) } else { Ok(b"<osm/>".to_vec()) }
+        });
+        assert_eq!(result.unwrap(), b"<osm/>");
+        assert_eq!(calls, vec![ENDPOINT, BACKUP_ENDPOINT]);
+    }
+    #[test]
+    fn both_failures_are_reported_without_retry_loop() {
+        let mut calls = 0;
+        let error = with_backup::<()>(|endpoint| { calls += 1; Err((endpoint.into(), true)) }).unwrap_err();
+        assert_eq!(calls, 2);
+        assert!(error.contains(ENDPOINT) && error.contains(BACKUP_ENDPOINT));
+    }
+    #[test]
+    fn rate_limit_does_not_switch_servers() {
+        let mut calls = 0;
+        assert!(with_backup::<()>(|_| { calls += 1; Err(("HTTP 429".into(), false)) }).is_err());
+        assert_eq!(calls, 1);
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

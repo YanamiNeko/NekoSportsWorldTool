@@ -92,6 +92,14 @@ impl MapState {
         )
     }
 
+    /// 屏幕坐标 → 世界坐标 (lat, lon)，`to_screen` 的逆运算。
+    pub fn to_world(&self, rect: Rect, pos: Pos2) -> (f64, f64) {
+        let c = rect.center();
+        let x = (pos.x - c.x - self.offset.x) as f64 / (self.scale as f64 * MET_PER_DEG_LNG);
+        let y = -(pos.y - c.y - self.offset.y) as f64 / (self.scale as f64 * MET_PER_DEG_LAT);
+        (self.center.0 + y, self.center.1 + x)
+    }
+
     /// 处理拖拽/缩放交互（需在分配好 rect 后调用）。
     pub fn interact(&mut self, ui: &egui::Ui, rect: Rect) {
         self.dragged = false;

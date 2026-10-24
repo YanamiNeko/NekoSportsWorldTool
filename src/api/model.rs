@@ -79,9 +79,19 @@ pub struct Config {
     /// OSM 路网文件路径（真实道路路由用）。
     #[serde(default)]
     pub osm_path: String,
-    /// 路线算法：legacy | road。
+    /// 路线算法：legacy | road | manual。
     #[serde(default = "default_route_mode")]
     pub route_mode: String,
+    /// 自定义轨迹标点（BD 系 lat, lon）；空表示尚未标点。
+    #[serde(default)]
+    pub custom_route: Vec<(f64, f64)>,
+    /// 自定义轨迹标点时是否吸附到最近道路。
+    #[serde(default = "default_custom_snap")]
+    pub custom_snap: bool,
+}
+
+fn default_custom_snap() -> bool {
+    true
 }
 
 fn default_route_mode() -> String {
@@ -126,6 +136,8 @@ impl Default for Config {
             update_check: default_update_check(),
             osm_path: String::new(),
             route_mode: default_route_mode(),
+            custom_route: Vec::new(),
+            custom_snap: default_custom_snap(),
         }
     }
 }
@@ -504,5 +516,30 @@ mod points_cache_tests {
             crate::location::Coordinate::new(38.9, 121.5, 0.0).unwrap(),
             0.0001
         ));
+    }
+}
+
+#[cfg(test)]
+mod custom_route_config_tests {
+    use super::*;
+
+    /// 自定义标点随 config.json 往返；旧配置缺字段时按「空标点 + 吸附开启」处理。
+    #[test]
+    fn custom_route_survives_config_roundtrip_and_legacy_defaults() {
+        let cfg = Config {
+            custom_route: vec![(38.9017, 121.5402), (38.9025, 121.5412)],
+            custom_snap: false,
+            route_mode: "manual".into(),
+            ..Config::default()
+        };
+        let text = serde_json::to_string(&cfg).unwrap();
+        let back: Config = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.custom_route, cfg.custom_route);
+        assert!(!back.custom_snap);
+        assert_eq!(back.route_mode, "manual");
+
+        let old: Config = serde_json::from_value(serde_json::json!({"dist_min": 1.0})).unwrap();
+        assert!(old.custom_route.is_empty());
+        assert!(old.custom_snap);
     }
 }

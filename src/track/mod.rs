@@ -191,6 +191,47 @@ mod tests {
         }
     }
 
+    /// 自定义轨迹：保持标点给定顺序（不做极角重排），仍过点且距离精确。
+    #[test]
+    fn test_build_ordered_keeps_given_order() {
+        // 故意给一个非凸、带折返的顺序：A→B→A→C（极角排序会打乱它）
+        let ordered = vec![
+            (38.901678, 121.540241),
+            (38.903400, 121.540241),
+            (38.901678, 121.540241),
+            (38.899900, 121.540241),
+        ];
+        let start = 1_788_958_186_123i64;
+        let track = super::generator::build_ordered(1800.0, 700, 9, start, &ordered);
+        assert!(
+            (track.totalDistance - 1800.0).abs() < 1.0,
+            "dist={}",
+            track.totalDistance
+        );
+        assert_eq!(track.totalTime, 700);
+        assert!(!track.locations.is_empty());
+        for pl in &ordered {
+            let min_m = track
+                .locations
+                .iter()
+                .map(|p| {
+                    (((p.gLat - pl.0) * MET_PER_DEG_LAT).powi(2)
+                        + ((p.gLng - pl.1) * MET_PER_DEG_LNG).powi(2))
+                    .sqrt()
+                })
+                .fold(f64::INFINITY, f64::min);
+            assert!(min_m < 1.0, "标点未经过: {min_m}m");
+        }
+    }
+
+    /// 标点不足 2 个：返回空轨迹而不是越界 panic，交由上层报错。
+    #[test]
+    fn test_build_ordered_too_few_points_is_empty() {
+        let track = super::generator::build_ordered(1000.0, 400, 1, 0, &[(38.9, 121.5)]);
+        assert!(track.locations.is_empty());
+        assert_eq!(track.totalDistance, 0.0);
+    }
+
     /// 十秒窗忠实反映最终采样（含停顿），不通过拉伸统计伪造有效配速。
     #[test]
     fn test_windows_match_final_track_across_seeds() {

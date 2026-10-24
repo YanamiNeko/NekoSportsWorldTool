@@ -15,6 +15,8 @@ const RAND_HOUR_LO: u32 = 7;
 const RAND_HOUR_HI: u32 = 20;
 /// flow.rs 提交时会给开始时间加 0-4s 抖动，随机模式抽样时预留，避免「开始 + 用时」越过当前时刻。
 const JITTER_MARGIN_MS: i64 = 5_000;
+/// 自定义标点吸附到最近道路的最大距离（米）；超出则保留原始标点。
+const SNAP_MAX_M: f64 = 80.0;
 
 /// 指定日期（days_ago 天前）的 7:00-20:00 内均匀抽样一个时刻，且不晚于 latest_ms。
 ///
@@ -89,6 +91,14 @@ pub struct RunPage {
     pub plan: Option<RunPlan>,
     /// 路线算法模式
     pub route_mode: RouteMode,
+    /// 自定义轨迹标点（BD 系 lat, lon；顺序即行进顺序）
+    pub custom_points: Vec<(f64, f64)>,
+    /// 自定义标点时是否吸附到最近道路
+    pub custom_snap: bool,
+    /// 标点编辑器提示/错误
+    pub custom_status: String,
+    /// 编辑器用：BD 对齐后的路网副本（按 network 指针缓存，避免每帧重算）
+    pub custom_net: Option<(usize, std::sync::Arc<route_planner::RoadGraph>)>,
     /// 地图视图状态
     pub map: MapState,
     /// 路网预览（真实道路路由）
@@ -414,14 +424,15 @@ impl App {
                 ui.label("路线算法：");
                 ui.selectable_value(&mut page.route_mode, RouteMode::Legacy, "经典打卡点环");
                 ui.selectable_value(&mut page.route_mode, RouteMode::Road, "真实道路路由");
+                ui.selectable_value(&mut page.route_mode, RouteMode::Manual, "自定义标点");
                 if page.route_mode == RouteMode::Road && self.network.is_none() {
                     ui.colored_label(theme::warn(), "（正在按学校获取，可到路网页查看）");
                 }
             });
         }
 
-        // 切换到真实道路路由时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
-        if self.run_page.route_mode == RouteMode::Road && prev_route != RouteMode::Road {
+        // 切换到道路/自定义模式时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
+        if self.run_page.route_mode.needs_network_route() && !prev_route.needs_network_route() {
             self.refresh_points();
         }
 
@@ -528,9 +539,16 @@ impl App {
     }
 
     fn draw_run_map(&mut self, ui: &mut egui::Ui) {
-        if self.run_page.route_mode != RouteMode::Road {
-            ui.label("经典模式仅按点位拟合，不包含建筑避让；需要沿道路行进时请选择真实道路模式。");
-            return;
+        match self.run_page.route_mode {
+            RouteMode::Legacy => {
+                ui.label("经典模式仅按点位拟合，不包含建筑避让；需要沿道路行进时请选择真实道路路由或自定义标点。");
+                return;
+            }
+            RouteMode::Manual => {
+                self.draw_custom_editor(ui);
+                return;
+            }
+            RouteMode::Road => {}
         }
         if ui
             .add_enabled(!self.osm_page.busy, egui::Button::new("刷新路线点位与围栏"))
@@ -565,26 +583,7 @@ impl App {
             return;
         };
 
-        let inputs = self
-            .run_page
-            .preview_inputs
-            .as_ref()
-            .filter(|input| {
-                self.osm_page.offline
-                    || (self
-                        .session
-                        .as_ref()
-                        .map(|s| s.uid == input.uid && s.unid == input.unid)
-                        .unwrap_or(false)
-                        && self
-                            .identity
-                            .anchor_coordinate()
-                            .map(|a| a == input.anchor)
-                            .unwrap_or(false)
-                        && (0..crate::api::model::POINTS_TTL_MS)
-                            .contains(&(crate::crypto::envelope::now_ms() - input.loaded_ms)))
-            })
-            .cloned();
+        let inputs = self.fresh_preview_inputs();
         let Some(inputs) = inputs else {
             self.run_page.preview = None;
             self.run_page.check = None;
@@ -860,6 +859,267 @@ impl App {
         self.run_page.map.interact(ui, canvas);
     }
 
+    /// 预览/围栏输入是否仍属于当前账号与定位，且在点位缓存有效期内。
+    fn fresh_preview_inputs(&self) -> Option<PreviewInputs> {
+        self.run_page
+            .preview_inputs
+            .as_ref()
+            .filter(|input| {
+                self.osm_page.offline
+                    || (self
+                        .session
+                        .as_ref()
+                        .map(|s| s.uid == input.uid && s.unid == input.unid)
+                        .unwrap_or(false)
+                        && self
+                            .identity
+                            .anchor_coordinate()
+                            .map(|a| a == input.anchor)
+                            .unwrap_or(false)
+                        && (0..crate::api::model::POINTS_TTL_MS)
+                            .contains(&(crate::crypto::envelope::now_ms() - input.loaded_ms)))
+            })
+            .cloned()
+    }
+
+    /// 路网在界面上是 WGS84 基准（与 OSM 页一致），而标点/围栏是 BD 系；
+    /// 编辑器必须与标点同一基准，故按 network 指针缓存一份 BD 对齐副本。
+    fn custom_aligned_network(&mut self) -> Option<std::sync::Arc<route_planner::RoadGraph>> {
+        let raw = self.network.clone()?;
+        let key = std::sync::Arc::as_ptr(&raw) as usize;
+        if let Some((cached, net)) = &self.run_page.custom_net {
+            if *cached == key {
+                return Some(net.clone());
+            }
+        }
+        let mut aligned = (*raw).clone();
+        crate::track::generate_road::align_network(&mut aligned);
+        let aligned = std::sync::Arc::new(aligned);
+        self.run_page.custom_net = Some((key, aligned.clone()));
+        Some(aligned)
+    }
+
+    /// 自定义轨迹编辑器：在地图上点击标点，标点顺序即行进顺序，首尾自动闭合。
+    ///
+    /// - 左键点击：追加一个标点（开启"吸附到道路"时投影到最近道路）
+    /// - 左键拖拽 / 滚轮：平移 / 缩放地图
+    /// - 右键点击：删除最近的标点
+    fn draw_custom_editor(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            "在地图上依次点击标点，顺序即行进顺序，首尾自动闭合。\
+             提交时若路网可用会沿真实道路路由，否则按标点连线（Catmull-Rom）。",
+        );
+        let mut changed = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.run_page.custom_snap, "吸附到道路");
+            if ui
+                .add_enabled(
+                    !self.run_page.custom_points.is_empty(),
+                    egui::Button::new("撤销上一点"),
+                )
+                .clicked()
+            {
+                self.run_page.custom_points.pop();
+                changed = true;
+            }
+            if ui
+                .add_enabled(
+                    !self.run_page.custom_points.is_empty(),
+                    egui::Button::new("清空标点"),
+                )
+                .clicked()
+            {
+                self.run_page.custom_points.clear();
+                changed = true;
+            }
+            let seed_points = self
+                .fresh_preview_inputs()
+                .map(|i| i.points)
+                .unwrap_or_default();
+            if ui
+                .add_enabled(!seed_points.is_empty(), egui::Button::new("用打卡点初始化"))
+                .clicked()
+            {
+                self.run_page.custom_points = seed_points;
+                changed = true;
+            }
+            if ui.button("适配视野").clicked() {
+                self.run_page.map_fitted = false;
+            }
+        });
+        if !self.run_page.custom_status.is_empty() {
+            ui.colored_label(theme::warn(), &self.run_page.custom_status);
+        }
+        let fences = self
+            .fresh_preview_inputs()
+            .map(|i| i.fences)
+            .unwrap_or_default();
+
+        ui.add_space(4.0);
+        let rect = ui.available_rect_before_wrap();
+        let (response, painter) = ui.allocate_painter(
+            egui::Vec2::new(rect.width().max(200.0), 280.0),
+            egui::Sense::click_and_drag(),
+        );
+        let canvas = response.rect;
+        painter.rect_filled(
+            canvas,
+            egui::Rounding::ZERO,
+            egui::Color32::from_rgb(250, 252, 251),
+        );
+
+        // 首次进入或点了"适配视野"：以标点/围栏为中心
+        if !self.run_page.map_fitted {
+            let mut bounds: Vec<(f64, f64)> = self.run_page.custom_points.clone();
+            for f in &fences {
+                bounds.extend(f.iter().copied());
+            }
+            if bounds.is_empty() {
+                if let Ok(anchor) = self.identity.anchor_coordinate() {
+                    bounds.push((anchor.latitude, anchor.longitude));
+                }
+            }
+            if !bounds.is_empty() {
+                self.run_page.map.fit(canvas, &bounds);
+            }
+            self.run_page.map_fitted = true;
+        }
+
+        if let Some(net) = self.custom_aligned_network() {
+            self.run_page.map.draw_network(&painter, canvas, &net);
+        }
+        let fence_c = egui::Color32::from_rgb(180, 118, 0);
+        for f in &fences {
+            self.run_page
+                .map
+                .draw_polygon(&painter, canvas, f, fence_c, 1.5);
+        }
+        // 标点连线（闭合）
+        if self.run_page.custom_points.len() >= 2 {
+            let mut closed = self.run_page.custom_points.clone();
+            closed.push(closed[0]);
+            self.run_page.map.draw_polyline(
+                &painter,
+                canvas,
+                &closed,
+                egui::Color32::from_rgb(30, 111, 216),
+                2.5,
+            );
+        }
+        for (i, &(lat, lon)) in self.run_page.custom_points.iter().enumerate() {
+            let color = if i == 0 {
+                egui::Color32::from_rgb(22, 160, 90)
+            } else {
+                egui::Color32::from_rgb(240, 180, 0)
+            };
+            self.run_page
+                .map
+                .draw_point(&painter, canvas, lat, lon, color, 5.0);
+            painter.text(
+                self.run_page.map.to_screen(canvas, lat, lon),
+                egui::Align2::LEFT_TOP,
+                (i + 1).to_string(),
+                egui::FontId::proportional(12.),
+                egui::Color32::from_rgb(40, 40, 40),
+            );
+        }
+
+        // 交互：先让地图处理拖拽/缩放，再处理点击（clicked 仅在未拖拽时触发）
+        self.run_page.map.interact(ui, canvas);
+        if response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let (lat, lon) = self.run_page.map.to_world(canvas, pos);
+                let snapped = if self.run_page.custom_snap {
+                    self.custom_aligned_network().and_then(|net| {
+                        crate::track::generate_road::snap_to_road(&net, lat, lon, SNAP_MAX_M)
+                    })
+                } else {
+                    None
+                };
+                let p = snapped.unwrap_or((lat, lon));
+                if !p.0.is_finite() || !p.1.is_finite() {
+                    self.run_page.custom_status = "坐标无效，未添加".into();
+                } else {
+                    self.run_page.custom_points.push(p);
+                    self.run_page.custom_status.clear();
+                    changed = true;
+                }
+            }
+        }
+        if response.secondary_clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let hit = nearest_custom_point(
+                    &self.run_page.map,
+                    canvas,
+                    pos,
+                    &self.run_page.custom_points,
+                );
+                if let Some(idx) = hit {
+                    self.run_page.custom_points.remove(idx);
+                    changed = true;
+                }
+            }
+        }
+
+        // 围栏外标点会在提交时被拦下，这里提前提示
+        if !fences.is_empty() && !self.run_page.custom_points.is_empty() {
+            let polys: Vec<Vec<route_planner::Coord>> = fences
+                .iter()
+                .map(|ring| {
+                    ring.iter()
+                        .map(|&(lat, lon)| route_planner::Coord::new(lon, lat))
+                        .collect()
+                })
+                .collect();
+            let outside = self
+                .run_page
+                .custom_points
+                .iter()
+                .filter(|&&(lat, lon)| {
+                    let p = route_planner::Coord::new(lon, lat);
+                    !polys
+                        .iter()
+                        .any(|poly| route_planner::point_in_polygon(poly, p))
+                })
+                .count();
+            if outside > 0 {
+                ui.colored_label(
+                    theme::warn(),
+                    format!("{outside} 个标点在学校围栏外，提交会被拒绝；请调整标点"),
+                );
+            }
+        }
+        let len = custom_route_length(&self.run_page.custom_points);
+        let plan_dist = self
+            .run_page
+            .plan
+            .as_ref()
+            .map(|p| p.dist)
+            .unwrap_or(0.0);
+        let loops = if len > 0.0 {
+            plan_dist * 1000.0 / len
+        } else {
+            0.0
+        };
+        if self.run_page.custom_points.len() >= 2 {
+            ui.label(format!(
+                "{} 个标点 · 单圈 {:.0} 米 · 本次方案 {:.2} km（约 {:.1} 圈）",
+                self.run_page.custom_points.len(),
+                len,
+                plan_dist,
+                loops
+            ));
+        } else {
+            ui.label("尚未标点：至少在地图上添加 2 个点（建议 3 个以上形成环线）。");
+        }
+        if changed {
+            // 标点变化即持久化，避免切换页面后丢失
+            self.config.custom_route = self.run_page.custom_points.clone();
+            self.config.custom_snap = self.run_page.custom_snap;
+            let _ = crate::api::model::save_config(&self.config);
+        }
+    }
+
     fn draw_run_base_map(&mut self, ui: &mut egui::Ui, net: &route_planner::RoadGraph) {
         ui.label("基础地图：道路与建筑已加载，路线尚未生成。可拖拽和滚轮缩放。");
         super::map::legend(
@@ -896,8 +1156,12 @@ impl App {
 
     fn start_run(&mut self) {
         if self.run_busy { return; }
-        if self.run_page.route_mode == RouteMode::Road && self.network.is_none() {
+        if self.run_page.route_mode.needs_network() && self.network.is_none() {
             self.status = "请先加载路网并刷新路线点位".into();
+            return;
+        }
+        if self.run_page.route_mode == RouteMode::Manual && self.run_page.custom_points.len() < 2 {
+            self.status = "自定义轨迹至少需要 2 个标点（在地图上点击添加）".into();
             return;
         }
         // 参数变更时补齐方案；提交直接使用预计算值
@@ -923,6 +1187,11 @@ impl App {
         let start_ms = plan.start_ms;
         let face_check = if page.face_check { 1 } else { 0 };
         let route_mode = page.route_mode;
+        let custom_points = if route_mode == RouteMode::Manual {
+            page.custom_points.clone()
+        } else {
+            Vec::new()
+        };
         self.config.dist_min = page.dist_min;
         self.config.dist_max = page.dist_max;
         self.config.pace_min = page.pace_min;
@@ -930,11 +1199,9 @@ impl App {
         self.config.face_check = page.face_check;
         self.config.manual_altitude = manual_altitude;
         self.config.manual_altitude_range = manual_altitude_range;
-        self.config.route_mode = if route_mode == RouteMode::Road {
-            "road".into()
-        } else {
-            "legacy".into()
-        };
+        self.config.route_mode = route_mode.as_str().to_string();
+        self.config.custom_route = page.custom_points.clone();
+        self.config.custom_snap = page.custom_snap;
         let _ = crate::api::model::save_config(&self.config);
 
         let identity = self.identity.clone();
@@ -962,6 +1229,7 @@ impl App {
                 manual_altitude_range,
                 seed,
                 route_mode,
+                custom_points_bd: custom_points,
             };
             let payload = match crate::api::flow::run_full_flow_cancellable(
                 &mut client,
@@ -1002,10 +1270,42 @@ impl App {
     }
 }
 
+/// 闭合标点环的长度（米）：与轨迹生成一致的等距投影。
+fn custom_route_length(pts: &[(f64, f64)]) -> f64 {
+    if pts.len() < 2 {
+        return 0.0;
+    }
+    let mut s = 0.0;
+    for i in 0..pts.len() {
+        let a = pts[i];
+        let b = pts[(i + 1) % pts.len()];
+        let dy = (b.0 - a.0) * crate::track::geom::MET_PER_DEG_LAT;
+        let dx = (b.1 - a.1) * crate::track::geom::MET_PER_DEG_LNG * a.0.to_radians().cos();
+        s += dx.hypot(dy);
+    }
+    s
+}
+
+/// 屏幕上离 `pos` 最近的标点（12px 内），用于右键删除。
+fn nearest_custom_point(
+    map: &MapState,
+    canvas: egui::Rect,
+    pos: egui::Pos2,
+    pts: &[(f64, f64)],
+) -> Option<usize> {
+    let mut best: Option<(f32, usize)> = None;
+    for (i, &(lat, lon)) in pts.iter().enumerate() {
+        let d = map.to_screen(canvas, lat, lon).distance(pos);
+        if d <= 12.0 && best.map(|(bd, _)| d < bd).unwrap_or(true) {
+            best = Some((d, i));
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     /// 一份参数合理的页面状态（配速 6:00/km，距离 2 km 附近）。
     fn page(start_mode: usize, days_ago: i64) -> RunPage {
         RunPage {
@@ -1395,5 +1695,31 @@ mod tests {
             !p.random_window_ok(),
             "今天 03:00 不应被判为在 7:00-20:00 窗口内"
         );
+    }
+}
+
+#[cfg(test)]
+mod custom_route_tests {
+    use super::custom_route_length;
+
+    /// 闭合环长度 = 首尾闭合的四条边之和（等距投影，经度按纬度余弦校正）。
+    #[test]
+    fn closed_loop_length_matches_hand_computed_perimeter() {
+        // 0.001° 经度 ≈ 86.6×cos(38.9°) ≈ 67.4m；0.001° 纬度 ≈ 111.1m
+        let pts = vec![
+            (38.900, 121.500),
+            (38.900, 121.501),
+            (38.901, 121.501),
+            (38.901, 121.500),
+        ];
+        let len = custom_route_length(&pts);
+        assert!((len - 357.1).abs() < 5.0, "len={len}");
+    }
+
+    /// 标点不足 2 个时长度为 0（不做除零/索引越界）。
+    #[test]
+    fn fewer_than_two_points_is_zero() {
+        assert_eq!(custom_route_length(&[]), 0.0);
+        assert_eq!(custom_route_length(&[(38.9, 121.5)]), 0.0);
     }
 }

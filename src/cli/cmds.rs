@@ -80,6 +80,36 @@ fn cmd_logout() -> i32 {
     0
 }
 
+/// 解析 `--points "lat,lon;lat,lon;..."`（分号/竖线/换行分隔，顺序即路线顺序）。
+fn parse_points_spec(spec: &str) -> Result<Vec<(f64, f64)>, String> {
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    for part in spec.split([';', '|', '\n']) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (lat, lon) = part
+            .split_once(',')
+            .ok_or_else(|| format!("标点格式应为 lat,lon：{part}"))?;
+        let lat: f64 = lat
+            .trim()
+            .parse()
+            .map_err(|_| format!("纬度无效：{}", lat.trim()))?;
+        let lon: f64 = lon
+            .trim()
+            .parse()
+            .map_err(|_| format!("经度无效：{}", lon.trim()))?;
+        if !lat.is_finite() || !lon.is_finite() || lat.abs() > 85.0 || lon.abs() > 180.0 {
+            return Err(format!("坐标越界：{lat},{lon}"));
+        }
+        out.push((lat, lon));
+    }
+    if out.len() < 2 {
+        return Err("至少需要 2 个标点".into());
+    }
+    Ok(out)
+}
+
 fn cmd_run(rest: &[&str]) -> i32 {
     let flags = parse_flags(rest);
     let mut client = match make_client() {
@@ -123,9 +153,31 @@ fn cmd_run(rest: &[&str]) -> i32 {
         seed
     };
     let cfg = model::load_config();
-    let route_mode = crate::track::generate_road::RouteMode::from_str(
-        get(&flags, "route").unwrap_or(&cfg.route_mode),
-    );
+    // --points "lat,lon;lat,lon" 直接给出自定义轨迹标点（隐含 manual 模式）
+    let cli_points = match get(&flags, "points") {
+        Some(spec) if !spec.trim().is_empty() => match parse_points_spec(spec) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("--points {e}");
+                return 1;
+            }
+        },
+        _ => Vec::new(),
+    };
+    let explicit_route = get(&flags, "route");
+    let route_mode = if !cli_points.is_empty() && explicit_route.is_none() {
+        crate::track::generate_road::RouteMode::Manual
+    } else {
+        crate::track::generate_road::RouteMode::from_str(explicit_route.unwrap_or(&cfg.route_mode))
+    };
+    if !cli_points.is_empty() && route_mode != crate::track::generate_road::RouteMode::Manual {
+        println!("提示：--points 仅在 manual 路线模式下生效，当前 --route 会忽略标点");
+    }
+    let custom_points_bd = if cli_points.is_empty() {
+        cfg.custom_route.clone()
+    } else {
+        cli_points
+    };
 
     let dist = if dist_km > 0.0 {
         dist_km as f64 * 1000.0
@@ -177,6 +229,7 @@ fn cmd_run(rest: &[&str]) -> i32 {
         manual_altitude_range,
         seed,
         route_mode,
+        custom_points_bd,
     };
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {
@@ -790,5 +843,33 @@ fn cmd_update(rest: &[&str]) -> i32 {
                 1
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod points_spec_tests {
+    use super::parse_points_spec;
+
+    #[test]
+    fn parses_semicolon_separated_points_in_order() {
+        let pts = parse_points_spec("38.9017,121.5402; 38.9034,121.5402 |38.8999,121.5402")
+            .expect("应解析成功");
+        assert_eq!(
+            pts,
+            vec![
+                (38.9017, 121.5402),
+                (38.9034, 121.5402),
+                (38.8999, 121.5402)
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_or_short_specs() {
+        assert!(parse_points_spec("38.9,121.5").is_err()); // 只有 1 个点
+        assert!(parse_points_spec("38.9;121.5;38.8,121.4").is_err()); // 缺逗号
+        assert!(parse_points_spec("abc,121.5;38.9,121.4").is_err());
+        assert!(parse_points_spec("99.0,121.5;38.9,121.4").is_err()); // 纬度越界
+        assert!(parse_points_spec("38.9,200.0;38.8,121.4").is_err()); // 经度越界
     }
 }

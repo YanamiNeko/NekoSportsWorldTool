@@ -5,7 +5,6 @@ use super::{
     SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER,
 };
 use crate::api::model;
-use crate::track::generate_road::RouteMode;
 use crate::update::ReleaseInfo;
 
 impl App {
@@ -89,7 +88,7 @@ impl App {
     }
 
     pub(crate) fn refresh_school_route(&mut self, force: bool) {
-        if self.run_page.route_mode != RouteMode::Road {
+        if !self.run_page.route_mode.needs_network_route() {
             return;
         }
         let Some(session) = self.session.clone() else {

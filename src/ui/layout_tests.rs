@@ -930,3 +930,66 @@ fn run_page_distinguishes_active_refresh_from_idle_missing_data() {
         "本地地图已加载；请设置定位锚点，再刷新路线点位与围栏。",
     );
 }
+
+/// 自定义标点编辑器：模式切换后必须画出标点、动作按钮与圈长信息。
+#[test]
+fn manual_route_editor_is_reachable_and_shows_points() {
+    fn any_text_contains(output: &egui::FullOutput, needle: &str) -> bool {
+        output.shapes.iter().any(|clipped| {
+            matches!(&clipped.shape, egui::Shape::Text(t) if t.galley.text().contains(needle))
+        })
+    }
+    let ctx = egui::Context::default();
+    let mut app = App::from_state(
+        &ctx,
+        HeaderIdentity::default(),
+        Session::default(),
+        Config::default(),
+    );
+    app.tab = 0;
+    app.run_page.route_mode = crate::track::generate_road::RouteMode::Manual;
+    app.run_page.custom_snap = false;
+    app.run_page.custom_points = vec![
+        (38.901678, 121.540241),
+        (38.902564, 121.541233),
+        (38.900921, 121.542310),
+    ];
+
+    let (w, h) = (1024.0, 900.0);
+    let mut found_points = false;
+    let mut found_undo = false;
+    let mut found_snap = false;
+    for _ in 0..40 {
+        let output = frame(&mut app, &ctx, w, h, vec![]);
+        found_points |= any_text_contains(&output, "个标点");
+        found_undo |= any_text_contains(&output, "撤销上一点");
+        found_snap |= any_text_contains(&output, "吸附到道路");
+        if found_points && found_undo && found_snap {
+            break;
+        }
+        frame(
+            &mut app,
+            &ctx,
+            w,
+            h,
+            vec![
+                Event::PointerMoved(Pos2::new(w / 2.0, h - 70.0)),
+                Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(0.0, -120.0),
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+    }
+    assert!(found_snap, "缺少「吸附到道路」开关");
+    assert!(found_undo, "缺少「撤销上一点」按钮");
+    assert!(found_points, "缺少标点计数/圈长信息");
+    // 逆运算自洽：屏幕→世界→屏幕回到原点附近
+    let map = &app.run_page.map;
+    let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0));
+    let probe = Pos2::new(210.0, 140.0);
+    let (lat, lon) = map.to_world(rect, probe);
+    let back = map.to_screen(rect, lat, lon);
+    assert!((back - probe).length() < 0.01, "地图投影不可逆: {back:?}");
+}

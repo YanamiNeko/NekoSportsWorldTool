@@ -7,8 +7,8 @@
 #![allow(non_snake_case)]
 
 use super::geom::{
-    fmt_gain_time, make_point_ring, ring_point_at, round_to, to_bd, Rng, MET_PER_DEG_LAT,
-    MET_PER_DEG_LNG,
+    fmt_gain_time, make_point_ring, make_point_ring_ordered, ring_point_at, round_to, to_bd, Rng,
+    MET_PER_DEG_LAT, MET_PER_DEG_LNG,
 };
 use super::model::{GenPoint, Track};
 use super::postfix::apply_post_fixes;
@@ -39,7 +39,7 @@ fn fit_speeds(w: &mut [f64], dts: &[f64], target: f64) {
     }
 }
 
-/// 轨迹生成主入口。points_bd 为 BD 系打卡点。
+/// 轨迹生成主入口（经典模式）。points_bd 为 BD 系打卡点，按极角重排后拟合闭环。
 pub fn build(
     dist: f64,
     dur: i64,
@@ -48,9 +48,52 @@ pub fn build(
     start_ms: i64,
     points_bd: &[(f64, f64)],
 ) -> Track {
+    build_impl(dist, dur, seed, start_ms, points_bd, false)
+}
+
+/// 自定义轨迹入口：严格保持 points_bd 的标点顺序（往返、折返、8 字等非凸路线）。
+pub fn build_ordered(
+    dist: f64,
+    dur: i64,
+    seed: u64,
+    start_ms: i64,
+    points_bd: &[(f64, f64)],
+) -> Track {
+    build_impl(dist, dur, seed, start_ms, points_bd, true)
+}
+
+fn build_impl(
+    dist: f64,
+    dur: i64,
+    seed: u64,
+    start_ms: i64,
+    points_bd: &[(f64, f64)],
+    ordered: bool,
+) -> Track {
     let mut rng = Rng::new(seed);
     let dur_f = dur as f64;
-    let (dense, arcs, pc) = make_point_ring(points_bd);
+    let (dense, arcs, pc) = if ordered {
+        make_point_ring_ordered(points_bd)
+    } else {
+        make_point_ring(points_bd)
+    };
+    if dense.is_empty() {
+        // 标点不足（<2）：返回空轨迹，由上层校验报错，避免索引越界。
+        return Track {
+            totalTime: dur,
+            totalDistance: 0.0,
+            validDistance: 0.0,
+            validTime: 0,
+            startTime: start_ms,
+            startLatitude: 0.0,
+            startLongitude: 0.0,
+            locations: Vec::new(),
+            totalSteps: 0,
+            speedPerTenSec: Vec::new(),
+            stepsPerTenSec: Vec::new(),
+            segments: Vec::new(),
+        };
+    }
     let (c_lat, c_lng) = pc;
     let direction: f64 = rng.choice(&[1.0, -1.0]);
     let s0 = rng.uniform(0.0, *arcs.last().unwrap_or(&400.0));

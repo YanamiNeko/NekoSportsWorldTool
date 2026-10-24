@@ -16,6 +16,7 @@
 - **AI 运动**：任务 / 自由练习双模式，批量补签（前 60 天 × 多项目）
 - **数据**：学期完成度、违规自查、排行榜（个人/班级/院系 × 日/月、室内榜、历史榜）、个人主页
 - **登录**：支持人机验证自动通过
+- **自定义轨迹**：在地图上点选标点即定义路线，标点顺序即行进顺序（可吸附到真实道路，也可按标点连线）
 - **自动更新**：桌面端检查/下载/自替换并重启（GitHub Release 直连，无镜像）；Android 下载 APK 调起系统安装器；启动检查模式可选（静默/询问/关闭）
 
 ## 界面
@@ -37,6 +38,7 @@
 ```text
 NekoSportsWorldTool login --user <手机号> --pass <密码> --remember
 NekoSportsWorldTool run                                  # 一键跑步（--altitude 17.2 固定海拔，或 11.6-22.8 映射到区间）
+NekoSportsWorldTool run --points "38.9017,121.5402;38.9025,121.5412"  # 自定义轨迹（标点顺序即路线）
 NekoSportsWorldTool ai --sport 2 --score 26000           # AI 运动
 NekoSportsWorldTool rank main --type 1 --sort 1          # 排行榜
 NekoSportsWorldTool update [--check]           # 自动更新（--check 仅检查不下载）

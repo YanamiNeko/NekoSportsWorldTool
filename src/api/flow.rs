@@ -13,7 +13,7 @@ use crate::track::generator::build as gen_track;
 use crate::track::wire::{build_obs_object, five_point_wrapper, obs_keys};
 use serde_json::Value;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct RunParams {
     /// 距离（米）与时长（秒）已由 UI 参数解析。
     pub dist: f64,
@@ -28,6 +28,8 @@ pub struct RunParams {
     pub seed: u64,
     /// 路线算法模式。
     pub route_mode: RouteMode,
+    /// 自定义轨迹标点（BD 系 lat, lon，按标点顺序）；仅 Manual 模式使用。
+    pub custom_points_bd: Vec<(f64, f64)>,
 }
 
 pub struct RunOutcome {
@@ -128,7 +130,7 @@ pub fn run_full_flow_cancellable(
     log("[road] 获取并核对当前校区围栏…");
     let fences = super::fence::fetch_geo_fence_response(client)
         .map_err(|e| format!("无法确认本次围栏：{e}"))?;
-    let fences = if params.route_mode == RouteMode::Road && !fences.polygons.is_empty() {
+    let fences = if params.route_mode.needs_network_route() && !fences.polygons.is_empty() {
         super::campus::selected_response(
             fences,
             super::model::load_config().school_campus.as_ref(),
@@ -171,7 +173,7 @@ pub fn run_full_flow_cancellable(
         route_pts.len()
     ));
     // Keep the user's location stable so preview and submission refer to the same campus.
-    let mut params = *params;
+    let mut params = params.clone();
     params.dur = crate::track::generate_road::effective_duration(params.dist, params.dur);
     control.check()?;
     log(&format!(
@@ -183,6 +185,69 @@ pub fn run_full_flow_cancellable(
     // 随机 0-4 秒偏移（终端上报的 flag 与首点差 <5s），轨迹/提交/OBS/五点统一使用
     let start_ms = params.start_ms + (rand::random::<u32>() % 5) as i64 * 1000;
     let mut track = match params.route_mode {
+        RouteMode::Manual => {
+            // 自定义轨迹：标点顺序即路线顺序；有路网时沿道路，无路网时退化为标点连线。
+            let custom = params.custom_points_bd.clone();
+            if custom.len() < 2 {
+                return Err("自定义轨迹至少需要 2 个标点（地图上点击添加）".into());
+            }
+            log(&format!(
+                "[track] 自定义轨迹 {} 个标点，按序串联…",
+                custom.len()
+            ));
+            let mut routed: Option<crate::track::model::Track> = None;
+            if fences.polygons.is_empty() {
+                log("[track] 学校围栏未提供，改用标点连线（无法确认校内范围）");
+            } else if let Err(e) = super::school_roads::validate_fences(&fences.polygons) {
+                log(&format!("[track] 围栏无效（{e}），改用标点连线"));
+            } else {
+                let config = super::model::load_config();
+                match super::school_roads::load_for_route_cancellable(
+                    &config.osm_path,
+                    &sess.unid,
+                    &fences.polygons,
+                    &custom,
+                    false,
+                    control,
+                    log,
+                ) {
+                    Ok(mut net) => {
+                        crate::track::generate_road::align_network(&mut net);
+                        let filtered =
+                            crate::track::generate_road::apply_fences(&net, &fences.polygons);
+                        match crate::track::generate_road::build_road(
+                            params.dist,
+                            params.dur,
+                            params.seed,
+                            start_ms,
+                            &custom,
+                            &[],
+                            &filtered,
+                        ) {
+                            Ok(t) => routed = Some(t),
+                            Err(e) => log(&format!("[track] 道路路由失败：{e}")),
+                        }
+                    }
+                    Err(e) => log(&format!("[track] 路网不可用：{e}")),
+                }
+            }
+            match routed {
+                Some(t) => {
+                    log("√ [track] 自定义轨迹已沿真实道路路由");
+                    t
+                }
+                None => {
+                    log("[track] 改用标点连线（Catmull-Rom，保持标点顺序）");
+                    crate::track::generator::build_ordered(
+                        params.dist,
+                        params.dur,
+                        params.seed,
+                        start_ms,
+                        &custom,
+                    )
+                }
+            }
+        }
         RouteMode::Road => {
             if !fences.polygons.is_empty() {
                 super::school_roads::validate_fences(&fences.polygons)?;

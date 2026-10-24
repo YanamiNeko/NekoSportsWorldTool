@@ -63,16 +63,38 @@ impl Rng {
 
 /// 打卡点 BD 系 (lat, lng) → 闭合平面路径 + 弧长表 + 中心。
 pub type PointRing = (Vec<(f64, f64)>, Vec<f64>, (f64, f64));
+
+fn ring_center(bd_points: &[(f64, f64)]) -> (f64, f64) {
+    let n = bd_points.len().max(1) as f64;
+    (
+        bd_points.iter().map(|q| q.0).sum::<f64>() / n,
+        bd_points.iter().map(|q| q.1).sum::<f64>() / n,
+    )
+}
+
+/// 打卡点按极角排序后拟合闭环（经典模式：环线不自交）。
 pub fn make_point_ring(bd_points: &[(f64, f64)]) -> PointRing {
-    let n = bd_points.len();
-    let cx = bd_points.iter().map(|q| q.0).sum::<f64>() / n as f64;
-    let cy = bd_points.iter().map(|q| q.1).sum::<f64>() / n as f64;
+    let (cx, cy) = ring_center(bd_points);
     let mut ordered = bd_points.to_vec();
     ordered.sort_by(|a, b| {
         let ka = (a.0 - cx).atan2(a.1 - cy);
         let kb = (b.0 - cx).atan2(b.1 - cy);
         ka.partial_cmp(&kb).unwrap()
     });
+    ring_from_ordered(&ordered, cx, cy)
+}
+
+/// 自定义轨迹：保持用户标点顺序，不做极角重排（可表达往返、折返等非凸路线）。
+pub fn make_point_ring_ordered(bd_points: &[(f64, f64)]) -> PointRing {
+    let (cx, cy) = ring_center(bd_points);
+    ring_from_ordered(bd_points, cx, cy)
+}
+
+fn ring_from_ordered(ordered: &[(f64, f64)], cx: f64, cy: f64) -> PointRing {
+    let n = ordered.len();
+    if n < 2 {
+        return (Vec::new(), vec![0.0], (cx, cy));
+    }
     let plane: Vec<(f64, f64)> = ordered
         .iter()
         .map(|q| ((q.1 - cy) * MET_PER_DEG_LNG, (q.0 - cx) * MET_PER_DEG_LAT))

@@ -20,7 +20,7 @@ use route_planner::{
     KinParams, RoadGraph, Route, RouteOptions, Sdf,
 };
 
-/// 路线算法模式（二选一）。
+/// 路线算法模式（三选一）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum RouteMode {
     /// 经典打卡点环（Catmull-Rom）。
@@ -28,15 +28,51 @@ pub enum RouteMode {
     Legacy,
     /// 真实道路拓扑路由。
     Road,
+    /// 自定义轨迹：用户在地图上标点，按顺序串联（有路网时沿道路，无路网时标点连线）。
+    Manual,
 }
 
 impl RouteMode {
     pub fn from_str(s: &str) -> Self {
         match s {
             "road" => RouteMode::Road,
+            "manual" | "custom" => RouteMode::Manual,
             _ => RouteMode::Legacy,
         }
     }
+
+    /// 持久化用的字符串（写回 config.json）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RouteMode::Road => "road",
+            RouteMode::Manual => "manual",
+            RouteMode::Legacy => "legacy",
+        }
+    }
+
+    /// 该模式是否必须先加载路网才能提交（Manual 只是"尽量"沿道路）。
+    pub fn needs_network(self) -> bool {
+        matches!(self, RouteMode::Road)
+    }
+
+    /// 该模式是否会调用路网路由（影响围栏/校区选择）。
+    pub fn needs_network_route(self) -> bool {
+        !matches!(self, RouteMode::Legacy)
+    }
+}
+
+/// 把地图上的点吸附到最近道路（米制投影后取最近边）。
+/// 超过 `max_m` 视为离路太远，返回 None（调用方保留原始标点）。
+pub fn snap_to_road(net: &RoadGraph, lat: f64, lon: f64, max_m: f64) -> Option<(f64, f64)> {
+    let p = net.to_m(Coord::new(lon, lat));
+    let (_, _, proj, dist_m) = net.nearest_edge(p)?;
+    if dist_m > max_m {
+        return None;
+    }
+    Some((
+        net.anchor.lat + proj[1] / MET_PER_DEG_LAT,
+        net.anchor.lon + proj[0] / net.meter_per_lng,
+    ))
 }
 
 /// 从本地文件加载 OSM 路网。
@@ -596,6 +632,74 @@ pub fn build_road(
 #[cfg(test)]
 mod preview_tests {
     use super::*;
+
+    /// 自定义模式的路由模式解析 / 持久化字符串 / 路网依赖。
+    #[test]
+    fn route_mode_manual_roundtrip_and_network_needs() {
+        for text in ["manual", "custom"] {
+            let mode = RouteMode::from_str(text);
+            assert_eq!(mode, RouteMode::Manual);
+            assert_eq!(mode.as_str(), "manual");
+        }
+        assert_eq!(RouteMode::from_str("road"), RouteMode::Road);
+        assert_eq!(RouteMode::from_str("legacy"), RouteMode::Legacy);
+        assert_eq!(RouteMode::from_str("其它"), RouteMode::Legacy);
+        // 只有 Road 强制要求预先加载路网；Manual 只是"尽量"沿道路
+        assert!(RouteMode::Road.needs_network());
+        assert!(!RouteMode::Manual.needs_network());
+        assert!(RouteMode::Manual.needs_network_route());
+        assert!(RouteMode::Road.needs_network_route());
+        assert!(!RouteMode::Legacy.needs_network_route());
+    }
+
+    /// 空路网 / 离路太远时不吸附（返回 None，调用方保留原始标点）。
+    #[test]
+    fn snap_to_road_returns_none_without_edges() {
+        let mut net = RoadGraph::new();
+        net.compute_anchor();
+        net.rebuild_index();
+        assert!(snap_to_road(&net, 38.9, 121.5, 80.0).is_none());
+    }
+
+    /// 网格路网上的点击应被投影到最近道路（误差在道路半宽内）。
+    #[test]
+    fn snap_to_road_projects_click_onto_nearby_edge() {
+        let mut net = RoadGraph::new();
+        for i in 0..3 {
+            let lat = 39.9 + i as f64 * 0.001;
+            for j in 0..3 {
+                let lon = 116.4 + j as f64 * 0.001;
+                net.add_node(Coord::new(lon, lat));
+            }
+        }
+        // 3x3 网格全连接（横竖各两段）
+        for i in 0..3u64 {
+            for j in 0..2u64 {
+                let a = (i * 3 + j) as usize;
+                let b = (i * 3 + j + 1) as usize;
+                let ids: Vec<_> = net.graph.node_indices().collect();
+                let data = route_planner::graph::EdgeData {
+                    way_id: 1,
+                    oneway: false,
+                    highway: "residential".into(),
+                    maxspeed_kmh: None,
+                    length_m: 111.0,
+                };
+                net.add_edge(ids[a], ids[b], data.clone());
+                net.add_edge(ids[b], ids[a], data);
+            }
+        }
+        net.compute_anchor();
+        net.rebuild_index();
+        // 点击点偏离水平道路约 5.5m（0.00005° 纬度 ≈ 5.6m）
+        let (lat, lon) = snap_to_road(&net, 39.90005, 116.4005, 80.0).expect("应吸附到道路");
+        assert!(
+            (lat - 39.9).abs() < 0.00005 + 1e-9,
+            "吸附后纬度应回到道路：{lat}"
+        );
+        assert!((lon - 116.4005).abs() < 1e-6, "经度应保持投影位置：{lon}");
+    }
+
     #[test]
     fn preview_and_generation_share_required_points_options_and_seed() {
         let mut net = RoadGraph::new();
